@@ -46,25 +46,58 @@ def cmd_roundtrip(args):
 
 
 def find_usermap(path: str):
-    """Return (map name, [fastfiles in merge priority order], [iwd files]) for a PC usermap folder or .ff."""
+    """Locate the fastfiles of a PC usermap.
+
+    Returns (map name, {role: path}, [iwd files]) where role is 'map', 'mod', 'patch' or 'load'.
+    """
     if os.path.isfile(path):
         folder = os.path.dirname(os.path.abspath(path))
         name = os.path.splitext(os.path.basename(path))[0]
-        files = [path]
-    else:
-        folder = path
-        ffs = [f for f in os.listdir(folder) if f.lower().endswith(".ff")]
-        base = [f for f in ffs if not f.lower().endswith(("_load.ff", "_patch.ff")) and f.lower() != "mod.ff"]
-        if len(base) != 1:
-            raise SystemExit(f"{folder}: expected exactly one map fastfile, found {base}")
-        name = os.path.splitext(base[0])[0]
-        files = [os.path.join(folder, base[0])]
+        return name, {"map": path}, sorted(os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(".iwd"))
+
+    folder = path
+    ffs = {f.lower(): os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(".ff")}
+    base = [f for f in ffs if not f.endswith(("_load.ff", "_patch.ff")) and f != "mod.ff"]
+    if len(base) != 1:
+        raise SystemExit(f"{folder}: expected exactly one map fastfile, found {sorted(base)}")
+    name = os.path.splitext(os.path.basename(ffs[base[0]]))[0]
+    files = {"map": ffs[base[0]]}
+    for role, fname in (("mod", "mod.ff"), ("patch", f"{name.lower()}_patch.ff"), ("load", f"{name.lower()}_load.ff")):
+        if fname in ffs:
+            files[role] = ffs[fname]
     iwds = sorted(os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(".iwd"))
     return name, files, iwds
 
 
+def convert_fastfile(path: str, options):
+    from .convert import ZoneConverter
+
+    start = time.time()
+    endian, _, data = read_fastfile(path)
+    if endian != "<":
+        raise SystemExit(f"{path}: not a PC fastfile")
+    zone = Reader(pc(), data).load()
+    print(f"{os.path.basename(path)}: {len(zone.assets)} assets")
+    converter = ZoneConverter(zone, pc(), x360(), options)
+    result = converter.convert()
+    stats = converter.stats
+    print(f"  converted:  {dict(sorted(stats.converted.items()))}")
+    if stats.referenced:
+        print(f"  referenced: {dict(sorted(stats.referenced.items()))}")
+    print(f"  textures:   {stats.texture_bytes / 1048576:.1f} MiB ({time.time() - start:.1f}s)")
+    return result
+
+
+def write_zone(zone, target: str):
+    out = Writer(x360()).write(zone)
+    write_fastfile(target, ">", out)
+    blocks = ", ".join(f"{n.split('_BLOCK_')[1].lower()} {s / 1048576:.1f}" for n, s in zip(BLOCK_NAMES, Reader(x360(), out).load().block_sizes) if s)
+    print(f"wrote {target} ({os.path.getsize(target) / 1048576:.1f} MiB compressed; memory MiB: {blocks})")
+
+
 def cmd_convert(args):
-    from .convert import ConvertOptions, ZoneConverter
+    from .convert import ConvertOptions
+    from .merge import merge_zones
 
     name, files, iwds = find_usermap(args.input)
     out_dir = os.path.join(args.output, "_codxe", "usermaps", name)
@@ -91,23 +124,16 @@ def cmd_convert(args):
                 f"{stats['input_bytes'] / 1048576:.1f} MiB -> {stats['output_bytes'] / 1048576:.1f} MiB"
             )
 
-    for path in files:
-        start = time.time()
-        endian, _, data = read_fastfile(path)
-        if endian != "<":
-            raise SystemExit(f"{path}: not a PC fastfile")
-        zone = Reader(pc(), data).load()
-        print(f"{path}: {len(zone.assets)} assets")
-        converter = ZoneConverter(zone, pc(), x360(), options)
-        result = converter.convert()
-        out = Writer(x360()).write(result)
-        target = os.path.join(out_dir, os.path.basename(path))
-        write_fastfile(target, ">", out)
-        stats = converter.stats
-        print(f"  converted:  {dict(stats.converted)}")
-        print(f"  referenced: {dict(stats.referenced)}")
-        print(f"  textures:   {stats.texture_bytes / 1048576:.1f} MiB")
-        print(f"  wrote {target} ({os.path.getsize(target):,} bytes) in {time.time() - start:.1f}s")
+    # The console has no mod.ff: the mod's assets are merged into the map zone.
+    zones = [convert_fastfile(files["map"], options)]
+    if "mod" in files and not args.no_mod:
+        zones.append(convert_fastfile(files["mod"], options))
+    main_zone = zones[0] if len(zones) == 1 else merge_zones(x360(), zones)
+    write_zone(main_zone, os.path.join(out_dir, f"{name}.ff"))
+
+    for role in ("patch", "load"):
+        if role in files and not (role == "load" and args.no_load):
+            write_zone(convert_fastfile(files[role], options), os.path.join(out_dir, os.path.basename(files[role])))
     return 0
 
 
@@ -135,6 +161,8 @@ def main(argv=None):
     p.add_argument("--stream-rate", type=int, default=0, help="resample streamed sounds above this rate (e.g. 32000)")
     p.add_argument("--mono-streams", action="store_true", help="downmix streamed sounds to mono")
     p.add_argument("--no-sounds", action="store_true", help="do not convert streamed sounds")
+    p.add_argument("--no-mod", action="store_true", help="do not merge the usermap's mod.ff into the map fastfile")
+    p.add_argument("--no-load", action="store_true", help="do not convert <map>_load.ff")
     p.add_argument("--no-mips", action="store_true", help="drop all mip levels (saves ~25%% memory, textures shimmer at distance)")
     p.add_argument("--allow-unverified", action="store_true", help="also convert assets whose console layout is not verified (may crash the game)")
     p.set_defaults(func=cmd_convert)
