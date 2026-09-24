@@ -2,8 +2,8 @@
 	Forge: spawn and move props. The model list is discovered at runtime from script_models the
 	map already placed plus weapon world models, so every entry is guaranteed to be loaded.
 
-	SpawnCollision() (CoD Xe r347+) is deliberately not used: calling a function the running
-	CoD Xe build does not register is a link error that stops the whole level from loading.
+	"Solid" spawns use SpawnCollision(), a GSC function CoD Xe r347+ adds to T4 singleplayer.
+	On an older CoD Xe build the name is unknown and every level fails to load.
 */
 
 #include maps\_utility;
@@ -45,9 +45,14 @@ spawn_model(model)
 	view = self getPlayerAngles();
 	angles = (0, view[1], 0);
 
-	ent = spawn("script_model", pos);
-	ent setModel(model);
-	ent.angles = angles;
+	if (self mm_get("forge_solid", "self", false))
+		ent = spawnCollision(model, "mm_forge", pos, angles);
+	else
+	{
+		ent = spawn("script_model", pos);
+		ent setModel(model);
+		ent.angles = angles;
+	}
 
 	self forge_track(ent);
 	self.mm_forge_model = model;
@@ -56,6 +61,11 @@ spawn_model(model)
 		ent physicsLaunch(ent.origin, (0, 0, -10));
 
 	self iprintln("Spawned ^3" + model);
+}
+
+solid_set(on)
+{
+	self mm_onoff("Solid Spawns (CoD Xe SpawnCollision)", on);
 }
 
 physics_set(on)

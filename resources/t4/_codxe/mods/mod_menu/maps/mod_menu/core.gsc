@@ -4,11 +4,14 @@
 	Entry point is maps\_music::music_init(), which _load.gsc calls on every singleplayer map
 	(campaign and Nazi Zombies) before the level script's first wait, so precaching here is safe.
 
-	HUD budget notes
-	- Every distinct string passed to setText() uses a localized-string config slot until the map
-	  ends. The list is drawn as one text element per page (not per row) and values use setValue()
-	  or a small fixed set of strings, so the number of distinct strings stays bounded.
-	- A HUD string is limited to ~255 characters, so labels stay short and pages hold 10 rows.
+	HUD notes
+	- T4 singleplayer HUD text does not render line breaks (they show up as dots), so every row is
+	  its own text element.
+	- Every distinct string passed to setText() takes a localized-string config slot until the
+	  level ends (roughly 1,070 on WaW, shared with PrecacheString), and running out is a fatal
+	  error. mm_set_text() counts the menu's own strings and stops adding new ones at a budget;
+	  past it, labels show "..." and the highlighted item's name goes to the message feed.
+	  Numbers use setValue(), which takes no slot.
 */
 
 #include maps\_utility;
@@ -31,6 +34,11 @@ init()
 	level.mm.dpad = false;
 	level.mm.reapply = [];
 	level.mm_state = [];
+
+	level.mm.strings = [];
+	level.mm.string_count = 0;
+	level.mm.string_budget = 400;
+	mm_text_ok("...");
 
 	level.mm.theme_names = [];
 	level.mm.theme_colors = [];
@@ -135,7 +143,6 @@ mm_load_settings()
 	self.mm_state["theme"] = self.mm_theme;
 	self.mm_state["side"] = self.mm_side;
 	self.mm_state["combo"] = self.mm_combo;
-	self.mm_state["list_style"] = mm_clamp(getDvarInt("mm_list_style"), 0, 1);
 }
 
 mm_save_setting(name, value)
@@ -460,7 +467,7 @@ mm_create_hud()
 	listTop = y + 36;
 	height = 36 + (rows + 1) * rowH + 26;
 
-	self.mm_list_y = listTop + rowH; // first line of the list text is the page title
+	self.mm_list_y = listTop + rowH; // the page title sits one row above the first item
 
 	hud = [];
 	hud["bg"] = self mm_hud_rect(x, y, width, height, (0.02, 0.02, 0.04), 0.82, 1);
@@ -474,17 +481,9 @@ mm_create_hud()
 	hud["header"].glowAlpha = 0.6;
 	hud["header"] setText(level.mm.title);
 
-	self.mm_list_style = mm_clamp(getDvarInt("mm_list_style"), 0, 1);
-	if (self.mm_list_style == 1)
-	{
-		hud["title"] = self mm_hud_text(x + 10, listTop, "left", level.mm.font_scale, 4);
-		for (r = 0; r < rows; r++)
-			hud["row" + r] = self mm_hud_text(x + 10, self.mm_list_y + r * rowH, "left", level.mm.font_scale, 4);
-	}
-	else
-	{
-		hud["list"] = self mm_hud_text(x + 10, listTop, "left", level.mm.font_scale, 4);
-	}
+	hud["title"] = self mm_hud_text(x + 10, listTop, "left", level.mm.font_scale, 4);
+	for (r = 0; r < rows; r++)
+		hud["row" + r] = self mm_hud_text(x + 10, self.mm_list_y + r * rowH, "left", level.mm.font_scale, 4);
 
 	for (r = 0; r < rows; r++)
 		hud["val" + r] = self mm_hud_text(x + width - 10, self.mm_list_y + r * rowH, "right", level.mm.font_scale, 4);
@@ -495,6 +494,7 @@ mm_create_hud()
 
 	self.mm_hud = hud;
 	self.mm_page_key = "";
+	self.mm_announced = "";
 }
 
 mm_destroy_hud()
@@ -541,10 +541,7 @@ mm_render()
 	if (pageKey != self.mm_page_key)
 	{
 		self.mm_page_key = pageKey;
-		if (self.mm_list_style == 1)
-			self mm_render_rows(menu, page, pages, top);
-		else
-			self.mm_hud["list"] setText(mm_page_text(menu, page, pages, top));
+		self mm_render_rows(menu, page, pages, top);
 	}
 
 	for (r = 0; r < rows; r++)
@@ -565,10 +562,16 @@ mm_render()
 	scroller.alpha = 0.35;
 	scroller moveOverTime(0.06);
 	scroller.y = self.mm_list_y + (cursor - top) * level.mm.row_h;
+
+	// Labels that did not fit in the string budget are announced once when highlighted.
+	announceKey = self.mm_menu + "|" + cursor;
+	if (self.mm_row_hidden[cursor - top] && self.mm_announced != announceKey)
+	{
+		self.mm_announced = announceKey;
+		self iprintln("^3> ^7" + menu.items[cursor].label);
+	}
 }
 
-// Fallback list style: one text element per row. Needs more distinct HUD strings (one per label
-// instead of one per page), but does not depend on multi-line text.
 mm_render_rows(menu, page, pages, top)
 {
 	title = "^3" + menu.title;
@@ -576,68 +579,48 @@ mm_render_rows(menu, page, pages, top)
 		title = title + " ^7(" + (page + 1) + "/" + pages + ")";
 	if (menu.items.size == 0)
 		title = title + " ^7- empty";
-	self.mm_hud["title"] setText(title);
+	mm_set_text(self.mm_hud["title"], title);
 
+	self.mm_row_hidden = [];
 	for (r = 0; r < level.mm.rows; r++)
 	{
+		self.mm_row_hidden[r] = false;
 		elem = self.mm_hud["row" + r];
 		if (top + r >= menu.items.size)
 		{
 			elem.alpha = 0;
 			continue;
 		}
-		elem setText(menu.items[top + r].label);
+		self.mm_row_hidden[r] = !mm_set_text(elem, menu.items[top + r].label);
 		elem.alpha = 1;
 	}
 }
 
-mm_set_list_style(index)
+// True if `text` can be shown: it was used before, or there is still room in the string budget.
+mm_text_ok(text)
 {
-	setDvar("mm_list_style", index);
-	if (!self.mm_open)
-		return;
-	self mm_create_hud();
-	self mm_render();
+	if (isDefined(level.mm.strings[text]))
+		return true;
+	if (level.mm.string_count >= level.mm.string_budget)
+		return false;
+	level.mm.strings[text] = true;
+	level.mm.string_count++;
+	return true;
 }
 
-mm_list_style_names()
+// setText() through the budget. Returns false (and shows "...") when the budget is used up.
+mm_set_text(elem, text)
 {
-	names = [];
-	names[0] = "Paged";
-	names[1] = "Rows";
-	return names;
-}
-
-// One HUD string holds the page title and every visible label, and HUD strings are limited to
-// about 255 characters, so shorten labels until the page fits.
-mm_page_text(menu, page, pages, top)
-{
-	count = menu.items.size;
-	header = "^3" + menu.title;
-	if (pages > 1)
-		header = header + " ^7(" + (page + 1) + "/" + pages + ")";
-	header = header + "^7";
-	if (count == 0)
-		return header + "\n(nothing here)";
-
-	// The T4 compiler rejects reading a local that is only assigned inside a loop, so assign
-	// text before the loop even though the loop always runs.
-	text = header;
-	for (maxLength = 24; maxLength >= 8; maxLength -= 2)
+	if (!mm_text_ok(text))
 	{
-		text = header;
-		for (r = 0; r < level.mm.rows && top + r < count; r++)
-		{
-			label = menu.items[top + r].label;
-			if (label.size > maxLength)
-				label = getSubStr(label, 0, maxLength);
-			text = text + "\n" + label;
-		}
-		if (text.size <= 250)
-			return text;
+		elem setText("...");
+		return false;
 	}
-	return text;
+	elem setText(text);
+	return true;
 }
+
+
 
 mm_render_value(elem, item)
 {
@@ -646,12 +629,12 @@ mm_render_value(elem, item)
 	case "toggle":
 		if (self mm_item_value(item))
 		{
-			elem setText("ON");
+			mm_set_text(elem, "ON");
 			elem.color = (0.35, 1, 0.45);
 		}
 		else
 		{
-			elem setText("OFF");
+			mm_set_text(elem, "OFF");
 			elem.color = (1, 0.35, 0.35);
 		}
 		elem.alpha = 1;
@@ -665,12 +648,12 @@ mm_render_value(elem, item)
 		index = self mm_item_value(item);
 		if (!isDefined(index) || index < 0 || index >= item.choices.size)
 			index = 0;
-		elem setText(item.choices[index]);
+		mm_set_text(elem, item.choices[index]);
 		elem.color = (1, 0.9, 0.5);
 		elem.alpha = 1;
 		break;
 	case "submenu":
-		elem setText(">");
+		mm_set_text(elem, ">");
 		elem.color = (1, 1, 1);
 		elem.alpha = 0.6;
 		break;
@@ -1010,7 +993,6 @@ mm_controls_help()
 	self iprintln("^3Scroll^7: LT / RT, left stick or D-pad");
 	self iprintln("^3Select^7: A (X also works)   ^3Back^7: RS   ^3Close^7: hold RS");
 	self iprintln("^3Change values^7: LB / RB or left stick left / right");
-	self iprintln("^3Rows run together?^7 Menu Settings > List Style > Rows (or: set mm_list_style 1)");
 	self iprintln(self mm_open_hint());
 }
 

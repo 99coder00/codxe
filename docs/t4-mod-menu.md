@@ -11,7 +11,7 @@ GSC, loaded at runtime by CoD Xe's GSC loader.
 
 - Call of Duty: World at War with **Title Update 7** installed. See
   [Installing title updates](title-updates.md).
-- CoD Xe **r345 or newer** running on either:
+- CoD Xe **r347 or newer** running on either:
   - an Xbox 360 that can run unsigned code, or
   - [Xenia Canary](https://github.com/xenia-canary/xenia-canary) with plugins set up as described
     in the [README](../README.md#xenia-canary-setup).
@@ -19,8 +19,8 @@ GSC, loaded at runtime by CoD Xe's GSC loader.
   its files from next to the running `default.xex` (`game:` in Xenia), so you can't add them to a
   disc image.
 
-To check that CoD Xe is running, look for the version text (for example `CoD Xe r345`) in the
-top-left corner of the game's menus.
+To check that CoD Xe is running, look for the version text (for example `CoD Xe r348`) in the
+top-left corner of the game's menus. Builds older than r347 can't load the menu.
 
 ### Install the menu
 
@@ -80,7 +80,8 @@ multiplayer mod, set `active_mod` to `codjumper`.
 | `Server script compile error` / `unknown function` | The scripts call something your CoD Xe build doesn't register. This usually means the mod files are newer than the CoD Xe build. Use matching files from the same release, or check them with `--codxe-ref` (see [Validating GSC changes](#validating-gsc-changes)). |
 | The level won't load after editing a script | A GSC compile error stops the level from loading. Run the [checker](#validating-gsc-changes) on your changes. |
 | Text starts with `UNLOCALIZED:` | The menu turns `loc_warnings` off by itself. If you still see it, your mod files are older than the fix; copy the `mod_menu` folder again. |
-| Menu rows run together on one line, separated by dots | Switch **Menu Settings → List Style** to **Rows**. If you can't read the menu, type `set mm_list_style 1` in the CoD Xe console and reopen it. |
+| Menu rows run together on one line, separated by dots | Your mod files are from before rows became separate elements (T4 singleplayer HUD text can't show line breaks). Copy the `mod_menu` folder again. |
+| Some rows show `...` | The menu has used its budget of distinct on-screen strings for this level (see [How it works](#how-it-works)). Highlight the row: its name is printed in the message feed. The budget resets on the next level. |
 | Menu feels sluggish | Scripts run on game time, so the menu slows down with **World & Physics → Timescale**. Set it back to 1. |
 
 ## Controls
@@ -237,6 +238,8 @@ tank or truck and press X).
 ### Forge
 
 - **Spawn Model** lists props the level placed plus weapon world models, so every entry is loaded.
+- **Solid Spawns** uses CoD Xe's `SpawnCollision()`, so props you spawn have real collision if the
+  model has collision data.
 - **Physics Spawns** uses real physics where the model supports it.
 - **Grab Mode**: hold LB to pick up the prop you're aiming at, RB spins it, and letting go throws
   it.
@@ -253,8 +256,8 @@ Stones, Flak Jacket, Body Armor, Morphine Shot, Dirty Harry and Hardcore.
 For each co-op player: bring to you, go to them, god mode, menu access, launch them, revive, and
 give points (zombies).
 
-Menu Settings: 8 color themes, left/right placement, the open button combo, list style (Paged
-or one element per Row), Controls Help, **Reset All Mods** and About.
+Menu Settings: 8 color themes, left/right placement, the open button combo, Controls Help,
+**Reset All Mods** and About.
 
 ## How it works
 
@@ -270,20 +273,25 @@ or one element per Row), Controls Help, **Reset All Mods** and About.
   Weapon, effect, model and spawner lists are read from the running level.
 - **Only guaranteed assets.** Explosions use `level._effect["thunder"]` and gore uses
   `anim._effect["animscript_gib_fx"]`. The stock scripts load both on every singleplayer level.
-- **HUD string budget.** Every distinct string passed to `setText()` takes a config string slot
-  until the level ends, and overflowing that is the classic mod-menu crash.
-  - The list is drawn as one string per page, not one per row.
-  - Values use `setValue()` or a small fixed set of strings.
-  - Pages are shortened to fit the ~255 character HUD string limit.
+- **One text element per row.** T4 singleplayer HUD text doesn't render line breaks (they show
+  up as dots), so each row and each value is its own element, at fixed positions.
+- **HUD string budget.** Every distinct string passed to `setText()` takes a localized-string
+  config slot until the level ends. WaW has roughly 1,070 of them, shared with
+  `PrecacheString()`, and running out ends the game with `G_FindConfigstringIndex: overflow`.
+  - Repeated strings reuse their slot, so opening the same pages again costs nothing.
+  - Values use `setValue()` (no slot) or a small fixed set of strings such as `ON`/`OFF`.
+  - The menu counts its own distinct strings and stops at 400. After that, new labels show
+    `...` and the highlighted item's name is printed in the message feed instead.
+  - Browsing every page and every dynamic list comes to about 450 strings, so most sessions never
+    reach the cap.
 - **Script errors are contained.** Each menu action runs in its own thread, so a runtime error only
   ends that action. The input loop has a watchdog that restarts it if it ever stops.
 - **CoD Xe builtins used:**
   - the `god`, `noclip` and `ufo` client fields;
   - the `JumpButtonPressed`, `SecondaryOffhandButtonPressed`, `SprintButtonPressed` and
-    `Move*ButtonPressed` methods.
-
-  All of these are in CoD Xe r345. `SpawnCollision()` (r347+) is deliberately not used: on a
-  build that doesn't register it, the level fails to load with `unknown function`.
+    `Move*ButtonPressed` methods;
+  - `SpawnCollision()`, added in r347. On an older build the level fails to load with
+    `unknown function`.
 
 ## Known limitations
 
@@ -291,8 +299,7 @@ or one element per Row), Controls Help, **Reset All Mods** and About.
   **Unchanged** option only stops further changes.
 - D-pad navigation uses the stock `buttonPressed()`, which may be developer-only on retail builds.
   If it is, the menu quietly falls back to the other buttons.
-- Spawned props aren't solid. Solid props would need `SpawnCollision()`, which older CoD Xe
-  builds don't have.
+- Solid Spawns only gives collision to models that have collision data.
 - Death Cards appear only in the campaign menu.
 
 ## Adding features
@@ -338,7 +345,7 @@ CoD Xe builtins are read from `src/game/t4/sp/components/gsc.cpp`. To check agai
 player actually runs, pass its release number or commit:
 
 ```sh
-python tools/gsc_check/gsc_check.py resources/t4/_codxe/mods/mod_menu --codxe-ref r345
+python tools/gsc_check/gsc_check.py resources/t4/_codxe/mods/mod_menu --codxe-ref r347
 ```
 
 ### Building the builtin index from your own console

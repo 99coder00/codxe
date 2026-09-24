@@ -224,6 +224,7 @@ build_forge()
 {
 	mm_menu("forge", "Forge", "main");
 	mm_add_sub("forge", "Spawn Model", "models");
+	mm_add_toggle("forge", "Solid Spawns", "forge_solid", maps\mod_menu\forge::solid_set);
 	mm_add_toggle("forge", "Physics Spawns", "forge_physics", maps\mod_menu\forge::physics_set);
 	mm_add_toggle("forge", "Grab Mode (hold LB)", "pickup", maps\mod_menu\forge::pickup_set);
 	mm_add_action("forge", "Launch Aimed", maps\mod_menu\forge::launch_aimed);
@@ -351,8 +352,6 @@ build_settings()
 	side.no_reset = true;
 	combo = mm_add_choice("settings", "Open With", "combo", ::mm_set_combo, mm_combo_names());
 	combo.no_reset = true;
-	style = mm_add_choice("settings", "List Style", "list_style", ::mm_set_list_style, mm_list_style_names());
-	style.no_reset = true;
 	mm_add_action("settings", "Controls Help", ::mm_controls_help);
 	mm_add_toggle("settings", "All Players Get Menu", "all_access", ::mm_set_all_access, "level");
 	mm_add_action("settings", "Reset All Mods", ::mm_reset_all);
