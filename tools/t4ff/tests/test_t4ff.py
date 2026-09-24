@@ -197,6 +197,65 @@ class SampleZoneTests(unittest.TestCase):
         self.assertEqual([a.type for a in converted.assets], [a.type for a in zone.assets])
         self.assertEqual(Writer(x360()).write(converted), out)
 
+    def test_loaded_sound(self):
+        """A PC loaded sound becomes an XMA1 console loaded sound (the encoder is replaced by CoD
+        Xenon's XMA2 data of another sound, xma2encode is not needed)."""
+        import struct
+
+        from t4ff.convert import ConvertOptions, ZoneConverter
+        from t4ff.fastfile import read_fastfile
+        from t4ff.platforms import pc, x360
+        from t4ff.zone import Reader, Writer, asset_name
+
+        with open(sample("x360", "sounds", "para_egg.xma"), "rb") as f:
+            stream = audio.read_sdns(f.read())
+
+        class FakeEncoder:
+            available = True
+
+            def encode(self, pcm):
+                return audio.XmaStream(stream.rate, stream.channels, stream.samples, stream.data, stream.samples - 256)
+
+        _, _, data = read_fastfile(sample("pc", "nazi_zombie_aztec.ff"))
+        zone = Reader(pc(), data).load()
+        options = ConvertOptions(xma_encoder=FakeEncoder(), log=lambda msg: None)
+        conv = ZoneConverter(zone, pc(), x360(), options)
+        node = next(n for n in zone.extra_root.walk() if (n.extra.get("origin") or ("",))[0] == "asset" and n.type.name == "LoadedSound" and not asset_name(pc(), n).startswith(","))
+        sound = conv.convert_asset_node("loaded_sound", node)
+        self.assertFalse(asset_name(x360(), sound).endswith(".wav"))
+        data_node = next(c for c in sound.children if (c.extra.get("origin") or ("", "", ""))[1:] == ("snd_asset", "data"))
+        seek = next(c for c in sound.children if (c.extra.get("origin") or ("", "", ""))[1:] == ("snd_asset", "seekTable"))
+        packets = len(data_node.data) // audio.XMA_PACKET_SIZE
+        self.assertEqual(struct.unpack_from(">II", seek.data), (1, packets))
+        fmt = struct.unpack_from(">36I", sound.data, 16)
+        self.assertEqual(fmt[0], 32)  # loop start: the first frame
+        self.assertEqual(fmt[34], packets + 2)
+        self.assertEqual(fmt[21], stream.rate)
+        self.assertEqual(int.from_bytes(data_node.data[:4], "big") >> 28, 0)  # XMA1 sequence numbers
+        self.assertEqual(int.from_bytes(data_node.data[audio.XMA_PACKET_SIZE : audio.XMA_PACKET_SIZE + 4], "big") >> 28, 1)
+        frames = audio.xma_frames(bytes(data_node.data))
+        self.assertTrue(any(bit + length == fmt[1] for bit, length in frames))  # loop end on a frame end
+        # a zone with the sound reads back with the console rules
+        from t4ff.zone import BLOCK_VIRTUAL, Node, Ptr, Zone, ZoneAsset
+        from t4ff.layout import TypeRef
+
+        conv.fix_pointers()
+        assets = Node(TypeRef("scalar", "uint", 4, 4), 2, BLOCK_VIRTUAL)
+        assets.data = bytearray(struct.pack(">I", x360().asset_type_index["loaded_sound"]) + bytes(4))
+        assets.segments = [(assets.type, 2, 8, False)]
+        assets.extra["align"] = 4
+        ptr = Ptr("follow", sound)
+        ptr.owner, ptr.offset = assets, 4
+        assets.relocs[4] = ptr
+        assets.children = [sound]
+        root = Node(TypeRef("scalar", "uint", 4, 4), 4, -1)
+        root.data = bytearray(16)
+        root.children = [assets]
+        out_zone = Zone(x360().name, [], [ZoneAsset("loaded_sound", ptr, asset_name(x360(), sound))], [], 0, 0, None, assets)
+        out_zone.extra_root = root
+        out = Writer(x360()).write(out_zone)
+        self.assertEqual(Writer(x360()).write(Reader(x360(), out).load()), out)
+
     def test_convert_map(self):
         """The whole usermap (map + mod, merged) converts to a zone the console loader reads."""
         from t4ff.convert import ConvertOptions, ZoneConverter
