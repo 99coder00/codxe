@@ -355,6 +355,7 @@ class _EvalContext:
         rec = frame.rec
         offset = frame.base
         t = None
+        idx = list(indices)
         for i, part in enumerate(path):
             f = find_field(rec, part)
             if f is None:
@@ -362,11 +363,13 @@ class _EvalContext:
             offset += f.offset
             t = f.type
             if i < len(path) - 1:
+                # arrays inside the path use the next index (or the first element)
+                while t.kind == "array":
+                    offset += (idx.pop(0) if idx else 0) * t.elem.size
+                    t = t.elem
                 rec = records[t.name]
-        idx = list(indices)
         while t.kind == "array":
-            i = idx.pop(0) if idx else 0
-            offset += i * t.elem.size
+            offset += (idx.pop(0) if idx else 0) * t.elem.size
             t = t.elem
         return read_scalar(self.p, frame.node.data, offset, t)
 
@@ -462,6 +465,8 @@ class Reader:
     def load_into(self, node: Node, size: int, seg_type: Optional[TypeRef] = None, seg_count: int = 1, partial: bool = False):
         """Stream ``size`` bytes into ``node`` at the current block position."""
         block = self.block
+        if size < 0 or (block in self.p.streamed_blocks and self.pos + size > len(self.data)):
+            raise ZoneError(f"invalid allocation size {size} for {seg_type!r}")
         if seg_type is None:
             seg_type = TypeRef("scalar", "uchar", 1, 1)
             seg_count = size
@@ -846,9 +851,9 @@ class Reader:
                 count_expr = info.count
         count = self.eval(count_expr, info, rec) if count_expr is not None else 1
 
-        if info is not None and info.delayed is not None:
+        if info is not None and info.delayed is not None and (info.delayed[2] is None or self.eval(info.delayed[2], info, rec)):
             # Streamed after all assets (console image pixels): allocate a placeholder now.
-            block_name, alignment = info.delayed
+            block_name, alignment, _ = info.delayed
             child = Node(pointee, count, BLOCK_BY_NAME[block_name])
             child.extra["align"] = alignment
             child.extra["delayed"] = True

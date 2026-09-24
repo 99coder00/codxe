@@ -5,11 +5,15 @@
 use GfxImage;
 // The pixel data size is the card memory size (baseSize is not reliable in converted zones).
 set count pixels cardMemory::platform[0];
-set delayed pixels XFILE_BLOCK_LARGE_RUNTIME 4096;
+// Pixels of images with delayLoadPixels are streamed after all assets, others inline.
+set delayed pixels XFILE_BLOCK_LARGE_RUNTIME 4096 delayLoadPixels;
+set block pixels XFILE_BLOCK_LARGE;
+set allocalign pixels 4096;
+// Inline pixels are streamed before the load def and texture header.
 reorder:
     name
-    texture
-    pixels;
+    pixels
+    texture;
 
 use GfxImageLoadDef;
 set count texture 1;
@@ -38,3 +42,20 @@ set reusable vertexShaderArray;
 
 use XAnimParts;
 set count names boneCount[11];
+
+// Console models carry high mip bounds for every surface of the first LOD.
+use XModelStreamInfo;
+set count highMipBounds XModel::lodInfo::numsurfs;
+
+use snd_asset;
+// XMA packets live in the large block (2 KB aligned for the XMA decoder)
+set block data XFILE_BLOCK_LARGE;
+set allocalign data 2048;
+set count seekTable 1;
+
+use XmaSeekTable360;
+set arraysize entries count;
+
+use GfxWorldStreamInfo360;
+set count aabbTrees aabbTreeCount * 8;
+set count leafRefs leafRefCount;

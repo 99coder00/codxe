@@ -382,7 +382,7 @@ class ZoneConverter:
         if kind == "member":
             infos = self.dst.member_infos(origin[1], origin[2])
             for info in infos.values():
-                if info.delayed is not None:
+                if info.delayed is not None and node.extra.get("delayed"):
                     return info.delayed[1]
                 if info.allocalign is not None:
                     return info.allocalign.eval(None)

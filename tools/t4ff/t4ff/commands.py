@@ -250,7 +250,7 @@ class MemberInfo:
     block: Optional[str] = None
     allocalign: Optional[Expr] = None
     assetref: Optional[str] = None
-    delayed: Optional[Tuple[str, int]] = None  # (block, alignment)
+    delayed: Optional[tuple] = None  # (block, alignment, condition or None)
 
 
 @dataclass
@@ -380,10 +380,12 @@ class CommandParser:
 
         if kind == "delayed":
             # Console extension: the pointed data is streamed after all assets (e.g. image pixels).
+            # set delayed <member> <block> <alignment> [condition]
             owner, member, _, ctx = self.resolve_member(path)
-            block, _, align = arg.partition(" ")
+            parts = arg.split(None, 2)
             info = self.member(owner, member, ctx)
-            info.delayed = (block, int(align or "1", 0))
+            condition = parse_expr(parts[2], self.layout.enums) if len(parts) > 2 else None
+            info.delayed = (parts[0], int(parts[1], 0) if len(parts) > 1 else 1, condition)
             return
 
         if kind == "assetref":
@@ -432,6 +434,7 @@ class CommandParser:
 
         owner = records[ctx]
         for part in parts[:-1]:
+            # (paths only walk through embedded records here)
             f = find_field(owner, part)
             if f is None:
                 raise KeyError(f"{owner.name} has no member {part} ({path})")

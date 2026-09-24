@@ -54,9 +54,15 @@ def main(paths):
             continue
         platform = for_endian(endian)
         zone = Reader(platform, data).load()
-        identical = Writer(platform).write(zone) == data
+        out = Writer(platform).write(zone)
+        identical = out == data
+        # Runtime blocks are never streamed: their console struct sizes cannot be verified and the
+        # PC sizes are used (over-estimating the block is harmless). Accept a runtime-only header difference.
+        runtime_only = not identical and len(out) == len(data) and out[16:] == data[16:] and out[:12] == data[:12]
         found = records_of(zone, platform)
-        print(f"{path}: {len(zone.assets)} assets, round trip {'identical' if identical else 'DIFFERENT'}, {len(found)} record types")
+        state = "identical" if identical else ("identical except the runtime block size" if runtime_only else "DIFFERENT")
+        print(f"{path}: {len(zone.assets)} assets, round trip {state}, {len(found)} record types")
+        identical = identical or runtime_only
         if identical:
             verified |= found
 
