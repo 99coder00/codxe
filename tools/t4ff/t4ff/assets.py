@@ -149,7 +149,7 @@ def image_hook(conv, asset_type, node, name):
 
     drop = conv.image_drop_levels.get(name, 0)
     try:
-        tex = img.build_console_texture(source, conv.options.max_texture_size, conv.options.keep_mips, drop)
+        tex = img.build_console_texture(source, conv.options.max_texture_size, conv.options.keep_mips, drop, conv.options.compress_textures)
     except img.ImageError as e:
         conv.warn(str(e) + ", emitting a reference")
         return _reference(conv, asset_type, node, name)
@@ -202,12 +202,12 @@ def plan_textures(conv, root: Node):
     drops = {n: 0 for n in sources}
 
     def size(n):
-        return img.console_texture_size(sources[n], options.max_texture_size, options.keep_mips, drops[n])
+        return img.console_texture_size(sources[n], options.max_texture_size, options.keep_mips, drops[n], options.compress_textures)
 
     def can_drop(n):
         src = sources[n]
         level = drops[n] + 1
-        return level < len(src.levels) and min(src.width >> level, src.height >> level) >= 64
+        return min(src.width >> level, src.height >> level) >= 64
 
     total = sum(size(n) for n in sources)
     before = total

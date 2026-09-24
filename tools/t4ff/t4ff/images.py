@@ -215,32 +215,91 @@ def expand_a8(image: ImageData) -> ImageData:
     return ImageData(image.name, "A8L8", image.width, image.height, levels, image.flags, image.source)
 
 
-def build_console_texture(image: ImageData, max_size: int = 0, keep_mips: bool = True, drop_levels: int = 0) -> ConsoleTexture:
+def compress_image(image: ImageData) -> ImageData:
+    """Compress uncompressed colour textures to DXT1 (opaque) or DXT5 (4x-8x less memory)."""
+    from . import dxt
+
+    if image.format not in ("A8R8G8B8", "X8R8G8B8", "R8G8B8"):
+        return image
+    if image.format == "R8G8B8":
+        image = convert_rgb24(image)
+    rgba_levels = []
+    w, h = image.width, image.height
+    for level in image.levels:
+        rgba = dxt.bgra_to_rgba(level, w, h)
+        if image.format == "X8R8G8B8":
+            rgba[:, :, 3] = 255
+        rgba_levels.append(rgba)
+        w, h = max(w >> 1, 1), max(h >> 1, 1)
+    opaque = all((lv[:, :, 3] >= 255).all() for lv in rgba_levels)
+    fmt = "DXT1" if opaque else "DXT5"
+    levels = [dxt.encode(lv, fmt) for lv in rgba_levels]
+    return ImageData(image.name, fmt, image.width, image.height, levels, image.flags, image.source)
+
+
+def reduce_image(image: ImageData, count: int) -> ImageData:
+    """Remove ``count`` top levels. When the mip chain runs out the base is downscaled (DXT data
+    is decoded, box filtered and encoded again)."""
+    from . import dxt
+
+    levels = list(image.levels)
+    w, h = image.width, image.height
+    for _ in range(count):
+        if min(w, h) <= 4:
+            break
+        if len(levels) > 1:
+            levels.pop(0)
+        elif image.format in ("DXT1", "DXT3", "DXT5"):
+            rgba = dxt.downscale(dxt.decode(levels[0], w, h, image.format))
+            fmt = "DXT5" if image.format == "DXT3" else image.format
+            levels = [dxt.encode(rgba, fmt)]
+            image = ImageData(image.name, fmt, w, h, levels, image.flags, image.source)
+        elif image.format in ("A8R8G8B8", "X8R8G8B8"):
+            rgba = dxt.downscale(dxt.bgra_to_rgba(levels[0], w, h))
+            levels = [rgba[:, :, [2, 1, 0, 3]].tobytes()]
+        else:
+            break
+        w, h = max(w >> 1, 1), max(h >> 1, 1)
+    return ImageData(image.name, image.format, w, h, levels, image.flags, image.source)
+
+
+def _drop_count(image: ImageData, max_size: int, drop_levels: int) -> int:
+    count, w, h = 0, image.width, image.height
+    while min(w, h) > 4 and ((max_size and (w > max_size or h > max_size)) or count < drop_levels):
+        count += 1
+        w, h = max(w >> 1, 1), max(h >> 1, 1)
+    return count
+
+
+def build_console_texture(image: ImageData, max_size: int = 0, keep_mips: bool = True, drop_levels: int = 0, compress: bool = True) -> ConsoleTexture:
     """Tile ``image`` for the Xbox 360.
 
     ``max_size`` limits the base level dimensions and ``drop_levels`` removes additional top
-    levels (both only when mip levels are available, texture data is never re-encoded).
+    levels. Uncompressed colour textures are compressed to DXT when ``compress`` is set.
     """
 
+    if compress:
+        image = compress_image(image)
     if image.format == "R8G8B8":
         image = convert_rgb24(image)
     if image.format == "A8":
         image = expand_a8(image)
+    if image.format == "X8R8G8B8":
+        image = ImageData(image.name, "A8R8G8B8", image.width, image.height, image.levels, image.flags, image.source)
     cfmt_name = to_console_format(image.format)
     if cfmt_name is None:
         raise ImageError(f"{image.name}: no console equivalent for {image.format}")
     fmt = xenos.FORMATS[cfmt_name]
 
-    first = 0
+    drop = _drop_count(image, max_size, drop_levels)
+    if drop:
+        image = reduce_image(image, drop)
     width, height = image.width, image.height
-    while first + 1 < len(image.levels) and ((max_size and (width > max_size or height > max_size)) or first < drop_levels):
-        first += 1
-        width, height = max(width >> 1, 1), max(height >> 1, 1)
 
-    levels = [image.levels[first]]
+    levels = [image.levels[0]]
     if keep_mips and min(width, height) > 16:
         w, h = width, height
-        for level in image.levels[first + 1 :]:
+        for level in image.levels[1:]:
             w, h = max(w >> 1, 1), max(h >> 1, 1)
             # stop before levels smaller than one compression block
             if min(w, h) < fmt.block:
@@ -253,24 +312,26 @@ def build_console_texture(image: ImageData, max_size: int = 0, keep_mips: bool =
     else:
         pixels = xenos.tile_level(levels[0], width, height, 0, fmt)
         header = xenos.texture_header(width, height, fmt, 1)
-    return ConsoleTexture(fmt, width, height, len(levels), header, pixels, first)
+    return ConsoleTexture(fmt, width, height, len(levels), header, pixels, drop)
 
 
-def console_texture_size(image: ImageData, max_size: int = 0, keep_mips: bool = True, drop_levels: int = 0) -> int:
+def console_texture_size(image: ImageData, max_size: int = 0, keep_mips: bool = True, drop_levels: int = 0, compress: bool = True) -> int:
     """Size of the console texture :func:`build_console_texture` would produce (without tiling)."""
-    fmt_name = {"R8G8B8": "A8R8G8B8", "A8": "A8L8"}.get(image.format, image.format)
+    fmt_name = image.format
+    if compress and fmt_name in ("A8R8G8B8", "X8R8G8B8", "R8G8B8"):
+        fmt_name = "DXT5"  # upper bound, DXT1 when opaque
+    fmt_name = {"R8G8B8": "A8R8G8B8", "X8R8G8B8": "A8R8G8B8", "A8": "A8L8"}.get(fmt_name, fmt_name)
     cfmt = to_console_format(fmt_name)
     if cfmt is None:
         return 0
     fmt = xenos.FORMATS[cfmt]
-    first, width, height = 0, image.width, image.height
-    while first + 1 < len(image.levels) and ((max_size and (width > max_size or height > max_size)) or first < drop_levels):
-        first += 1
-        width, height = max(width >> 1, 1), max(height >> 1, 1)
+    drop = _drop_count(image, max_size, drop_levels)
+    width, height = max(image.width >> drop, 1), max(image.height >> drop, 1)
     count = 1
+    available = max(len(image.levels) - drop, 1)
     if keep_mips and min(width, height) > 16:
         w, h = width, height
-        for _ in image.levels[first + 1 :]:
+        for _ in range(available - 1):
             w, h = max(w >> 1, 1), max(h >> 1, 1)
             if min(w, h) < fmt.block:
                 break

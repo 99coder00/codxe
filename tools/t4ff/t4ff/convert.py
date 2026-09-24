@@ -254,6 +254,7 @@ class ConvertOptions:
     # total texture memory budget in bytes, 0 for no limit
     texture_budget: int = 0
     keep_mips: bool = True
+    compress_textures: bool = True
     iwd_paths: List[str] = field(default_factory=list)
     reference_missing_images: bool = True
     log: Callable[[str], None] = print

@@ -108,6 +108,7 @@ def cmd_convert(args):
         max_texture_size=args.max_texture_size,
         texture_budget=int(args.texture_budget * 1024 * 1024),
         keep_mips=not args.no_mips,
+        compress_textures=not args.no_compress,
         iwd_paths=iwds + args.iwd,
     )
 
@@ -163,6 +164,7 @@ def main(argv=None):
     p.add_argument("--no-sounds", action="store_true", help="do not convert streamed sounds")
     p.add_argument("--no-mod", action="store_true", help="do not merge the usermap's mod.ff into the map fastfile")
     p.add_argument("--no-load", action="store_true", help="do not convert <map>_load.ff")
+    p.add_argument("--no-compress", action="store_true", help="keep uncompressed textures uncompressed (they are DXT compressed by default)")
     p.add_argument("--no-mips", action="store_true", help="drop all mip levels (saves ~25%% memory, textures shimmer at distance)")
     p.add_argument("--allow-unverified", action="store_true", help="also convert assets whose console layout is not verified (may crash the game)")
     p.set_defaults(func=cmd_convert)
