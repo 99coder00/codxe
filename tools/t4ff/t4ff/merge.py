@@ -94,6 +94,7 @@ def merge_zones(p: Platform, zones: List[Zone], log=print) -> Zone:
     asset_children: List[Node] = []
     asset_relocs: List[Ptr] = []
 
+    duplicates = 0
     for zone_index, zone in enumerate(zones):
         mapping = []
         for s in zone.script_strings:
@@ -128,12 +129,15 @@ def merge_zones(p: Platform, zones: List[Zone], log=print) -> Zone:
                     ref = asset_hooks.build_reference(_Conv(p), asset.type, target, "," + asset.name)
                     ptr.node = ref
                     child_for_ptr[id(ptr)] = ref
-                    log(f"merge: duplicate {asset.type} '{asset.name}' replaced by a reference")
+                    duplicates += 1
             seen.add(key)
             merged_assets.append(ZoneAsset(asset.type, ptr, asset.name))
             asset_relocs.append(ptr)
             if ptr is not None and id(ptr) in child_for_ptr:
                 asset_children.append(child_for_ptr[id(ptr)])
+
+    if duplicates:
+        log(f"merge: {duplicates} assets defined by several zones are kept once")
 
     # script string table
     script_node = Node(TypeRef("pointer", "", 4, 4, to=TypeRef("scalar", "char", 1, 1)), len(strings), BLOCK_VIRTUAL)
@@ -193,3 +197,66 @@ def _has_incoming_refs(zone: Zone, target: Node) -> bool:
                 if slot is not None and slot.owner is not None and id(slot.owner) in inside:
                     return True
     return False
+
+
+def prune_references(p: Platform, zone: Zone, types=("techset",), log=print) -> int:
+    """Remove top level name references of ``types`` that nothing in the zone uses.
+
+    PC zones list technique sets the console does not have (e.g. the high quality shadow map
+    variants materials only use on PC); left in, the console would look them up by name.
+    """
+    node = zone.assets_node
+    if node is None:
+        return 0
+    used = set()
+    for n in zone.extra_root.walk():
+        for ptr in n.relocs.values():
+            if ptr.kind == "alias" and ptr.slot is not None:
+                used.add(id(ptr.slot))
+    keep = []
+    removed = 0
+    for i, asset in enumerate(zone.assets):
+        ptr = node.relocs.get(8 * i + 4)
+        target = ptr.node if ptr is not None and ptr.kind in ("follow", "insert") else None
+        if (
+            asset.type in types
+            and target is not None
+            and _is_reference(p, target)
+            and id(ptr) not in used
+        ):
+            removed += 1
+            continue
+        keep.append((asset, ptr, target))
+    if not removed:
+        return 0
+    data = bytearray(8 * len(keep))
+    relocs = {}
+    children = []
+    assets = []
+    positions = {id(a): i for i, a in enumerate(zone.assets)}
+    for i, (asset, ptr, target) in enumerate(keep):
+        j = positions[id(asset)]
+        data[8 * i : 8 * i + 4] = node.data[8 * j : 8 * j + 4]
+        if ptr is not None:
+            ptr.offset = 8 * i + 4
+            relocs[8 * i + 4] = ptr
+        if target is not None:
+            children.append(target)
+        assets.append(asset)
+    node.data = data
+    node.relocs = relocs
+    node.children = children
+    node.count = 2 * len(keep)
+    node.segments = [(node.type, node.count, len(data), False)]
+    zone.assets = assets
+    log(f"removed {removed} unused technique set references")
+    return removed
+
+
+def _is_reference(p: Platform, node: Node) -> bool:
+    from .zone import asset_name
+
+    try:
+        return asset_name(p, node).startswith(",")
+    except Exception:
+        return False

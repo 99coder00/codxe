@@ -82,26 +82,46 @@ def convert_fastfile(path: str, options):
     result = converter.convert()
     stats = converter.stats
     print(f"  converted:  {dict(sorted(stats.converted.items()))}")
+    if stats.copied:
+        print(f"  copied from console zones: {dict(sorted(stats.copied.items()))}")
     if stats.referenced:
         print(f"  referenced: {dict(sorted(stats.referenced.items()))}")
-    print(f"  textures:   {stats.texture_bytes / 1048576:.1f} MiB ({time.time() - start:.1f}s)")
+    print(f"  textures:   {stats.texture_bytes / 1048576:.1f} MiB, loaded sounds: {stats.sound_bytes / 1048576:.1f} MiB ({time.time() - start:.1f}s)")
     return result
 
 
 def write_zone(zone, target: str):
     out = Writer(x360()).write(zone)
     write_fastfile(target, ">", out)
-    blocks = ", ".join(f"{n.split('_BLOCK_')[1].lower()} {s / 1048576:.1f}" for n, s in zip(BLOCK_NAMES, Reader(x360(), out).load().block_sizes) if s)
-    print(f"wrote {target} ({os.path.getsize(target) / 1048576:.1f} MiB compressed; memory MiB: {blocks})")
+    # reading the zone back checks it with the console loading rules
+    sizes = Reader(x360(), out).load().block_sizes
+    blocks = ", ".join(f"{n.split('_BLOCK_')[1].lower()} {s / 1048576:.1f}" for n, s in zip(BLOCK_NAMES, sizes) if s)
+    print(f"wrote {target} ({os.path.getsize(target) / 1048576:.1f} MiB compressed)")
+    print(f"  memory: {sum(sizes) / 1048576:.1f} MiB ({blocks})")
 
 
 def cmd_convert(args):
+    from .audio import XmaEncoder, convert_streamed_sounds
     from .convert import ConvertOptions
-    from .merge import merge_zones
+    from .images import IwdLibrary
+    from .merge import merge_zones, prune_references
 
     name, files, iwds = find_usermap(args.input)
     out_dir = os.path.join(args.output, "_codxe", "usermaps", name)
     os.makedirs(out_dir, exist_ok=True)
+
+    encoder = XmaEncoder(args.xma_encoder, args.xma_quality)
+    if not encoder.available and not args.no_sounds:
+        print("warning: xma2encode.exe not found (--xma-encoder): sounds are not converted, the map will reference console sounds")
+
+    if not args.no_sounds and encoder.available:
+        library = IwdLibrary(iwds)
+        stats = convert_streamed_sounds(library, out_dir, encoder, args.stream_rate, args.mono_streams)
+        if stats["sounds"]:
+            print(
+                f"streamed sounds: {stats['converted']}/{stats['sounds']} converted, "
+                f"{stats['input_bytes'] / 1048576:.1f} MiB -> {stats['output_bytes'] / 1048576:.1f} MiB"
+            )
 
     options = ConvertOptions(
         allow_unverified=args.allow_unverified,
@@ -110,31 +130,26 @@ def cmd_convert(args):
         keep_mips=not args.no_mips,
         compress_textures=not args.no_compress,
         iwd_paths=iwds + args.iwd,
+        xma_encoder=None if args.no_sounds else encoder,
+        sound_rate=args.sound_rate,
+        mono_sounds=args.mono_sounds,
+        sounds_dir=out_dir,
+        console_zones=args.console_zone,
     )
-
-    if not args.no_sounds:
-        from .audio import XmaEncoder, convert_streamed_sounds
-        from .images import IwdLibrary
-
-        library = IwdLibrary(iwds)
-        encoder = XmaEncoder(args.xma_encoder, args.xma_quality)
-        stats = convert_streamed_sounds(library, out_dir, encoder, args.stream_rate, args.mono_streams)
-        if stats["sounds"]:
-            print(
-                f"streamed sounds: {stats['converted']}/{stats['sounds']} converted, "
-                f"{stats['input_bytes'] / 1048576:.1f} MiB -> {stats['output_bytes'] / 1048576:.1f} MiB"
-            )
 
     # The console has no mod.ff: the mod's assets are merged into the map zone.
     zones = [convert_fastfile(files["map"], options)]
     if "mod" in files and not args.no_mod:
         zones.append(convert_fastfile(files["mod"], options))
     main_zone = zones[0] if len(zones) == 1 else merge_zones(x360(), zones)
+    prune_references(x360(), main_zone)
     write_zone(main_zone, os.path.join(out_dir, f"{name}.ff"))
 
     for role in ("patch", "load"):
         if role in files and not (role == "load" and args.no_load):
-            write_zone(convert_fastfile(files[role], options), os.path.join(out_dir, os.path.basename(files[role])))
+            zone = convert_fastfile(files[role], options)
+            prune_references(x360(), zone)
+            write_zone(zone, os.path.join(out_dir, os.path.basename(files[role])))
     return 0
 
 
@@ -161,6 +176,9 @@ def main(argv=None):
     p.add_argument("--xma-quality", type=int, default=60, help="xma2encode quality 1-100 (default 60)")
     p.add_argument("--stream-rate", type=int, default=0, help="resample streamed sounds above this rate (e.g. 32000)")
     p.add_argument("--mono-streams", action="store_true", help="downmix streamed sounds to mono")
+    p.add_argument("--sound-rate", type=int, default=0, help="highest sample rate of loaded (in memory) sounds: 24000, 32000, 44100 or 48000 (default: keep)")
+    p.add_argument("--mono-sounds", action="store_true", help="downmix loaded (in memory) sounds to mono")
+    p.add_argument("--console-zone", action="append", default=[], help="Xbox 360 fastfile (stock or already converted) to copy console only assets from, e.g. technique sets; repeatable")
     p.add_argument("--no-sounds", action="store_true", help="do not convert streamed sounds")
     p.add_argument("--no-mod", action="store_true", help="do not merge the usermap's mod.ff into the map fastfile")
     p.add_argument("--no-load", action="store_true", help="do not convert <map>_load.ff")

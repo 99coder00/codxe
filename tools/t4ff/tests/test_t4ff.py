@@ -3,8 +3,9 @@
 Sample based tests use the fastfiles of a folder given by the T4FF_SAMPLES
 environment variable and are skipped otherwise:
 
-    $T4FF_SAMPLES/pc/nazi_zombie_aztec_load.ff, nazi_zombie_aztec_patch.ff, nazi_zombie_aztec.iwd
-    $T4FF_SAMPLES/x360/patch.ff, patch_ui.ff, sounds/para_egg.xma
+    $T4FF_SAMPLES/pc/nazi_zombie_aztec.ff, mod.ff, nazi_zombie_aztec_load.ff, nazi_zombie_aztec_patch.ff,
+                    nazi_zombie_aztec.iwd
+    $T4FF_SAMPLES/x360/patch.ff, patch_ui.ff, sounds/para_egg.xma, nazi_zombie_aztec.ff (CoD Xenon's)
 
 Run with ``python -m unittest discover -s tests`` from tools/t4ff.
 """
@@ -21,7 +22,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-from t4ff import audio, images, xenos  # noqa: E402
+from t4ff import audio, images, xanim, xenos  # noqa: E402
 from t4ff.commands import parse_expr  # noqa: E402
 
 SAMPLES = os.environ.get("T4FF_SAMPLES", "")
@@ -39,6 +40,58 @@ class ExpressionTests(unittest.TestCase):
         self.assertEqual(parse_expr("(3 * 4 + 31) / 32 * 4", {}).eval(None), 4)
         self.assertEqual(parse_expr("1 || 0 && 0", {}).eval(None), 1)
         self.assertEqual(parse_expr("2 + 3 * 4 == 14", {}).eval(None), 1)
+
+
+class EncodingTests(unittest.TestCase):
+    """Console encodings recovered from CoD Xenon's converted nazi_zombie_aztec (values taken from it)."""
+
+    def test_quaternion_packing(self):
+        self.assertEqual(int(xanim.pack_quats32(np.array([[-367, -589, -11824, 30551]]))[0]), 0x19D7EDFD)
+        self.assertEqual(xanim.pack_quats48(np.array([[-22262, -5135, -23215, 3574]])).tolist(), [[41866, 7855, 30246]])
+        self.assertEqual(xanim.pack_half_quats(np.array([[27532, 17767], [2968, -32632]])).tolist(), [21670, 48407])
+        self.assertEqual(int(xanim.pack_quats32(np.zeros((1, 4)))[0]), 0)
+
+    def test_anim_part_types(self):
+        # two bones: a precise (main skeleton) and a compressed full quaternion without frames
+        quats = [xanim.QuatTrack("fullns", frames=np.array([[0, 0, 9680, 31305]])), xanim.QuatTrack("fullns", frames=np.array([[0, 0, 9680, 31305]]))]
+        trans = [xanim.TransTrack("none", 1), xanim.TransTrack("none", 0)]
+        anim = xanim.to_console(["tag_weapon", "j_mainroot"], quats, trans, asset_type=2)
+        self.assertEqual(anim.bone_counts, [0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 2, 2])
+        self.assertEqual(anim.bone_order, [0, 1])
+        self.assertEqual(anim.data_int.tolist(), [0x04F00000])
+        self.assertEqual(len(anim.data_short), 3)
+        self.assertEqual(anim.data_byte, bytes([0, 1]))  # translation tracks sorted by console bone
+
+    def test_normal_packing(self):
+        from t4ff.convert import _pack_unit_vec
+
+        self.assertEqual(_pack_unit_vec(np.array([[254, 132, 122, 63]], dtype=np.uint8)).tobytes(), bytes.fromhex("3ec051fe"))
+
+    def test_stream_name_hash(self):
+        from t4ff.assets import console_sound_name, stream_name_hash
+
+        self.assertEqual(stream_name_hash("sfx\\levels\\nazi_zombie_factory\\air_raid\\air_raid_loop_03"), 1667193692)
+        self.assertEqual(console_sound_name("sfx/a/b.wav"), "sfx/a/b")
+        self.assertEqual(console_sound_name(",b.WAV"), ",b")
+
+    def test_technique_mapping(self):
+        from t4ff.assets import PC_TECHNIQUE_TO_X360, X360_TECHNIQUE_COUNT
+
+        self.assertEqual(PC_TECHNIQUE_TO_X360[0x23], 0x23)
+        self.assertNotIn(0x24, PC_TECHNIQUE_TO_X360)  # TECHNIQUE_LIT_INSTANCED
+        self.assertEqual(PC_TECHNIQUE_TO_X360[0x2B], 0x24)  # TECHNIQUE_LIGHT_SPOT
+        self.assertEqual(PC_TECHNIQUE_TO_X360[0x39], 50)  # TECHNIQUE_DEBUG_BUMPMAP
+        self.assertEqual(sorted(PC_TECHNIQUE_TO_X360.values()), list(range(X360_TECHNIQUE_COUNT)))
+
+    def test_xma1_packet_headers(self):
+        packet = bytearray(audio.XMA_PACKET_SIZE)
+        packet[0:4] = ((5 << 26) | (123 << 11) | (1 << 8)).to_bytes(4, "big")  # XMA2: 5 frames, offset 123
+        data = audio.xma2_to_xma1(bytes(packet) * 3)
+        headers = [int.from_bytes(data[i : i + 4], "big") for i in range(0, len(data), audio.XMA_PACKET_SIZE)]
+        self.assertEqual([h >> 28 for h in headers], [0, 1, 2])  # sequence numbers
+        self.assertTrue(all((h >> 26) & 3 == 2 and (h >> 11) & 0x7FFF == 123 and h & 0x7FF == 0 for h in headers))
+        self.assertEqual(audio.xma1_rate(22050), 24000)
+        self.assertEqual(audio.xma1_rate(44094), 44100)
 
 
 class XenosTests(unittest.TestCase):
@@ -142,6 +195,31 @@ class SampleZoneTests(unittest.TestCase):
         out = Writer(x360()).write(ZoneConverter(zone, pc(), x360(), options).convert())
         converted = Reader(x360(), out).load()
         self.assertEqual([a.type for a in converted.assets], [a.type for a in zone.assets])
+        self.assertEqual(Writer(x360()).write(converted), out)
+
+    def test_convert_map(self):
+        """The whole usermap (map + mod, merged) converts to a zone the console loader reads."""
+        from t4ff.convert import ConvertOptions, ZoneConverter
+        from t4ff.fastfile import read_fastfile
+        from t4ff.merge import merge_zones, prune_references
+        from t4ff.platforms import pc, x360
+        from t4ff.zone import Reader, Writer
+
+        library = os.path.join(SAMPLES, "x360", "nazi_zombie_aztec.ff")
+        options = ConvertOptions(
+            iwd_paths=[sample("pc", "nazi_zombie_aztec.iwd")],
+            console_zones=[library] if os.path.exists(library) else [],
+            log=lambda msg: None,
+        )
+        zones = []
+        for name in ("nazi_zombie_aztec.ff", "mod.ff"):
+            _, _, data = read_fastfile(sample("pc", name))
+            zones.append(ZoneConverter(Reader(pc(), data).load(), pc(), x360(), options).convert())
+        merged = merge_zones(x360(), zones, log=lambda msg: None)
+        prune_references(x360(), merged, log=lambda msg: None)
+        out = Writer(x360()).write(merged)
+        converted = Reader(x360(), out).load()
+        self.assertEqual(len(converted.assets), len(merged.assets))
         self.assertEqual(Writer(x360()).write(converted), out)
 
 

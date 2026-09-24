@@ -4,24 +4,28 @@
 fastfiles that CoD Xe loads on the Xbox 360 (`_codxe/usermaps/<map>/`), and
 keeps them small enough for the console's memory:
 
+- **Every asset type of a map is converted**: models, animations, the world
+  (GfxWorld, collision, paths), effects, weapons, materials, sounds, menus,
+  scripts, string tables and localized strings.
 - **Textures** are rebuilt as tiled Xenos textures with their mip chains.
   Uncompressed textures are DXT compressed. An optional memory budget drops the
   top mip levels of the largest textures first.
-- **Streamed sounds** are encoded to XMA2 and stored in the `SDNS` container
-  that the console build reads from `sounds/`.
+- **Sounds** are encoded to XMA: loaded sounds into the fastfile (XMA1, as the
+  console's in-memory sounds are), streamed sounds to `sounds/*.xma` files.
+  Both can be downsampled or downmixed to save memory.
+- **Technique sets (shaders)** cannot be converted from PC data. They are copied
+  from Xbox 360 fastfiles you provide (`--console-zone`), together with any stock
+  image, sound or other asset the PC map expects from the game.
 - **mod.ff** is merged into `<map>.ff`, because the console has no mod zone.
   `<map>_patch.ff` and `<map>_load.ff` are converted separately.
 
-> [!IMPORTANT]
-> This is a work in progress. Asset types whose console format has not been
-> recovered yet are replaced by *name references* (`,name`). The game then uses
-> its own asset with that name when one exists; otherwise it falls back to a
-> default asset. See [Status](#status).
+Every written fastfile is read back with the console loading rules before the
+tool reports success.
 
 ## Requirements
 
 - Python 3.9+
-- `pip install -r requirements.txt` (numpy, libclang, and optionally imageio-ffmpeg)
+- `pip install -r requirements.txt` (numpy, libclang, and imageio-ffmpeg for sounds)
 - The `OpenAssetTools` folder of this repository. The PC structure definitions
   and zone streaming rules are read from it (`src/Common/Game/T4/T4_Assets.h`,
   `src/ZoneCode/Game/T4`).
@@ -29,6 +33,9 @@ keeps them small enough for the console's memory:
   GDK and the XAudio2 desktop samples). No open source XMA encoder exists. Pass
   it with `--xma-encoder`, or set `XMA2ENCODE` (or `XEDK`). On Linux and macOS
   it runs through `wine`.
+- For technique sets: Xbox 360 World at War fastfiles, from your own copy of the
+  game (for example `common.ff` and the stock zombie maps) or maps already
+  converted by CoD Xenon. Several can be given; the first one that has an asset wins.
 
 ## Usage
 
@@ -38,7 +45,10 @@ cd tools/t4ff
 # Convert a PC usermap folder (containing <map>.ff, mod.ff, *.iwd, ...)
 python -m t4ff convert "C:/.../mods/nazi_zombie_aztec" -o out \
     --xma-encoder "C:/Program Files (x86)/Microsoft Xbox 360 SDK/bin/win32/xma2encode.exe" \
-    --texture-budget 64
+    --console-zone "D:/360/WaW/zone/english/nazi_zombie_factory.ff" \
+    --console-zone "D:/360/WaW/zone/english/common.ff" \
+    --iwd "C:/Program Files (x86)/Activision/Call of Duty - World at War/main" \
+    --texture-budget 64 --sound-rate 32000
 
 # Then copy out/_codxe into the World at War game folder (merge with the existing _codxe folder).
 ```
@@ -47,12 +57,15 @@ Useful options:
 
 | Option | Effect |
 | --- | --- |
+| `--console-zone PATH` | Xbox 360 fastfile (or folder of them) to copy console only assets from: technique sets, and stock images, sounds, models... the PC map expects from the game. Repeatable. |
 | `--iwd PATH` | Extra `.iwd` files or folders to look up `images/*.iwi` and sounds (e.g. the PC game's `main` folder for stock images a map embeds). |
 | `--texture-budget MIB` | Texture memory budget. Largest textures lose their top mip level first. |
 | `--max-texture-size N` | Cap texture dimensions. |
 | `--no-mips` | Drop all mip levels (about 25% less memory, but textures shimmer at a distance). |
 | `--no-compress` | Keep uncompressed textures uncompressed. |
+| `--sound-rate HZ`, `--mono-sounds` | Downsample (24000, 32000, 44100 or 48000) or downmix loaded (in memory) sounds. |
 | `--stream-rate HZ`, `--mono-streams` | Resample or downmix streamed sounds. |
+| `--xma-quality N` | xma2encode quality (1-100, default 60). |
 | `--allow-unverified` | Also convert asset types whose console layout was not verified. Expect crashes. |
 
 Other commands:
@@ -61,6 +74,14 @@ Other commands:
 python -m t4ff info <fastfile> [--list]   # blocks, asset counts, asset names (PC or console)
 python -m t4ff roundtrip <fastfile>...    # read + rewrite, checks the result is byte identical
 ```
+
+### Memory
+
+The tool prints the memory each fastfile needs once loaded. CoD Xenon's own
+conversion of `nazi_zombie_aztec` needs about 157 MiB (64 MiB of textures, 35 MiB
+of in-memory sounds). Textures and loaded sounds are the parts you can shrink:
+`--texture-budget`, `--max-texture-size`, `--sound-rate 32000` and
+`--mono-sounds` trade quality for memory.
 
 ## How it works
 
@@ -76,13 +97,16 @@ python -m t4ff roundtrip <fastfile>...    # read + rewrite, checks the result is
    (following, insert, offset and alias pointers), which is written back for any
    platform with recomputed block offsets.
 4. **Conversion.** `t4ff/convert.py` maps every structure field by field from
-   the PC layout to the console layout (byte swapping and resizing).
-   `t4ff/assets.py` holds the asset-specific rules.
+   the PC layout to the console layout (byte swapping, resizing, dropping members
+   the console does not have), with per-structure encodings and fixups.
+   `t4ff/assets.py` holds the asset-specific rules, `t4ff/xanim.py` the
+   animation data, `t4ff/audio.py` the sounds and `t4ff/library.py` the copies
+   from console fastfiles.
 
 ### What was recovered about the console format
 
-These facts were recovered by comparing PC fastfiles with the fastfiles
-produced by CoD Xenon's converter:
+These facts were recovered by comparing the PC `nazi_zombie_aztec` usermap with
+CoD Xenon's conversion of it, asset by asset:
 
 - The container is the same `IWffu100` / version `0x183` header, but big
   endian with a zlib-compressed zone.
@@ -90,38 +114,62 @@ produced by CoD Xenon's converter:
   52-byte `D3DBaseTexture` header in the virtual block. The header is stored
   *little endian*. Pixel data is streamed after all assets into the large
   runtime block, and its size is `cardMemory`.
-- **Materials / technique sets** have 51 technique slots (the PC tool/debug
-  techniques are gone). Technique sets are referenced by name; the console has
-  its own shaders.
-- **Shaders** (console only) are split into a cached part and a 32-byte-aligned
-  physical part. A pass holds one vertex shader per vertex format.
+- **Materials / technique sets** have 51 technique slots: the console has no
+  instanced lit techniques (PC 0x24-0x2A) and no instanced debug bump map
+  technique (PC 0x3A), the others keep their order. State bits use the PC
+  encoding; the table only keeps the entries of the console technique set's
+  techniques. Technique sets carry console shaders (a cached part and a
+  32-byte-aligned physical part; a pass holds one vertex shader per vertex
+  format), so they come from console fastfiles.
+- **Animations** have 12 part types: 7 rotation types (the full quaternion
+  types exist in a 32-bit and a precise 48-bit variant), 4 translation types
+  and all. Quaternions are packed as "smallest components": sign and index of
+  the largest component, the others divided by it (half quaternions: 16 bits;
+  full: 9+10+10 or 15+15+15 bits). Viewmodel animations and the main skeleton
+  bones use the precise variant. Bones are sorted by part type.
+- **Models and the world**: normals and tangents are 10:10:10 signed
+  normalized (renormalized from the PC's byte packing), static model rotations
+  too. Models get per-surface high mip bounds, lose their collision triangles
+  and keep D3D buffer headers zeroed. World surfaces keep a copy of their
+  bounds; light grid row headers and vertex layer colors are swapped as the
+  console reads them.
+- **Effects** store colors as 32-bit values.
+- **Sounds**: loaded sounds are XMA1 (the XMA2 frames of `xma2encode` with
+  XMA1 packet headers) with a seek table (decoded samples at the start of every
+  packet) and an XAudio format block (loop region in bits, source format,
+  duration in milliseconds). Streamed sounds are XMA2 in an `SDNS` container
+  (sample count = XMA frames × 512); their names drop the extension and carry a
+  hash (`h = h * 0x1003F + c` from 5381 over `dir\name` in lower case). Sounds
+  of the map are served by CoD Xe from `sounds\`.
+- The clip map is stored under the PVS clip map asset type.
 - **Menus** keep per-client state for 4 splitscreen players (`[4]` arrays).
-- **Animations** have 12 part types (6 rotation, 5 translation, all).
-- **Streamed sounds** are XMA2 packets in an `SDNS` container (see
-  `t4ff/audio.py`). Its sample count is the XMA frame count × 512.
 
-The CoD Xenon fastfiles `patch.ff` and `patch_ui.ff` read and write back
-byte-identically. The PC loadscreen texture converts to exactly the bytes CoD
-Xenon produced.
+The CoD Xenon fastfiles read and write back byte-identically. For
+`nazi_zombie_aztec`, the converted GfxWorld matches CoD Xenon's except for
+how index arrays are shared, 307 of 614 animations are byte identical (the others
+differ in the last bit of a few quaternions), 585 of 648 materials have identical
+state bits, and the loadscreen texture converts to the exact bytes CoD Xenon
+produced. Differences that remain are where CoD Xenon used stock console data
+(more precise model normals, texture streaming bounds) or source data.
+
+Known deliberate difference: CoD Xenon writes the 16-bit frame indices of delta
+animation parts of long animations (256 frames and more) little endian; `t4ff`
+writes them big endian like every other 16-bit value the console reads.
 
 ## Status
 
 | Asset type | Status |
 | --- | --- |
-| rawfile, stringtable, localize, menu, menulist | converted (layouts verified) |
-| material | converted (technique slots remapped) |
-| techset | name reference to the console technique set |
-| image | converted from the zone or from `.iwi` files. Stock images without pixel data become references. Cube maps become references for now. |
-| weapon | layout verified; converted when its dependencies are |
-| xanim | layout verified, PC → console part type mapping still unknown (reference) |
-| xmodel, gfxworld, clipmap, comworld, gameworld_sp, fx, sound, loaded_sound, lightdef, physpreset, destructibledef, ... | not verified yet (reference unless `--allow-unverified`) |
-| streamed sounds | converted to XMA2 (needs `xma2encode`) |
-| loaded (in zone) sounds | console format not recovered yet |
+| rawfile, stringtable, localize, menu, menulist, weapon, physpreset | converted |
+| xanim, xmodel, fx, gfxworld, clipmap, comworld, gameworld_sp, map_ents | converted |
+| material | converted (technique slots remapped, state bits filtered by the console technique set) |
+| techset | copied from `--console-zone` fastfiles, name reference otherwise |
+| image | converted from the zone or from `.iwi` files; stock images without pixel data are copied from console fastfiles or referenced. Cube maps become references for now. |
+| sound (aliases) | converted, streamed names follow the console conventions |
+| loaded sounds | encoded to XMA1 (needs `xma2encode`), otherwise copied from console fastfiles or referenced |
+| streamed sounds | encoded to XMA2 `sounds/*.xma` (needs `xma2encode`) |
 
-Finishing the remaining types requires a PC map fastfile together with its
-CoD Xenon converted console version (e.g. `nazi_zombie_aztec.ff` for both).
-Their layouts can then be derived and checked the same way. Verify new console
-layouts with:
+Verify new console layouts with:
 
 ```sh
 python dev/verify_samples.py path/to/console/*.ff   # updates t4ff/defs/x360_verified.txt

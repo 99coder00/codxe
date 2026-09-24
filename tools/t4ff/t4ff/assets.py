@@ -97,6 +97,17 @@ def build_reference(conv, asset_type: str, src_node: Node, ref_name: str) -> Nod
     return node
 
 
+def map_name_string(conv, src_node: Node, asset_type: str, new_asset: Node):
+    """Name string mapping for an asset replaced by ``new_asset`` (e.g. a console library copy)."""
+    rec_name = ASSET_RECORDS[asset_type]
+    try:
+        ptr = new_asset.relocs.get(name_offset(conv.dst, rec_name))
+    except KeyError:
+        return
+    if ptr is not None and ptr.kind == "follow" and ptr.node is not None and ptr.node.string:
+        _map_name_string(conv, src_node, rec_name, ptr.node)
+
+
 def _map_name_string(conv, src_node: Node, rec_name: str, new_string: Node):
     """Other assets can point into the name string of a rebuilt asset (the PC linker shares equal
     strings): make those pointers resolve to the new name string."""
@@ -124,14 +135,9 @@ def _map_name_string(conv, src_node: Node, rec_name: str, new_string: Node):
 
 
 def techset_hook(conv, asset_type, node, name):
-    # PC techniques carry PC shaders; the console resolves the technique set by name from its
-    # own zones (this is also what CoD Xenon's converter does).
-    ref = name if name.startswith(",") else "," + name
-    conv.stats.count(conv.stats.referenced, asset_type)
-    new = build_reference(conv, asset_type, node, ref)
-    conv.node_map[id(node)] = new
-    conv.offset_maps[id(node)] = lambda off: off
-    return new
+    # PC techniques carry PC shaders: the console technique set of the same name is copied from
+    # the console library (as CoD Xenon's converter does), or referenced by name.
+    return _reference(conv, asset_type, node, name)
 
 
 def material_hook(conv, asset_type, node, name):
@@ -145,6 +151,18 @@ def material_hook(conv, asset_type, node, name):
     for pc_index, x_index in PC_TECHNIQUE_TO_X360.items():
         if pc_index < len(src_entries):
             dst_entries[x_index] = src_entries[pc_index]
+
+    # With the console technique set at hand (copied from the console library), keep the state
+    # bits of its techniques only.
+    present = _console_techniques(conv, node)
+    if present is not None:
+        for i in range(X360_TECHNIQUE_COUNT):
+            if not present[i]:
+                dst_entries[i] = 0xFF
+            elif dst_entries[i] == 0xFF:
+                fallback = next((e for e in dst_entries if e != 0xFF), 0)
+                conv.warn(f"material '{name}': no PC state bits for console technique {i}, using state bits {fallback}")
+                dst_entries[i] = fallback
 
     # Drop the state bits only the removed techniques used, numbering the rest in first use
     # order (as the console linker does).
@@ -169,6 +187,22 @@ def material_hook(conv, asset_type, node, name):
                 table.data = bytearray(b"".join(bytes(table.data[i * size : (i + 1) * size]) for i in order))
     new.data[d_off : d_off + X360_TECHNIQUE_COUNT] = dst_entries
     return new
+
+
+def _console_techniques(conv, material: Node):
+    """Which techniques the console technique set of a PC material has (None when unknown)."""
+    off = find_field(conv.src.record("Material"), "techniqueSet").offset
+    ptr = material.relocs.get(off)
+    src = ptr.target() if ptr is not None and ptr.kind != "null" else None
+    techset = conv.node_map.get(id(src)) if src is not None else None
+    if techset is None or not techset.extra.get("library"):
+        return None
+    f = find_field(conv.dst.record("MaterialTechniqueSet"), "techniques")
+    present = []
+    for i in range(X360_TECHNIQUE_COUNT):
+        p = techset.relocs.get(f.offset + 4 * i)
+        present.append(p is not None and p.kind != "null")
+    return present
 
 
 def image_hook(conv, asset_type, node, name):
@@ -282,6 +316,11 @@ def asset_display_name_pc(conv, node: Node) -> str:
 
 
 def _reference(conv, asset_type, node, name):
+    copy = conv.from_library(asset_type, name, node) if hasattr(conv, "from_library") else None
+    if copy is not None:
+        conv.node_map[id(node)] = copy
+        conv.offset_maps[id(node)] = lambda off: off
+        return copy
     conv.stats.count(conv.stats.referenced, asset_type)
     new = build_reference(conv, asset_type, node, name if name.startswith(",") else "," + name)
     conv.node_map[id(node)] = new

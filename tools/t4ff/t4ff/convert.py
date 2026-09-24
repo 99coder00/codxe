@@ -439,6 +439,8 @@ class ConvertOptions:
     sound_rate: int = 0
     mono_sounds: bool = False
     sounds_dir: Optional[str] = None
+    # Xbox 360 fastfiles (stock or converted) that console only assets are copied from
+    console_zones: List[str] = field(default_factory=list)
     log: Callable[[str], None] = print
 
 
@@ -446,6 +448,7 @@ class ConvertOptions:
 class ConvertStats:
     converted: Dict[str, int] = field(default_factory=dict)
     referenced: Dict[str, int] = field(default_factory=dict)
+    copied: Dict[str, int] = field(default_factory=dict)  # from the console library
     texture_bytes: int = 0
     sound_bytes: int = 0
     warnings: List[str] = field(default_factory=list)
@@ -485,6 +488,15 @@ class ZoneConverter:
             from .images import IwdLibrary
 
             self.library = IwdLibrary(self.options.iwd_paths)
+        # console assets copied from other Xbox 360 fastfiles (shared by the zones of one run)
+        self.script_strings = list(zone.script_strings)
+        self.console_library = None
+        self.cloner = None
+        if self.options.console_zones:
+            from .library import Cloner, ConsoleLibrary
+
+            self.console_library = _shared_library(dst, tuple(self.options.console_zones), self.options.log)
+            self.cloner = Cloner(dst, self.script_strings)
         from . import assets
 
         assets.register_hooks(self)
@@ -679,13 +691,20 @@ class ZoneConverter:
 
     def convert_asset_node(self, asset_type: str, node: Node) -> Node:
         name = asset_display_name(self.src, node)
+        if name.startswith(","):
+            # the PC zone expects this asset from another zone: the console library may have it
+            copy = self.from_library(asset_type, name, node)
+            if copy is not None:
+                self.node_map[id(node)] = copy
+                self.offset_maps[id(node)] = lambda off: off
+                return copy
         hook = self.hooks.get(asset_type)
         if hook is not None:
             result = hook(self, asset_type, node, name)
             if result is not None:
                 self.node_map[id(node)] = result
                 self.offset_maps.setdefault(id(node), lambda off: off)
-                if asset_type not in ("techset",) and not any(
+                if not result.extra.get("library") and not any(
                     isinstance(p, Ptr) and p.kind == "follow" and p.node.string and bytes(p.node.data).startswith(b",")
                     for p in result.relocs.values()
                 ):
@@ -695,16 +714,47 @@ class ZoneConverter:
         missing = self.unverified_records(node)
         if missing and not self.options.allow_unverified and not name.startswith(","):
             self.warn(f"{asset_type} '{name}': console layout of {', '.join(sorted(missing))} not verified, emitting a reference")
-            self.stats.count(self.stats.referenced, asset_type)
             return self.reference_asset(asset_type, node, name)
 
         self.stats.count(self.stats.converted, asset_type)
         return self.convert_node(node)
 
+    def from_library(self, asset_type: str, name: str, src_node: Optional[Node] = None) -> Optional[Node]:
+        """A copy of the console asset ``name`` from the console library, if it has one."""
+        if self.console_library is None or asset_type not in ASSET_RECORDS:
+            return None
+        found = self.console_library.find(ASSET_RECORDS[asset_type], name)
+        if found is None:
+            return None
+        from .library import LibraryError
+
+        try:
+            copy = self.cloner.copy_asset(*found)
+        except LibraryError as e:
+            self.warn(f"{asset_type} '{name.lstrip(',')}': cannot be copied from the console library ({e})")
+            return None
+        self.stats.count(self.stats.copied, asset_type)
+        copy.extra["library"] = True
+        loader = src_node.extra.get("ptr") if src_node is not None else None
+        if loader is not None and loader.kind in ("follow", "insert"):
+            # later copies that use this asset alias the pointer that loads it
+            self.cloner.register_asset(ASSET_RECORDS[asset_type], name, loader)
+        if src_node is not None:
+            from .assets import map_name_string
+
+            map_name_string(self, src_node, asset_type, copy)
+        return copy
+
     def reference_asset(self, asset_type: str, node: Node, name: str) -> Node:
         """Replace an asset by a name only reference (resolved by the game at load time)."""
         from . import assets
 
+        copy = self.from_library(asset_type, name, node)
+        if copy is not None:
+            self.node_map[id(node)] = copy
+            self.offset_maps[id(node)] = lambda off: off
+            return copy
+        self.stats.count(self.stats.referenced, asset_type)
         ref_name = name if name.startswith(",") else "," + name
         new = assets.build_reference(self, asset_type, node, ref_name)
         self.node_map[id(node)] = new
@@ -736,7 +786,7 @@ class ZoneConverter:
 
         new_zone = Zone(
             self.dst.name,
-            list(zone.script_strings),
+            self.script_strings,
             [],
             [],
             0,
@@ -811,6 +861,18 @@ class _ArrayMap:
 
     def keeps_pointer(self, off: int) -> bool:
         return self.elem.keeps_pointer(off % self.elem.src_size)
+
+
+_LIBRARIES: Dict[tuple, object] = {}
+
+
+def _shared_library(platform: Platform, paths: tuple, log):
+    from .library import ConsoleLibrary
+
+    key = (platform.name, paths)
+    if key not in _LIBRARIES:
+        _LIBRARIES[key] = ConsoleLibrary(platform, list(paths), log)
+    return _LIBRARIES[key]
 
 
 def _asset_type_of(rec_name: str) -> str:
