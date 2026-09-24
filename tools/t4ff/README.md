@@ -16,9 +16,11 @@ keeps them small enough for the console's memory:
 - **Technique sets (shaders)** cannot be converted from PC data. They are copied
   from Xbox 360 fastfiles you provide (`--console-zone`), together with any stock
   image, sound or other asset the PC map expects from the game.
-- **mod.ff** is merged into `<map>.ff`, because the console has no mod zone.
-  Assets both define (including textures nested in materials) are loaded once.
-  `<map>_patch.ff` and `<map>_load.ff` are converted separately.
+- **One fastfile per map**, as in CoD Xenon's converted maps: `mod.ff` (the
+  console has no mod zone) and `<map>_patch.ff` are merged into `<map>.ff`.
+  Scripts of later zones win (`_patch` over the map, `mod.ff` over both), and
+  assets several zones define (including textures nested in materials) are
+  loaded once. `<map>_load.ff` (loading screen) is optional (`--load-zone`).
 
 Every written fastfile is read back with the console loading rules before the
 tool reports success.
@@ -81,6 +83,8 @@ Useful options:
 | `--sound-rate HZ`, `--mono-sounds` | Downsample (24000, 32000, 44100 or 48000) or downmix loaded (in memory) sounds. |
 | `--stream-rate HZ`, `--mono-streams` | Resample or downmix streamed sounds. |
 | `--xma-quality N` | xma2encode quality (1-100, default 60). |
+| `--no-mod`, `--no-patch` | Do not merge `mod.ff` / `<map>_patch.ff` into the map fastfile. |
+| `--load-zone` | Also write `<map>_load.ff`, the loading screen zone. Experimental: CoD Xenon's converted maps have none. |
 | `--allow-unverified` | Also convert asset types whose console layout was not verified. Expect crashes. |
 
 Other commands:
@@ -89,6 +93,40 @@ Other commands:
 python -m t4ff info <fastfile> [--list]   # blocks, asset counts, asset names (PC or console)
 python -m t4ff roundtrip <fastfile>...    # read + rewrite, checks the result is byte identical
 ```
+
+### Testing on the console
+
+**How CoD Xe finds the map.** CoD Xe does not keep a list of usermaps: when the
+game opens the fastfile of a zone, CoD Xe serves
+`_codxe/usermaps/<zone>/<zone>.ff` instead if it exists (and the sounds of the
+active map from its `sounds` folder). So the folder and the fastfile must carry
+the map's name exactly; `t4ff` names them after the PC map fastfile.
+
+**How it appears in the menu.** The map list is part of CoD Xenon's
+`_codxe/zone/patch_ui.ff` (one button per map that runs `devmap <map>`) and
+`patch.ff` (map names and descriptions). It lists the six maps of their
+release. A map converted by `t4ff` with one of these names (e.g.
+`nazi_zombie_aztec`) is started from that button. Any other map is started from
+the CoD Xe console: plug a USB keyboard into the console, press the console key
+(`~`) and type `devmap <map>`.
+
+**A first test.** Aztec is the best first test, because CoD Xenon's working
+conversion of the same map is there to compare with:
+
+1. Install CoD Xenon's fastfiles package and check that their Aztec loads. This
+   confirms CoD Xe, the title update and their `patch_ui.ff` / `patch.ff`.
+2. Convert the PC Aztec folder. For this first run you can give their
+   `nazi_zombie_aztec.ff` as a console fastfile: shaders, stock textures and
+   loaded sounds then come from a version known to work, and the test isolates
+   what `t4ff` converts (models, animations, world, scripts, effects, weapons).
+3. Back up their `_codxe/usermaps/nazi_zombie_aztec/nazi_zombie_aztec.ff`,
+   replace it with yours and start Aztec from the menu.
+4. Then convert again with stock Xbox 360 fastfiles of your game as console
+   fastfiles (and `xma2encode.exe`) instead, which is how other maps are
+   converted.
+
+If the game stops while loading, run `python -m t4ff info` on the fastfile and
+report the output together with the step that failed.
 
 ### Memory
 

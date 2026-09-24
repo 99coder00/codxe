@@ -300,16 +300,28 @@ class SampleZoneTests(unittest.TestCase):
             console_zones=[library] if os.path.exists(library) else [],
             log=lambda msg: None,
         )
-        zones = []
-        for name in ("nazi_zombie_aztec.ff", "mod.ff"):
+        def script(zone, name):
+            asset = next(a for a in zone.assets if a.type == "rawfile" and a.name == name and a.ptr is not None and a.ptr.kind == "follow")
+            return bytes(next(c for c in asset.ptr.node.children if (c.extra.get("origin") or ("", "", ""))[-1] == "buffer").data)
+
+        zones, expected = [], {}
+        for name in ("nazi_zombie_aztec.ff", "nazi_zombie_aztec_patch.ff", "mod.ff"):
             _, _, data = read_fastfile(sample("pc", name))
-            zones.append(ZoneConverter(Reader(pc(), data).load(), pc(), x360(), options).convert())
+            zone = Reader(pc(), data).load()
+            for script_name in ("maps/_laststand.gsc", "animscripts/dog_init.gsc"):
+                if any(a.name == script_name for a in zone.assets):
+                    expected[script_name] = script(zone, script_name)  # the last zone's version
+            zones.append(ZoneConverter(zone, pc(), x360(), options).convert())
         merged = merge_zones(x360(), zones, log=lambda msg: None)
         prune_references(x360(), merged, log=lambda msg: None)
         out = Writer(x360()).write(merged)
         converted = Reader(x360(), out).load()
         self.assertEqual(len(converted.assets), len(merged.assets))
         self.assertEqual(Writer(x360()).write(converted), out)
+
+        # mod.ff overrides <map>_patch.ff, which overrides the map; patch only scripts are kept
+        for script_name, data in expected.items():
+            self.assertEqual(script(converted, script_name), data, script_name)
 
 
 if __name__ == "__main__":

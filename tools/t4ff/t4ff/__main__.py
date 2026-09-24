@@ -154,18 +154,23 @@ def cmd_convert(args):
         console_zones=args.console_zone,
     )
 
-    # The console has no mod.ff: the mod's assets are merged into the map zone (one texture budget).
-    paths = [files["map"]] + ([files["mod"]] if "mod" in files and not args.no_mod else [])
+    # One fastfile, as in CoD Xenon's converted maps: the console has no mod.ff, and <map>_patch.ff is
+    # merged too. Scripts of later zones win (patch over map, mod over both). One texture budget.
+    paths = [files["map"]]
+    if "patch" in files and not args.no_patch:
+        paths.append(files["patch"])
+    if "mod" in files and not args.no_mod:
+        paths.append(files["mod"])
     zones = [run_converter(path, conv) for path, conv in zip(paths, converters(paths, options))]
     main_zone = zones[0] if len(zones) == 1 else merge_zones(x360(), zones)
     prune_references(x360(), main_zone)
     write_zone(main_zone, os.path.join(out_dir, f"{name}.ff"))
 
-    for role in ("patch", "load"):
-        if role in files and not (role == "load" and args.no_load):
-            zone = convert_fastfile(files[role], options)
-            prune_references(x360(), zone)
-            write_zone(zone, os.path.join(out_dir, os.path.basename(files[role])))
+    if "load" in files and args.load_zone:
+        # experimental: CoD Xe serves <map>_load.ff as the loading screen zone
+        zone = convert_fastfile(files["load"], options)
+        prune_references(x360(), zone)
+        write_zone(zone, os.path.join(out_dir, os.path.basename(files["load"])))
     return 0
 
 
@@ -204,7 +209,9 @@ def main(argv=None):
     p.add_argument("--console-zone", action="append", default=[], help="Xbox 360 fastfile (stock or already converted) to copy console only assets from, e.g. technique sets; repeatable")
     p.add_argument("--no-sounds", action="store_true", help="do not convert streamed sounds")
     p.add_argument("--no-mod", action="store_true", help="do not merge the usermap's mod.ff into the map fastfile")
-    p.add_argument("--no-load", action="store_true", help="do not convert <map>_load.ff")
+    p.add_argument("--no-patch", action="store_true", help="do not merge the usermap's <map>_patch.ff into the map fastfile")
+    p.add_argument("--load-zone", action="store_true", help="also convert <map>_load.ff (loading screen; experimental, CoD Xenon's maps have none)")
+    p.add_argument("--no-load", action="store_true", help=argparse.SUPPRESS)  # the default now
     p.add_argument("--no-compress", action="store_true", help="keep uncompressed textures uncompressed (they are DXT compressed by default)")
     p.add_argument("--no-mips", action="store_true", help="drop all mip levels (saves ~25%% memory, textures shimmer at distance)")
     p.add_argument("--allow-unverified", action="store_true", help="also convert assets whose console layout is not verified (may crash the game)")

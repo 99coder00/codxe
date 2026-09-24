@@ -42,7 +42,8 @@ class Settings:
     no_mips: bool = False
     no_compress: bool = False
     no_mod: bool = False
-    no_load: bool = False
+    no_patch: bool = False
+    load_zone: bool = False
     no_sounds: bool = False
 
     @classmethod
@@ -91,7 +92,7 @@ def convert_args(s: Settings) -> List[str]:
         args += ["--stream-rate", str(s.stream_rate)]
     if s.xma_quality != 60:
         args += ["--xma-quality", str(s.xma_quality)]
-    for flag in ("mono_sounds", "mono_streams", "no_mips", "no_compress", "no_mod", "no_load", "no_sounds"):
+    for flag in ("mono_sounds", "mono_streams", "no_mips", "no_compress", "no_mod", "no_patch", "load_zone", "no_sounds"):
         if getattr(s, flag):
             args.append("--" + flag.replace("_", "-"))
     return args
@@ -193,7 +194,7 @@ def main():
     }
     flags = {
         name: tk.BooleanVar(value=getattr(settings, name))
-        for name in ("mono_sounds", "mono_streams", "no_mips", "no_compress", "no_mod", "no_load", "no_sounds")
+        for name in ("mono_sounds", "mono_streams", "no_mips", "no_compress", "no_mod", "no_patch", "load_zone", "no_sounds")
     }
 
     # -- paths ----------------------------------------------------------------
@@ -309,8 +310,9 @@ def main():
             ("no_mips", "No mip maps"),
             ("no_compress", "Keep uncompressed textures"),
             ("no_mod", "Skip mod.ff"),
-            ("no_load", "Skip _load.ff"),
+            ("no_patch", "Skip _patch.ff"),
             ("no_sounds", "Skip sounds"),
+            ("load_zone", "Write _load.ff (loading screen, experimental)"),
         ]
     ):
         ttk.Checkbutton(checks, text=text, variable=flags[name]).grid(row=i // 4, column=i % 4, sticky="w", padx=6, pady=1)

@@ -1,8 +1,10 @@
-"""Merging several zones into one (e.g. a usermap's mod.ff into <map>.ff for the console).
+"""Merging several zones into one (a usermap's <map>_patch.ff and mod.ff into <map>.ff for the console).
 
 Script strings of every zone are merged into one table and all script string
-fields are remapped. Assets defined by more than one zone are kept once (first
-zone wins); later duplicates become name references resolved by the game.
+fields are remapped. Assets defined by more than one zone are kept once; later
+duplicates become name references resolved by the game. For scripts, string
+tables and localized strings the last zone's version is kept (it overrides the
+earlier ones on PC); for other assets the first one.
 """
 
 from __future__ import annotations
@@ -80,6 +82,15 @@ def remap_script_strings(p: Platform, root: Node, mapping: List[int]):
                 p.u16.pack_into(node.data, off, mapping[value])
 
 
+# Self-contained asset types for which the last zone's version wins (mod.ff and <map>_patch.ff
+# replace scripts of the map on PC)
+LATER_WINS = ("rawfile", "stringtable", "localize")
+
+
+def _content(node: Node) -> bytes:
+    return b"".join(bytes(n.data) for n in node.walk())
+
+
 def merge_zones(p: Platform, zones: List[Zone], log=print) -> Zone:
     from . import assets as asset_hooks
 
@@ -95,6 +106,8 @@ def merge_zones(p: Platform, zones: List[Zone], log=print) -> Zone:
     asset_relocs: List[Ptr] = []
 
     duplicates = 0
+    overridden = 0
+    defined: Dict[Tuple[str, str], Tuple[Zone, Ptr, int]] = {}  # first definition: zone, pointer, child index
     for zone_index, zone in enumerate(zones):
         mapping = []
         for s in zone.script_strings:
@@ -126,10 +139,26 @@ def merge_zones(p: Platform, zones: List[Zone], log=print) -> Zone:
             if ptr is not None and ptr.kind in ("follow", "insert") and duplicate:
                 target = ptr.node
                 if not _has_incoming_refs(zone, target):
+                    earlier = defined.get(key)
+                    if asset.type in LATER_WINS and earlier is not None and _content(earlier[1].node) != _content(target):
+                        # a later zone overrides the script / table (as mod.ff and <map>_patch.ff do on PC):
+                        # its version takes the place of the earlier one
+                        earlier_zone, earlier_ptr, earlier_child = earlier
+                        if not _has_incoming_refs(earlier_zone, earlier_ptr.node):
+                            old = earlier_ptr.node
+                            earlier_ptr.node = target
+                            if earlier_ptr.kind == "insert":
+                                target.insert = True
+                                target.extra["ptr"] = earlier_ptr
+                            asset_children[earlier_child] = target
+                            target = old
+                            overridden += 1
                     ref = asset_hooks.build_reference(_Conv(p), asset.type, target, "," + asset.name)
                     ptr.node = ref
                     child_for_ptr[id(ptr)] = ref
                     duplicates += 1
+            elif ptr is not None and ptr.kind in ("follow", "insert") and not asset.name.startswith(",") and key not in defined:
+                defined[key] = (zone, ptr, len(asset_children))
             seen.add(key)
             merged_assets.append(ZoneAsset(asset.type, ptr, asset.name))
             asset_relocs.append(ptr)
@@ -137,7 +166,7 @@ def merge_zones(p: Platform, zones: List[Zone], log=print) -> Zone:
                 asset_children.append(child_for_ptr[id(ptr)])
 
     if duplicates:
-        log(f"merge: {duplicates} assets defined by several zones are kept once")
+        log(f"merge: {duplicates} assets defined by several zones are kept once ({overridden} scripts/tables taken from the later zone)")
 
     # script string table
     script_node = Node(TypeRef("pointer", "", 4, 4, to=TypeRef("scalar", "char", 1, 1)), len(strings), BLOCK_VIRTUAL)
