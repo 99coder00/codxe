@@ -1,0 +1,7 @@
+// Corrections to OpenAssetTools' T4 zone code commands, verified against PC fastfiles.
+// Applied for every platform (the console commands build on top of these).
+
+// The runtime scene entity cell bits are twice as large as OAT assumes: the linker's runtime block
+// size of nazi_zombie_aztec.ff only matches with cellCount * 0x200 words.
+use GfxWorldDpvsPlanes;
+set count sceneEntCellBits cellCount * 0x200;

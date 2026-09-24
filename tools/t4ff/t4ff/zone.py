@@ -304,17 +304,16 @@ class Platform:
         info = self.cmds.types.get(rec.name)
         if info is not None and info.reorder:
             order = info.reorder
-            named = [n for n in order if n != "..."]
-            reordered = [find_field(rec, n) for n in named]
-            if "..." in order:
-                rest = [f for f in fields if f.name not in named]
-                idx = order.index("...")
-                before = [find_field(rec, n) for n in order[:idx]]
-                after = [find_field(rec, n) for n in order[idx + 1 :]]
-                fields = before + rest + after
+            if order and order[0] == "...":
+                # OAT semantics: declaration order up to and including the first listed member,
+                # then the other listed members, then the remaining members.
+                first, listed = order[1], order[2:]
+                rest = [f for f in fields if f.name not in listed]
+                split = next(i for i, f in enumerate(rest) if f.name == first) + 1
+                fields = rest[:split] + [find_field(rec, n) for n in listed] + rest[split:]
             else:
-                rest = [f for f in fields if f.name not in named]
-                fields = reordered + rest
+                rest = [f for f in fields if f.name not in order]
+                fields = [find_field(rec, n) for n in order] + rest
         self._ordered[rec.name] = fields
         return fields
 

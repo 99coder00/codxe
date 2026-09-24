@@ -18,12 +18,18 @@ from .zone import (
 )
 
 X360_COMMANDS = os.path.join(TOOL_DIR, "defs", "x360_commands.txt")
+PC_FIXES = os.path.join(TOOL_DIR, "defs", "pc_commands.txt")
 
 
 @functools.lru_cache(maxsize=None)
 def pc() -> Platform:
     layout = load_layout("pc")
-    return Platform("pc", "<", layout, load_commands(layout), PC_ASSET_TYPES, [BLOCK_TEMP, BLOCK_VIRTUAL, BLOCK_LARGE, BLOCK_PHYSICAL])
+    parser = CommandParser(layout)
+    from .commands import OAT_T4_COMMANDS
+
+    parser.parse_file(OAT_T4_COMMANDS)
+    parser.parse_file(PC_FIXES)
+    return Platform("pc", "<", layout, parser.cmds, PC_ASSET_TYPES, [BLOCK_TEMP, BLOCK_VIRTUAL, BLOCK_LARGE, BLOCK_PHYSICAL])
 
 
 @functools.lru_cache(maxsize=None)
@@ -33,6 +39,7 @@ def x360() -> Platform:
     from .commands import OAT_T4_COMMANDS
 
     parser.parse_file(OAT_T4_COMMANDS)
+    parser.parse_file(PC_FIXES)
     if os.path.exists(X360_COMMANDS):
         parser.parse_file(X360_COMMANDS)
     return Platform("x360", ">", layout, parser.cmds, X360_ASSET_TYPES, [BLOCK_TEMP, BLOCK_VIRTUAL, BLOCK_LARGE, BLOCK_PHYSICAL])
