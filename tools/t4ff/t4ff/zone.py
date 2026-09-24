@@ -144,7 +144,7 @@ class Node:
 
     __slots__ = (
         "type", "count", "data", "block", "relocs", "children", "push_before", "push_after", "insert",
-        "string", "asset", "offset", "extra", "runtime_size", "name",
+        "string", "asset", "offset", "extra", "runtime_size", "name", "segments",
     )  # fmt: skip
 
     def __init__(self, type_: TypeRef, count: int, block: int):
@@ -163,6 +163,9 @@ class Node:
         self.extra: dict = {}
         self.runtime_size = 0  # size of allocations in non-streamed runtime blocks
         self.name: Optional[str] = None
+        # How the node data is composed, in stream order: (type, count, size, partial). ``partial``
+        # marks a structure streamed only up to its dynamic member.
+        self.segments: List[Tuple[TypeRef, int, int, bool]] = []
 
     @property
     def elem_size(self) -> int:
@@ -457,9 +460,13 @@ class Reader:
             nodes.append(node)
         return node
 
-    def load_into(self, node: Node, size: int):
+    def load_into(self, node: Node, size: int, seg_type: Optional[TypeRef] = None, seg_count: int = 1, partial: bool = False):
         """Stream ``size`` bytes into ``node`` at the current block position."""
         block = self.block
+        if seg_type is None:
+            seg_type = TypeRef("scalar", "uchar", 1, 1)
+            seg_count = size
+        node.segments.append((seg_type, seg_count, size, partial))
         if self.offsets[block] != node.offset + len(node.data) + node.runtime_size or (node.children and size):
             raise ZoneError(f"non contiguous load into {node!r}")
         if block in self.p.streamed_blocks:
@@ -533,9 +540,8 @@ class Reader:
             child = self.new_node(TypeRef("scalar", "char", 1, 1), 1, 1)
             child.string = True
             end = self.data.index(b"\0", self.pos) + 1
-            self.load_into(child, end - self.pos)
+            self.load_into(child, end - self.pos, TypeRef("scalar", "char", 1, 1), end - self.pos)
             child.count = len(child.data)
-            self.finish_node(child)
             self.set_ptr(node, offset, Ptr("follow", child))
         else:
             self.set_ptr(node, offset, self.resolve_ref(raw))
@@ -560,8 +566,7 @@ class Reader:
             if strings_ptr != FOLLOW:
                 raise ZoneError("script string list must follow")
             script_node = self.new_node(TypeRef("pointer", "", 4, 4, to=TypeRef("scalar", "char", 1, 1)), string_count, 4)
-            self.load_into(script_node, 4 * string_count)
-            self.finish_node(script_node)
+            self.load_into(script_node, 4 * string_count, script_node.type, string_count)
             self.parents.append(script_node)
             for i in range(string_count):
                 self.load_xstring(script_node, 4 * i)
@@ -575,8 +580,7 @@ class Reader:
             if assets_ptr != FOLLOW:
                 raise ZoneError("asset list must follow")
             assets_node = self.new_node(TypeRef("scalar", "uint", 4, 4), 2 * asset_count, 4)
-            self.load_into(assets_node, 8 * asset_count)
-            self.finish_node(assets_node)
+            self.load_into(assets_node, 8 * asset_count, assets_node.type, 2 * asset_count)
             self.parents.append(assets_node)
             for i in range(asset_count):
                 type_index = p.u32.unpack_from(assets_node.data, 8 * i)[0]
@@ -607,6 +611,7 @@ class Reader:
             self.align(node.block, node.extra["align"])
             node.offset = self.offsets[node.block]
             node.data += self.read(node.count * node.type.size)
+            node.segments.append((node.type, node.count, len(node.data), False))
             self.offsets[node.block] += len(node.data)
             self.pop()
 
@@ -633,6 +638,7 @@ class Reader:
 
         if raw == FOLLOW or (in_temp and raw == INSERT):
             child = self.new_node(TypeRef("record", rec_name, rec.size, rec.align), 1, p.type_alloc_align(rec_name, rec.align))
+            child.extra["origin"] = ("asset", rec_name)
             if in_temp:
                 child.push_before = BLOCK_TEMP
             ptr = Ptr("follow" if raw == FOLLOW else "insert", child)
@@ -657,7 +663,7 @@ class Reader:
         if stream_start:
             dyn = p.dynamic_member(rec.name)
             size = rec.size if dyn is None else dyn.offset
-            self.load_into(node, size)
+            self.load_into(node, size, TypeRef("record", rec.name, rec.size, rec.align), 1, dyn is not None)
 
         pushed = None
         if p.is_asset(rec.name):
@@ -737,7 +743,7 @@ class Reader:
             start = len(node.data)
             if start != offset:
                 raise ZoneError(f"dynamic member {rec.name}::{f.name} not at end of data")
-            self.load_into(node, count * elem.size)
+            self.load_into(node, count * elem.size, elem, count)
             if elem.kind == "record" and not p.record_is_leaf(elem.name):
                 erec = p.record(elem.name)
                 for i in range(count):
@@ -756,7 +762,7 @@ class Reader:
                 size = sub.size if dyn is None else dyn.offset
                 if len(node.data) != offset:
                     raise ZoneError(f"partial member {rec.name}::{f.name} not at end of data")
-                self.load_into(node, size)
+                self.load_into(node, size, t, 1, dyn is not None)
             self.frames.append(_Frame(sub, node, offset))
             try:
                 self.load_members(sub, node, offset, after_partial)
@@ -766,18 +772,18 @@ class Reader:
 
         if t.kind == "array":
             if after_partial:
-                self.load_into(node, t.size)
+                self.load_into(node, t.size, t.elem, t.count)
             self.load_embedded_array(rec, f, info, node, offset, t, ())
             return
 
         if t.kind == "pointer":
             if after_partial:
-                self.load_into(node, 4)
+                self.load_into(node, 4, t, 1)
             self.load_pointer(rec, f, info, node, offset, t.to, ())
             return
 
         if after_partial:
-            self.load_into(node, t.size)
+            self.load_into(node, t.size, t, 1)
 
     def load_embedded_array(self, rec, f, info, node, offset, t: TypeRef, index: Tuple[int, ...]):
         p = self.p
@@ -814,8 +820,7 @@ class Reader:
                 return
             count = self.eval(info.count, info, rec) if info.count is not None else 1
             child = self.new_node(t.to, count, 4)
-            self.load_into(child, 4 * count)
-            self.finish_node(child)
+            self.load_into(child, 4 * count, t.to, count)
             self.set_ptr(node, offset, Ptr("follow", child))
             self.parents.append(child)
             for i in range(count):
@@ -848,6 +853,7 @@ class Reader:
             child = Node(pointee, count, BLOCK_BY_NAME[block_name])
             child.extra["align"] = alignment
             child.extra["delayed"] = True
+            child.extra["origin"] = ("member", rec.name, f.name)
             if self.parents:
                 self.parents[-1].children.append(child)
             self.delayed.append(child)
@@ -873,6 +879,7 @@ class Reader:
 
             if pointee.kind == "pointer":
                 self.load_pointer_array(node, offset, pointee, count, reusable, raw)
+                node.relocs[offset].node.extra["origin"] = ("ptrarray", rec.name, f.name)
                 return
 
             alignment = pointee.align
@@ -882,6 +889,7 @@ class Reader:
                 alignment = p.type_alloc_align(pointee.name, pointee.align)
 
             child = self.new_node(pointee, count, alignment)
+            child.extra["origin"] = ("member", rec.name, f.name)
             if pushed:
                 child.push_before = member_block
             ptr = Ptr("insert" if (in_temp and raw == INSERT) else "follow", child)
@@ -898,13 +906,11 @@ class Reader:
                 if count == 1 and p.dynamic_member(prec.name) is not None:
                     self.load_struct(child, prec, stream_start=True)
                 else:
-                    self.load_into(child, count * pointee.size)
-                    self.finish_node(child)
+                    self.load_into(child, count * pointee.size, pointee, count)
                     for i in range(count):
                         self.load_struct(child, prec, False, i * pointee.size)
             else:
-                self.load_into(child, count * pointee.size)
-                self.finish_node(child)
+                self.load_into(child, count * pointee.size, pointee, count)
         finally:
             if pushed:
                 self.pop()
@@ -913,8 +919,7 @@ class Reader:
         p = self.p
         child = self.new_node(pointee, count, 4)
         self.set_ptr(node, offset, Ptr("follow", child))
-        self.load_into(child, 4 * count)
-        self.finish_node(child)
+        self.load_into(child, 4 * count, pointee, count)
         target = pointee.to
         self.parents.append(child)
         try:
@@ -931,12 +936,12 @@ class Reader:
                     continue
                 alignment = p.type_alloc_align(target.name, target.align) if target.kind == "record" else target.align
                 elem = self.new_node(target, 1, alignment)
+                elem.extra["origin"] = ("ptrelem", target.name if target.kind == "record" else "")
                 self.set_ptr(child, 4 * i, Ptr("follow", elem))
                 if target.kind == "record" and not p.record_is_leaf(target.name):
                     self.load_struct(elem, p.record(target.name), stream_start=True)
                 else:
-                    self.load_into(elem, target.size)
-                    self.finish_node(elem)
+                    self.load_into(elem, target.size, target, 1)
         finally:
             self.parents.pop()
 
