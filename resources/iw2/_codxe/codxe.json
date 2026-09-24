@@ -1,3 +1,5 @@
 {
-  "active_mod": "example"
+  "active_mod": "example",
+  "dump_rawfile": false,
+  "dump_map_ents": false
 }

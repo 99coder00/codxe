@@ -1,3 +1,5 @@
 {
-  "active_mod": "codjumper"
+  "active_mod": "codjumper",
+  "dump_rawfile": false,
+  "dump_map_ents": false
 }

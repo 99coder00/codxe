@@ -12,9 +12,19 @@ In `codxe.json`, set `"active_mod"` to the name of your mod folder:
 
 ```json
 {
-  "active_mod": "my_mod"
+  "active_mod": "my_mod",
+  "dump_rawfile": false,
+  "dump_map_ents": false
 }
 ```
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `active_mod` | none | Name of the folder under `_codxe\mods` to load scripts from. It must match the folder name exactly, or nothing from the mod loads. |
+| `dump_rawfile` | `false` | Writes every script the game compiles to `_codxe\dump`, keeping its path (for example `_codxe\dump\maps\_utility.gsc`). Mod scripts are **not** loaded while this is on. |
+| `dump_map_ents` | `false` | Writes each loaded map's entity string to `_codxe\dump\<map>.ents` (T4 and IW4 singleplayer, T4 multiplayer). |
+
+The `codxe.json` files in this repository ship with every option listed so they're easy to flip.
 
 Once configured, the engine will redirect script lookups to:
 

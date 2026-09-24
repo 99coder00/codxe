@@ -42,14 +42,20 @@ top-left corner of the game's menus.
                        `-- ... (the other .gsc files)
    ```
 
-2. Open `_codxe/codxe.json` in a text editor and set the active mod to `mod_menu`. The value must
-   match the folder name exactly:
+2. Open `_codxe/codxe.json` in a text editor and check that the active mod is `mod_menu`. This
+   repo's copy already says so. The value must match the folder name under `_codxe/mods`
+   exactly; a name with no folder loads nothing, and the level plays stock with no error.
 
    ```json
    {
-     "active_mod": "mod_menu"
+     "active_mod": "mod_menu",
+     "dump_rawfile": false,
+     "dump_map_ents": false
    }
    ```
+
+   Leave both dump options `false` for normal play: with `dump_rawfile` on, mods aren't loaded.
+   The options are described in [Feature overview](features.md#setup).
 
 3. Start the game and load any campaign mission or Nazi Zombies map. Once you can move, wait a
    few seconds. Player 1 sees these messages on screen:
@@ -63,16 +69,18 @@ top-left corner of the game's menus.
 
 `codxe.json` picks one mod for both singleplayer and multiplayer. The mod menu only contains
 singleplayer scripts, so multiplayer runs unmodded while it is active. To play the `codjumper`
-multiplayer mod, set `active_mod` back to `codjumper`.
+multiplayer mod, set `active_mod` to `codjumper`.
 
 ### Troubleshooting
 
 | Problem | What to check |
 | --- | --- |
-| No "CoD Xe Menu loaded" message | CoD Xe isn't running (no version text on the menus), or `active_mod` isn't exactly `mod_menu`. Also check that `_codxe/mods/mod_menu/maps/_music.gsc` exists next to `default.xex` and that TU7 is installed. |
+| No "CoD Xe Menu loaded" message | CoD Xe isn't running (no version text on the menus), `active_mod` isn't exactly `mod_menu` (a mistyped name loads nothing, with no error), or `dump_rawfile` is `true`. Also check that `_codxe/mods/mod_menu/maps/_music.gsc` exists next to `default.xex` and that TU7 is installed. |
 | Message shows but the menu won't open | Only player 1 (the host) has the menu by default. Wait until any mission intro has finished. On a different button layout, use your **Aim** and **Melee** buttons (see [Button layouts](#button-layouts)). |
 | `Server script compile error` / `unknown function` | The scripts call something your CoD Xe build doesn't register. This usually means the mod files are newer than the CoD Xe build. Use matching files from the same release, or check them with `--codxe-ref` (see [Validating GSC changes](#validating-gsc-changes)). |
 | The level won't load after editing a script | A GSC compile error stops the level from loading. Run the [checker](#validating-gsc-changes) on your changes. |
+| Text starts with `UNLOCALIZED:` | The menu turns `loc_warnings` off by itself. If you still see it, your mod files are older than the fix; copy the `mod_menu` folder again. |
+| Menu rows run together on one line, separated by dots | Switch **Menu Settings → List Style** to **Rows**. If you can't read the menu, type `set mm_list_style 1` in the CoD Xe console and reopen it. |
 | Menu feels sluggish | Scripts run on game time, so the menu slows down with **World & Physics → Timescale**. Set it back to 1. |
 
 ## Controls
@@ -96,7 +104,7 @@ While the menu is open you can't move and your gun is lowered, so RT can't fire 
 can't throw grenades. Closing the menu gives everything back. Opening with LT + RS still plays a
 knife swing; that's normal.
 
-The page footer repeats the essentials: `LT/RT Scroll  A Select  RS Back  LB/RB Adjust`.
+The page footer repeats the essentials: `LT/RT Move  A Select  RS Back`.
 **Menu Settings → Controls Help** prints the full list in-game.
 
 ### Opening options
@@ -245,8 +253,8 @@ Stones, Flak Jacket, Body Armor, Morphine Shot, Dirty Harry and Hardcore.
 For each co-op player: bring to you, go to them, god mode, menu access, launch them, revive, and
 give points (zombies).
 
-Menu Settings: 8 color themes, left/right placement, the open button combo, Controls Help,
-**Reset All Mods** and About.
+Menu Settings: 8 color themes, left/right placement, the open button combo, list style (Paged
+or one element per Row), Controls Help, **Reset All Mods** and About.
 
 ## How it works
 
@@ -338,8 +346,8 @@ python tools/gsc_check/gsc_check.py resources/t4/_codxe/mods/mod_menu --codxe-re
 Stock builtin names come from `tools/gsc_check/t4_sp_index.json`, which was built from PC scripts.
 To build an index from the exact Xbox 360 scripts:
 
-1. Set `"dump_rawfile": true` in `_codxe/codxe.json`. Mod scripts aren't loaded while dumping,
-   so the levels load normally.
+1. Set `"dump_rawfile": true` in `_codxe/codxe.json` (the option is already in the file). Mod
+   scripts aren't loaded while dumping, so the levels load normally.
 2. Load a campaign mission and each zombies map you care about. CoD Xe writes every script the
    game compiles to `_codxe/dump`.
 3. Copy `_codxe/dump` to your PC and run:

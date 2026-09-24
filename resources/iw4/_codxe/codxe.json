@@ -1,3 +1,5 @@
 {
-  "active_mod": "bot_warfare"
+  "active_mod": "bot_warfare",
+  "dump_rawfile": false,
+  "dump_map_ents": false
 }

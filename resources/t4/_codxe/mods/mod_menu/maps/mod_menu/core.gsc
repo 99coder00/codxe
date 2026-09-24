@@ -43,6 +43,11 @@ init()
 	mm_add_theme("Pink", (1, 0.25, 0.6));
 	mm_add_theme("Ice", (0.75, 0.9, 1));
 
+	// Plain (non-localized) HUD strings are shown as "UNLOCALIZED: ..." while loc_warnings is on.
+	// CoD Xe r347+ turns it off by default; do it here too for older builds.
+	mm_set_dvar("loc_warnings", "0");
+	mm_set_dvar("loc_warningsAsErrors", "0");
+
 	level thread mm_watch_connect("connecting");
 	level thread mm_watch_connect("connected");
 }
@@ -91,6 +96,7 @@ mm_player_init()
 		wait 0.1;
 
 	self mm_load_settings();
+	self mm_fix_localization();
 
 	if (self mm_is_host())
 	{
@@ -129,6 +135,7 @@ mm_load_settings()
 	self.mm_state["theme"] = self.mm_theme;
 	self.mm_state["side"] = self.mm_side;
 	self.mm_state["combo"] = self.mm_combo;
+	self.mm_state["list_style"] = mm_clamp(getDvarInt("mm_list_style"), 0, 1);
 }
 
 mm_save_setting(name, value)
@@ -194,9 +201,16 @@ mm_spawn_watch()
 }
 
 // Engine fields (god, noclip, ...) and move speed can be reset by a respawn; restore them.
+mm_fix_localization()
+{
+	self setClientDvar("loc_warnings", 0);
+	self setClientDvar("loc_warningsAsErrors", 0);
+}
+
 mm_reapply()
 {
 	self endon("disconnect");
+	self mm_fix_localization();
 	wait 0.5;
 	for (i = 0; i < level.mm.reapply.size; i++)
 	{
@@ -348,6 +362,7 @@ mm_open_menu()
 		self.mm_menu = "main";
 
 	self.mm_open = true;
+	self mm_fix_localization();
 	self freezeControls(true);
 	self disableOffhandWeapons();
 
@@ -459,14 +474,24 @@ mm_create_hud()
 	hud["header"].glowAlpha = 0.6;
 	hud["header"] setText(level.mm.title);
 
-	hud["list"] = self mm_hud_text(x + 10, listTop, "left", level.mm.font_scale, 4);
+	self.mm_list_style = mm_clamp(getDvarInt("mm_list_style"), 0, 1);
+	if (self.mm_list_style == 1)
+	{
+		hud["title"] = self mm_hud_text(x + 10, listTop, "left", level.mm.font_scale, 4);
+		for (r = 0; r < rows; r++)
+			hud["row" + r] = self mm_hud_text(x + 10, self.mm_list_y + r * rowH, "left", level.mm.font_scale, 4);
+	}
+	else
+	{
+		hud["list"] = self mm_hud_text(x + 10, listTop, "left", level.mm.font_scale, 4);
+	}
 
 	for (r = 0; r < rows; r++)
 		hud["val" + r] = self mm_hud_text(x + width - 10, self.mm_list_y + r * rowH, "right", level.mm.font_scale, 4);
 
-	hud["footer"] = self mm_hud_text(x + 10, y + height - 20, "left", 0.9, 4);
+	hud["footer"] = self mm_hud_text(x + 10, y + height - 20, "left", 1.0, 4);
 	hud["footer"].alpha = 0.65;
-	hud["footer"] setText("LT/RT Scroll  A Select  RS Back  LB/RB Adjust");
+	hud["footer"] setText("LT/RT Move  A Select  RS Back");
 
 	self.mm_hud = hud;
 	self.mm_page_key = "";
@@ -516,7 +541,10 @@ mm_render()
 	if (pageKey != self.mm_page_key)
 	{
 		self.mm_page_key = pageKey;
-		self.mm_hud["list"] setText(mm_page_text(menu, page, pages, top));
+		if (self.mm_list_style == 1)
+			self mm_render_rows(menu, page, pages, top);
+		else
+			self.mm_hud["list"] setText(mm_page_text(menu, page, pages, top));
 	}
 
 	for (r = 0; r < rows; r++)
@@ -537,6 +565,47 @@ mm_render()
 	scroller.alpha = 0.35;
 	scroller moveOverTime(0.06);
 	scroller.y = self.mm_list_y + (cursor - top) * level.mm.row_h;
+}
+
+// Fallback list style: one text element per row. Needs more distinct HUD strings (one per label
+// instead of one per page), but does not depend on multi-line text.
+mm_render_rows(menu, page, pages, top)
+{
+	title = "^3" + menu.title;
+	if (pages > 1)
+		title = title + " ^7(" + (page + 1) + "/" + pages + ")";
+	if (menu.items.size == 0)
+		title = title + " ^7- empty";
+	self.mm_hud["title"] setText(title);
+
+	for (r = 0; r < level.mm.rows; r++)
+	{
+		elem = self.mm_hud["row" + r];
+		if (top + r >= menu.items.size)
+		{
+			elem.alpha = 0;
+			continue;
+		}
+		elem setText(menu.items[top + r].label);
+		elem.alpha = 1;
+	}
+}
+
+mm_set_list_style(index)
+{
+	setDvar("mm_list_style", index);
+	if (!self.mm_open)
+		return;
+	self mm_create_hud();
+	self mm_render();
+}
+
+mm_list_style_names()
+{
+	names = [];
+	names[0] = "Paged";
+	names[1] = "Rows";
+	return names;
 }
 
 // One HUD string holds the page title and every visible label, and HUD strings are limited to
@@ -941,6 +1010,7 @@ mm_controls_help()
 	self iprintln("^3Scroll^7: LT / RT, left stick or D-pad");
 	self iprintln("^3Select^7: A (X also works)   ^3Back^7: RS   ^3Close^7: hold RS");
 	self iprintln("^3Change values^7: LB / RB or left stick left / right");
+	self iprintln("^3Rows run together?^7 Menu Settings > List Style > Rows (or: set mm_list_style 1)");
 	self iprintln(self mm_open_hint());
 }
 

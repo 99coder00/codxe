@@ -351,6 +351,8 @@ build_settings()
 	side.no_reset = true;
 	combo = mm_add_choice("settings", "Open With", "combo", ::mm_set_combo, mm_combo_names());
 	combo.no_reset = true;
+	style = mm_add_choice("settings", "List Style", "list_style", ::mm_set_list_style, mm_list_style_names());
+	style.no_reset = true;
 	mm_add_action("settings", "Controls Help", ::mm_controls_help);
 	mm_add_toggle("settings", "All Players Get Menu", "all_access", ::mm_set_all_access, "level");
 	mm_add_action("settings", "Reset All Mods", ::mm_reset_all);
