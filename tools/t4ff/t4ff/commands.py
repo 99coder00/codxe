@@ -250,6 +250,7 @@ class MemberInfo:
     block: Optional[str] = None
     allocalign: Optional[Expr] = None
     assetref: Optional[str] = None
+    delayed: Optional[Tuple[str, int]] = None  # (block, alignment)
 
 
 @dataclass
@@ -275,10 +276,14 @@ class Commands:
 
 
 class CommandParser:
-    def __init__(self, layout: Layout):
+    def __init__(self, layout: Layout, lenient: bool = False):
         self.layout = layout
         self.cmds = Commands()
         self.use: Optional[str] = None
+        # When lenient, directives for members that do not exist in the layout are skipped. This is
+        # used to apply the PC commands to console layouts where some members were removed.
+        self.lenient = lenient
+        self.skipped: List[str] = []
 
     # -- file handling ------------------------------------------------------
 
@@ -310,6 +315,14 @@ class CommandParser:
     # -- statements -----------------------------------------------------------
 
     def statement(self, s: str):
+        try:
+            self._statement(s)
+        except KeyError:
+            if not self.lenient:
+                raise
+            self.skipped.append(s)
+
+    def _statement(self, s: str):
         if s.startswith("game ") or s.startswith("wordsize ") or s.startswith("architecture "):
             return
         if s.startswith("asset "):
@@ -363,6 +376,14 @@ class CommandParser:
                 return
             owner, member, _, ctx = self.resolve_member(path)
             self.member(owner, member, ctx).allocalign = parse_expr(arg, self.layout.enums)
+            return
+
+        if kind == "delayed":
+            # Console extension: the pointed data is streamed after all assets (e.g. image pixels).
+            owner, member, _, ctx = self.resolve_member(path)
+            block, _, align = arg.partition(" ")
+            info = self.member(owner, member, ctx)
+            info.delayed = (block, int(align or "1", 0))
             return
 
         if kind == "assetref":

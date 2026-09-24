@@ -1,0 +1,37 @@
+// Xbox 360 zone code commands, applied after the PC commands of OpenAssetTools.
+
+// GfxImage: the texture header follows the load def, pixel data is streamed after all
+// assets into the large runtime block.
+use GfxImage;
+// The pixel data size is the card memory size (baseSize is not reliable in converted zones).
+set count pixels cardMemory::platform[0];
+set delayed pixels XFILE_BLOCK_LARGE_RUNTIME 4096;
+reorder:
+    name
+    texture
+    pixels;
+
+use GfxImageLoadDef;
+set count texture 1;
+// The texture header is the live D3D resource: it is kept in the virtual block.
+set block texture XFILE_BLOCK_VIRTUAL;
+
+// Pixel shaders are assets on console.
+asset MaterialPixelShader AssetPixelShader;
+use MaterialPixelShader;
+set block XFILE_BLOCK_TEMP;
+
+use GfxPixelShaderLoadDef;
+set count cachedPart cachedPartSize / 4;
+set count physicalPart physicalPartSize / 4;
+set block physicalPart XFILE_BLOCK_PHYSICAL;
+set allocalign physicalPart 32;
+
+use GfxVertexShaderLoadDef;
+set count cachedPart cachedPartSize / 4;
+set count physicalPart physicalPartSize / 4;
+set block physicalPart XFILE_BLOCK_PHYSICAL;
+set allocalign physicalPart 32;
+
+use MaterialPass;
+set reusable vertexShaderArray;

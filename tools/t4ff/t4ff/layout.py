@@ -381,7 +381,13 @@ def _source_for(platform: str) -> str:
 
     if platform == "x360":
         with open(X360_OVERRIDES, "r", encoding="utf-8") as f:
-            header = _replace_struct_definitions(header, f.read())
+            overrides = f.read()
+        # New console only types are inserted at the start of the T4 namespace.
+        prelude = re.search(r"// @prelude-begin(.*?)// @prelude-end", overrides, re.S)
+        if prelude:
+            overrides = overrides.replace(prelude.group(0), "")
+            header = header.replace("namespace T4\n{", "namespace T4\n{\n" + prelude.group(1), 1)
+        header = _replace_struct_definitions(header, overrides)
     elif platform != "pc":
         raise ValueError(platform)
 

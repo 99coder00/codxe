@@ -29,7 +29,7 @@ def pc() -> Platform:
 @functools.lru_cache(maxsize=None)
 def x360() -> Platform:
     layout = load_layout("x360")
-    parser = CommandParser(layout)
+    parser = CommandParser(layout, lenient=True)
     from .commands import OAT_T4_COMMANDS
 
     parser.parse_file(OAT_T4_COMMANDS)

@@ -218,6 +218,7 @@ class Platform:
         self.asset_type_index = {n: i for i, n in enumerate(asset_types)}
         # blocks whose content is part of the stream (temp + normal, plus console runtime blocks)
         self.streamed_blocks = set(streamed_blocks)
+        self.temp_padding = 16 if name == "pc" else 0
         self.u16 = struct.Struct(endian + "H")
         self.u32 = struct.Struct(endian + "I")
         self.asset_records = {rec for rec in commands.assets}
@@ -400,6 +401,7 @@ class Reader:
         self.slots: Dict[int, Ptr] = {}  # zone address of pointer slots -> slot
         self.frames: List[_Frame] = []
         self.parents: List[Node] = []
+        self.delayed: List[Node] = []
 
     # -- raw stream ---------------------------------------------------------
 
@@ -435,8 +437,12 @@ class Reader:
         if alignment > 1:
             self.offsets[block] = (self.offsets[block] + alignment - 1) & ~(alignment - 1)
 
+    trace = None  # optional callable(node, stream position) for debugging
+
     def new_node(self, type_: TypeRef, count: int, alignment: int) -> Node:
         block = self.block
+        if self.trace is not None:
+            self.trace(type_, count, block, self.pos)
         self.align(block, alignment)
         node = Node(type_, count, block)
         node.offset = self.offsets[block]
@@ -595,6 +601,14 @@ class Reader:
 
         self.parents.pop()
         self.pop()
+
+        for node in self.delayed:
+            self.push(node.block)
+            self.align(node.block, node.extra["align"])
+            node.offset = self.offsets[node.block]
+            node.data += self.read(node.count * node.type.size)
+            self.offsets[node.block] += len(node.data)
+            self.pop()
 
         zone = Zone(p.name, script_strings, assets, block_sizes, size, external_size, script_node, assets_node)
         zone.extra_root = list_node
@@ -828,13 +842,27 @@ class Reader:
                 count_expr = info.count
         count = self.eval(count_expr, info, rec) if count_expr is not None else 1
 
+        if info is not None and info.delayed is not None:
+            # Streamed after all assets (console image pixels): allocate a placeholder now.
+            block_name, alignment = info.delayed
+            child = Node(pointee, count, BLOCK_BY_NAME[block_name])
+            child.extra["align"] = alignment
+            child.extra["delayed"] = True
+            if self.parents:
+                self.parents[-1].children.append(child)
+            self.delayed.append(child)
+            self.set_ptr(node, offset, Ptr("follow", child))
+            return
+
         member_block = BLOCK_BY_NAME[info.block] if info is not None and info.block else None
-        pushed = member_block is not None and member_block != BLOCK_VIRTUAL
+        # OAT pushes every block but the default normal one. Console zones also need an explicit
+        # VIRTUAL push from inside the temp block (360 texture headers), which OAT cannot express.
+        pushed = member_block is not None and (member_block != BLOCK_VIRTUAL or self.block != BLOCK_VIRTUAL)
         if pushed:
             self.push(member_block)
 
         reusable = info is not None and info.reusable
-        in_temp = self.block == BLOCK_TEMP and pushed
+        in_temp = member_block == BLOCK_TEMP
         try:
             if reusable and in_temp and raw not in (FOLLOW, INSERT):
                 self.set_ptr(node, offset, self.resolve_alias(raw))
@@ -948,6 +976,7 @@ class Writer:
         self.offsets = [0] * BLOCK_COUNT
         self.temp_max = 0
         self.u32 = platform.u32
+        self.delayed: List[Node] = []
 
     def align(self, block: int, alignment: int):
         if alignment > 1:
@@ -975,6 +1004,9 @@ class Writer:
         raise ZoneError(kind)
 
     def emit(self, node: Node):
+        if node.extra.get("delayed"):
+            self.delayed.append(node)
+            return
         block = node.block
         saved_temp = None
         if node.push_before == BLOCK_TEMP:
@@ -991,14 +1023,13 @@ class Writer:
 
         data = node.data
         if node.relocs:
-            data = bytearray(data)
             normal = block in (BLOCK_VIRTUAL, BLOCK_LARGE, BLOCK_PHYSICAL)
             for off, ptr in node.relocs.items():
                 ptr.addr = zone_addr(block, node.extra["new_offset"] + off) if normal else None
-            for off, ptr in node.relocs.items():
-                self.u32.pack_into(data, off, self.pointer_value(ptr))
 
-        if block in self.p.streamed_blocks:
+        start = len(self.out)
+        streamed = block in self.p.streamed_blocks
+        if streamed:
             self.out += data
         self.offsets[block] += len(data) + node.runtime_size
         if block == BLOCK_TEMP:
@@ -1006,6 +1037,12 @@ class Writer:
 
         for child in node.children:
             self.emit(child)
+
+        # Pointers are encoded once the children are written: a pointer can reference data that
+        # is loaded while processing this node's members (e.g. techniques sharing technique 0).
+        if streamed and node.relocs:
+            for off, ptr in node.relocs.items():
+                self.u32.pack_into(self.out, start + off, self.pointer_value(ptr))
 
         if saved_temp is not None:
             self.offsets[BLOCK_TEMP] = saved_temp
@@ -1027,9 +1064,16 @@ class Writer:
         for child in root.children:
             self.emit(child)
 
-        block_sizes = list(self.offsets)
-        # The linker reserves room for the 16 byte asset list header in the temp block.
-        block_sizes[BLOCK_TEMP] = self.temp_max + 16
+        # Delayed data (360 image pixels) follows the assets and is not part of the zone size.
         size = len(self.out)
+        for node in self.delayed:
+            self.align(node.block, node.extra.get("align", 1))
+            node.extra["new_offset"] = self.offsets[node.block]
+            self.out += node.data
+            self.offsets[node.block] += len(node.data)
+
+        block_sizes = list(self.offsets)
+        # The PC linker reserves room for the 16 byte asset list header in the temp block.
+        block_sizes[BLOCK_TEMP] = self.temp_max + self.p.temp_padding
         head = struct.pack(p.endian + "9I", size, zone.external_size, *block_sizes)
         return head + bytes(self.out)
