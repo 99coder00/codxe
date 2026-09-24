@@ -40,6 +40,20 @@ tool reports success.
 
 ## Usage
 
+### Window
+
+Double click `t4ff_gui.pyw` (Windows), or run `python -m t4ff gui`. Choose the
+PC usermap folder, an output folder, `xma2encode.exe` and the Xbox 360
+fastfiles to take shaders from, set the memory options and press **Convert**.
+The log shows the conversion and, at the end, the memory the map needs;
+settings are remembered for the next run. **Inspect fastfile...** lists the
+content of any PC or Xbox 360 fastfile.
+
+The window uses tkinter, which the python.org installers include (on Linux:
+`sudo apt install python3-tk`).
+
+### Command line
+
 ```sh
 cd tools/t4ff
 

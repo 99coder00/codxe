@@ -94,6 +94,36 @@ class EncodingTests(unittest.TestCase):
         self.assertEqual(audio.xma1_rate(44094), 44100)
 
 
+class GuiTests(unittest.TestCase):
+    """The window's settings and the command line it runs (no display needed)."""
+
+    def test_convert_args(self):
+        from t4ff import gui
+
+        s = gui.Settings(input="in", output="out", console_zones=["a.ff", "b.ff"], texture_budget=64, sound_rate=32000, mono_sounds=True)
+        self.assertEqual(
+            gui.convert_args(s),
+            ["convert", "in", "-o", "out", "--console-zone", "a.ff", "--console-zone", "b.ff", "--texture-budget", "64", "--sound-rate", "32000", "--mono-sounds"],
+        )
+        # the command line parses
+        from t4ff.__main__ import main
+
+        with self.assertRaises(SystemExit):  # missing usermap folder
+            with open(os.devnull, "w") as devnull, __import__("contextlib").redirect_stdout(devnull):
+                main(gui.convert_args(s))
+
+    def test_settings_roundtrip(self):
+        from t4ff import gui
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "t4ff", "gui.json")
+            s = gui.Settings(input="x", iwds=["y"], no_mips=True)
+            s.save(path)
+            self.assertEqual(gui.Settings.load(path), s)
+            self.assertEqual(gui.Settings.load(os.path.join(tmp, "missing.json")), gui.Settings())
+            self.assertTrue(gui.check_settings(gui.Settings()))
+
+
 class XenosTests(unittest.TestCase):
     def test_tiling_roundtrip(self):
         rng = np.random.default_rng(1)

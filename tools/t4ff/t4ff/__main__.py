@@ -3,6 +3,7 @@
     python -m t4ff info <fastfile>
     python -m t4ff roundtrip <fastfile>...
     python -m t4ff convert <pc fastfile or usermap folder> -o <output folder> [options]
+    python -m t4ff gui
 """
 
 from __future__ import annotations
@@ -50,6 +51,8 @@ def find_usermap(path: str):
 
     Returns (map name, {role: path}, [iwd files]) where role is 'map', 'mod', 'patch' or 'load'.
     """
+    if not os.path.exists(path):
+        raise SystemExit(f"{path}: not found")
     if os.path.isfile(path):
         folder = os.path.dirname(os.path.abspath(path))
         name = os.path.splitext(os.path.basename(path))[0]
@@ -166,6 +169,13 @@ def cmd_convert(args):
     return 0
 
 
+def cmd_gui(args):
+    from .gui import main as gui_main
+
+    gui_main()
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="t4ff", description="World at War fastfile tools (PC -> Xbox 360 conversion for CoD Xe)")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -199,6 +209,9 @@ def main(argv=None):
     p.add_argument("--no-mips", action="store_true", help="drop all mip levels (saves ~25%% memory, textures shimmer at distance)")
     p.add_argument("--allow-unverified", action="store_true", help="also convert assets whose console layout is not verified (may crash the game)")
     p.set_defaults(func=cmd_convert)
+
+    p = sub.add_parser("gui", help="open the converter window")
+    p.set_defaults(func=cmd_gui)
 
     args = parser.parse_args(argv)
     return args.func(args) or 0
