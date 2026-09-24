@@ -310,7 +310,8 @@
         Material* highlightTexture;
     };
 
-    // Console animations have 12 part types (6 rotation, 5 translation, all): PART_TYPE_ALL is 11.
+    // Console animations have 12 part types (7 rotation, 4 translation, all): PART_TYPE_ALL is 11.
+    // See t4ff/xanim.py for the part types and the quaternion packing.
     struct XAnimParts
     {
         const char* name;

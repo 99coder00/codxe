@@ -69,6 +69,130 @@ class _ScalarOp:
     count: int
 
 
+def pack_dec3n(v: np.ndarray) -> np.ndarray:
+    """(n, 3) floats in [-1, 1] -> signed 10:10:10 packed unsigned ints."""
+    q = np.clip(np.floor(np.asarray(v, dtype=np.float64) * 511.0 + 0.5), -511, 511).astype(np.int64) & 0x3FF
+    return (q[:, 0] | (q[:, 1] << 10) | (q[:, 2] << 20)).astype(np.uint32)
+
+
+def _pack_unit_vec(src: np.ndarray) -> np.ndarray:
+    """PC PackedUnitVec (3 biased bytes and a scale byte) -> console 10:10:10 signed normalized.
+
+    The vector is renormalized before packing (bit identical to CoD Xenon's world vertices).
+    """
+    b = src.astype(np.float64)
+    v = (b[:, :3] - 127.0) * ((b[:, 3:4] + 192.0) / 32385.0)
+    length = np.linalg.norm(v, axis=1, keepdims=True)
+    v = np.divide(v, length, out=np.zeros_like(v), where=length > 0)
+    packed = pack_dec3n(v).astype(">u4")
+    return packed.view(np.uint8).reshape(-1, 4)
+
+
+# Records whose console encoding differs from a field by field copy: name -> converter of
+# (count, src size) uint8 arrays to (count, dst size) uint8 arrays.
+RECORD_CONVERTERS: Dict[str, Callable[[np.ndarray], np.ndarray]] = {
+    "PackedUnitVec": _pack_unit_vec,
+}
+
+
+def _field_offset(platform, rec: str, path: str) -> int:
+    from .commands import find_field
+
+    offset = 0
+    for i, part in enumerate(path.split(".")):
+        f = find_field(platform.record(rec), part)
+        offset += f.offset
+        rec = f.type.name
+    return offset
+
+
+def _fix_gfx_surface(src: np.ndarray, dst: np.ndarray):
+    """The console keeps a copy of the surface bounds right after the triangle info."""
+    from .platforms import x360
+
+    p = x360()
+    b = _field_offset(p, "GfxSurface", "bounds")
+    c = _field_offset(p, "GfxSurface", "boundsCopy")
+    dst[:, c : c + 24] = dst[:, b : b + 24]
+
+
+def _fix_static_model_inst(src: np.ndarray, dst: np.ndarray):
+    """PC placement (origin, 3x3 axis, scale) -> console origin, DEC3N packed axis, scale."""
+    from .platforms import pc, x360
+
+    ps, pd = pc(), x360()
+    so = _field_offset(ps, "GfxStaticModelDrawInst", "placement")
+    n = len(src)
+    placement = np.ascontiguousarray(src[:, so : so + 52]).view("<f4").reshape(n, 13)
+    o = _field_offset(pd, "GfxStaticModelDrawInst", "origin")
+    dst[:, o : o + 12] = placement[:, 0:3].astype(">f4").view(np.uint8).reshape(n, 12)
+    a = _field_offset(pd, "GfxStaticModelDrawInst", "axis")
+    axis = np.stack([pack_dec3n(placement[:, 3 + 3 * i : 6 + 3 * i]) for i in range(3)], axis=1)
+    dst[:, a : a + 12] = axis.astype(">u4").view(np.uint8).reshape(n, 12)
+    sc = _field_offset(pd, "GfxStaticModelDrawInst", "scale")
+    dst[:, sc : sc + 4] = placement[:, 12:13].astype(">f4").view(np.uint8).reshape(n, 4)
+    # the flags are byte flags (0x80 on PC is 0x80000000 on console)
+    fs = _field_offset(ps, "GfxStaticModelDrawInst", "flags")
+    fd = _field_offset(pd, "GfxStaticModelDrawInst", "flags")
+    dst[:, fd : fd + 4] = src[:, fs : fs + 4]
+
+
+def _fix_aabb_tree(src: np.ndarray, dst: np.ndarray):
+    """Leaf trees have no children offset on console (the PC linker leaves a stale value)."""
+    from .platforms import x360
+
+    p = x360()
+    cc = _field_offset(p, "GfxAabbTree", "childCount")
+    co = _field_offset(p, "GfxAabbTree", "childrenOffset")
+    leaf = (dst[:, cc] == 0) & (dst[:, cc + 1] == 0)
+    dst[leaf, co : co + 4] = 0
+
+
+# Records that need values computed after the field by field mapping: name -> fixup(src rows, dst rows)
+RECORD_FIXUPS: Dict[str, Callable[[np.ndarray, np.ndarray], None]] = {
+    "GfxSurface": _fix_gfx_surface,
+    "GfxStaticModelDrawInst": _fix_static_model_inst,
+    "GfxAabbTree": _fix_aabb_tree,
+}
+
+
+# PC asset types stored under another type on console. Single player console maps use the PVS
+# clip map type (as in CoD Xenon's converted maps).
+X360_ASSET_TYPE = {"clipmap": "clipmap_pvs"}
+
+
+# Runtime fields left zeroed on console (the PC linker leaves garbage in them).
+ZERO_FIELDS = {
+    ("XSurface", "zoneHandle"),
+    ("GfxSurface", "pad"),
+}
+
+
+def _scalar_bytes(t: TypeRef, records) -> int:
+    """Bytes of non pointer scalar data in a type."""
+    if t.kind in ("scalar", "enum"):
+        return t.size
+    if t.kind == "array":
+        return t.count * _scalar_bytes(t.elem, records)
+    if t.kind == "record" and t.name in records:
+        rec = records[t.name]
+        sizes = [_scalar_bytes(f.type, records) for f in rec.fields if f.name]
+        return (max(sizes) if rec.is_union else sum(sizes)) if sizes else 0
+    return 0
+
+
+def _elem_size(t: TypeRef) -> int:
+    while t.kind == "array":
+        t = t.elem
+    return t.size
+
+
+# Byte arrays that the console stores as one 32-bit value (byte order reversed).
+SWAP32_FIELDS = {
+    ("FxElemVisualState", "color"),
+}
+
+
 class RecordMap:
     """Maps the bytes of one record from the source layout to the destination layout."""
 
@@ -80,7 +204,10 @@ class RecordMap:
         self.dst_size = dst_rec.size
         self.ops: List[_ScalarOp] = []
         self.raw: List[Tuple[int, int, int]] = []  # (src, dst, size) verbatim copies
+        self.custom: List[Tuple[int, int, int, Callable]] = []  # (src, dst, src size, converter)
+        self.fixups: List[Tuple[int, int, int, int, Callable]] = []  # (src, dst, src size, dst size, fixup)
         self.offsets: Dict[int, int] = {}  # src offset -> dst offset of every mapped field
+        self.pointers: Dict[int, int] = {}  # src offset -> dst offset of pointer fields kept on console
         self.conv = conv
 
         src_limit = dst_limit = None
@@ -93,6 +220,8 @@ class RecordMap:
             self.dst_size = dst_limit
 
         self._map_record(src_rec, dst_rec, 0, 0, src_limit, dst_limit)
+        if name in RECORD_FIXUPS and not partial:
+            self.fixups.append((0, 0, src_rec.size, dst_rec.size, RECORD_FIXUPS[name]))
         self._merge()
 
     # -- building ------------------------------------------------------------
@@ -104,10 +233,16 @@ class RecordMap:
         if dst.is_union:
             # Pointer members all live at the union offset.
             self.offsets.setdefault(so, do)
+            if any(f.type.kind == "pointer" for f in dst.fields) and any(f.type.kind == "pointer" for f in src.fields):
+                self.pointers.setdefault(so, do)
             candidates = [f for f in dst.fields if f.name and src.field(f.name) is not None]
             if not candidates:
                 return
-            chosen = max(candidates, key=lambda f: (f.type.kind != "pointer", f.type.size))
+            # Map the member carrying the most plain data (e.g. a leaf count over child pointers):
+            # pointer slots are rewritten by the zone writer anyway. Pointers of every member are kept.
+            chosen = max(candidates, key=lambda f: (f.type.kind != "pointer", _scalar_bytes(f.type, records_dst), _elem_size(f.type), f.type.size))
+            for f in candidates:
+                self._collect_pointers(src.field(f.name).type, f.type, so, do, records_src, records_dst)
             self._map_field(src.field(chosen.name).type, chosen.type, so, do, records_src, records_dst)
             return
 
@@ -122,6 +257,12 @@ class RecordMap:
                 continue
             if dst_limit is not None and f.offset >= dst_limit:
                 continue
+            if (dst.name, f.name) in ZERO_FIELDS:
+                continue
+            if (dst.name, f.name) in SWAP32_FIELDS and sf.type.size == f.type.size and f.type.size % 4 == 0:
+                self.offsets.setdefault(so + sf.offset, do + f.offset)
+                self.ops.append(_ScalarOp(so + sf.offset, "<u4", do + f.offset, ">u4", f.type.size // 4))
+                continue
             if f.bit_width:
                 key = f.offset
                 if key in seen_storage:
@@ -129,12 +270,34 @@ class RecordMap:
                 seen_storage.add(key)
             self._map_field(sf.type, f.type, so + sf.offset, do + f.offset, records_src, records_dst)
 
+    def _collect_pointers(self, st: TypeRef, dt: TypeRef, so: int, do: int, rs, rd):
+        if dt.kind == "pointer" and st.kind == "pointer":
+            self.pointers.setdefault(so, do)
+        elif dt.kind == "array" and st.kind == "array":
+            for i in range(min(st.count, dt.count)):
+                self._collect_pointers(st.elem, dt.elem, so + i * st.elem.size, do + i * dt.elem.size, rs, rd)
+        elif dt.kind == "record" and st.kind == "record":
+            src, dst = rs[st.name], rd[dt.name]
+            for f in dst.fields:
+                sf = src.field(f.name) if f.name else None
+                if sf is not None:
+                    self._collect_pointers(sf.type, f.type, so + sf.offset, do + f.offset, rs, rd)
+
     def _map_field(self, st: TypeRef, dt: TypeRef, so: int, do: int, rs, rd):
         self.offsets.setdefault(so, do)
         if dt.kind == "record":
+            if dt.name in RECORD_CONVERTERS and st.kind == "record" and st.name == dt.name:
+                self.custom.append((so, do, st.size, RECORD_CONVERTERS[dt.name]))
+                return
+            if st.kind in ("pointer", "scalar"):
+                # a PC runtime object pointer (e.g. IDirect3DVertexBuffer9*) or placeholder that is an
+                # embedded structure on console: left zeroed here, filled by a fixup when needed
+                return
             if st.kind != "record":
                 raise ConvertError(f"{self.name}: type mismatch {st!r} -> {dt!r}")
             self._map_record(rs[st.name], rd[dt.name], so, do)
+            if dt.name in RECORD_FIXUPS:
+                self.fixups.append((so, do, st.size, dt.size, RECORD_FIXUPS[dt.name]))
             return
         if dt.kind == "array":
             if st.kind != "array":
@@ -162,6 +325,8 @@ class RecordMap:
                 self._map_field(se, de, so + i * se.size, do + i * de.size, rs, rd)
             return
         if dt.kind == "pointer":
+            if st.kind == "pointer":
+                self.pointers[so] = do
             return  # pointer values are written by the zone writer
         if dt.kind in ("scalar", "enum"):
             if st.kind not in ("scalar", "enum", "pointer"):
@@ -212,7 +377,15 @@ class RecordMap:
             dst[:, op.dst : op.dst + ddt.itemsize * op.count] = chunk.astype(ddt).view(np.uint8).reshape(count, -1)
         for so, do, size in self.raw:
             dst[:, do : do + size] = src[:, so : so + size]
+        for so, do, size, fn in self.custom:
+            out = fn(np.ascontiguousarray(src[:, so : so + size]))
+            dst[:, do : do + out.shape[1]] = out
+        for so, do, ssize, dsize, fn in self.fixups:
+            fn(src[:, so : so + ssize], dst[:, do : do + dsize])
         return dst.tobytes()
+
+    def keeps_pointer(self, off: int) -> bool:
+        return off in self.pointers
 
     def map_offset(self, off: int) -> int:
         if off in self.offsets:
@@ -241,6 +414,9 @@ class ScalarMap:
     def map_offset(self, off: int) -> int:
         return off
 
+    def keeps_pointer(self, off: int) -> bool:
+        return True
+
 
 # ---------------------------------------------------------------------------
 # Options and statistics
@@ -257,6 +433,12 @@ class ConvertOptions:
     compress_textures: bool = True
     iwd_paths: List[str] = field(default_factory=list)
     reference_missing_images: bool = True
+    # sounds: xma2encode wrapper (audio.XmaEncoder) for loaded sounds, their rate cap / downmix,
+    # and the output folder holding the converted streamed sounds (sounds/<dir>/<name>.xma)
+    xma_encoder: Optional[object] = None
+    sound_rate: int = 0
+    mono_sounds: bool = False
+    sounds_dir: Optional[str] = None
     log: Callable[[str], None] = print
 
 
@@ -265,6 +447,7 @@ class ConvertStats:
     converted: Dict[str, int] = field(default_factory=dict)
     referenced: Dict[str, int] = field(default_factory=dict)
     texture_bytes: int = 0
+    sound_bytes: int = 0
     warnings: List[str] = field(default_factory=list)
 
     def count(self, table: Dict[str, int], key: str):
@@ -336,7 +519,8 @@ class ZoneConverter:
             return TypeRef("record", t.name, rec.size, rec.align)
         if t.kind == "array":
             elem = self.dst_type(t.elem)
-            return TypeRef("array", "", elem.size * t.count, elem.align, elem=elem, count=t.count)
+            # keep typedef alignment (e.g. UShortVec: unsigned short[3] aligned to 4)
+            return TypeRef("array", t.name, elem.size * t.count, max(elem.align, t.align), elem=elem, count=t.count)
         if t.kind == "pointer":
             return TypeRef("pointer", "", 4, 4, to=self.dst_type(t.to) if t.to is not None and t.to.kind == "record" else t.to)
         return t
@@ -349,16 +533,28 @@ class ZoneConverter:
         stack = [node]
         while stack:
             n = stack.pop()
-            # nested assets are converted (or referenced) on their own
+            # nested assets are converted (or referenced) on their own; members the console
+            # structure does not have are dropped
             for child in n.children:
-                if (child.extra.get("origin") or ("",))[0] != "asset":
-                    stack.append(child)
+                origin = child.extra.get("origin") or ("",)
+                if origin[0] == "asset":
+                    continue
+                if origin[0] == "member" and not self._dst_has_member(origin[1], origin[2]):
+                    continue
+                stack.append(child)
             for t, _, _, _ in n.segments:
                 while t.kind == "array":
                     t = t.elem
                 if t.kind == "record" and t.name not in self.verified:
                     missing.add(t.name)
         return missing
+
+    def _dst_has_member(self, rec: str, member: str) -> bool:
+        from .commands import find_field
+
+        if rec not in self.dst.layout.records:
+            return True
+        return find_field(self.dst.record(rec), member) is not None
 
     # -- nodes --------------------------------------------------------------
 
@@ -439,17 +635,30 @@ class ZoneConverter:
                 return off
             raise ConvertError(f"offset {off} outside of node {node!r}")
 
+        def keeps_pointer(off: int, segments=segments) -> bool:
+            for s0, s1, d0, m, sst, dst_stride in segments:
+                if s0 <= off < s1:
+                    return m.keeps_pointer((off - s0) % sst if sst else 0)
+            return True
+
         self.node_map[id(node)] = new
         self.offset_maps[id(node)] = translate
 
+        dropped = set()
         for off, ptr in node.relocs.items():
+            if not keeps_pointer(off):
+                # the console structure has no such pointer (e.g. model collision triangles)
+                if ptr.kind in ("follow", "insert") and ptr.node is not None:
+                    dropped.add(id(ptr.node))
+                continue
             new_off = translate(off)
             new.relocs[new_off] = ptr
             self.ptrs.append((ptr, new))
             ptr.offset = new_off
 
         for child in node.children:
-            new.children.append(self.convert_child(child))
+            if id(child) not in dropped:
+                new.children.append(self.convert_child(child))
         return new
 
     def _runtime_size(self, node: Node) -> int:
@@ -536,7 +745,7 @@ class ZoneConverter:
             self.node_map.get(id(assets_node)) if assets_node is not None else None,
         )
         new_zone.extra_root = new_root
-        new_zone.assets = [ZoneAsset(a.type, a.ptr, a.name) for a in zone.assets]
+        new_zone.assets = [ZoneAsset(X360_ASSET_TYPE.get(a.type, a.type), a.ptr, a.name) for a in zone.assets]
         return new_zone
 
     def convert_assets_node(self, node: Node) -> Node:
@@ -546,7 +755,7 @@ class ZoneConverter:
         new.segments = [(TypeRef("scalar", "uint", 4, 4), node.count, len(node.data), False)]
         data = bytearray(len(node.data))
         for i, asset in enumerate(self.zone.assets):
-            type_index = self.dst.asset_type_index[asset.type]
+            type_index = self.dst.asset_type_index[X360_ASSET_TYPE.get(asset.type, asset.type)]
             self.dst.u32.pack_into(data, 8 * i, type_index)
         new.data = data
         self.node_map[id(node)] = new
@@ -599,6 +808,9 @@ class _ArrayMap:
     def map_offset(self, off: int) -> int:
         i, inner = divmod(off, self.elem.src_size)
         return i * self.elem.dst_size + self.elem.map_offset(inner)
+
+    def keeps_pointer(self, off: int) -> bool:
+        return self.elem.keeps_pointer(off % self.elem.src_size)
 
 
 def _asset_type_of(rec_name: str) -> str:

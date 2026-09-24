@@ -67,6 +67,7 @@ class XmaStream:
     channels: int
     samples: int
     data: bytes  # XMA2 packets
+    valid_samples: int = 0  # decoded samples that belong to the sound (encoder play length)
 
     @property
     def packets(self) -> int:
@@ -184,12 +185,12 @@ def downmix_mono(pcm: Pcm) -> Pcm:
 
 def resample(pcm: Pcm, rate: int) -> Pcm:
     """Band limited resampling (windowed sinc)."""
-    if rate >= pcm.rate or pcm.frames == 0:
+    if rate == pcm.rate or pcm.frames == 0:
         return pcm
     ratio = rate / pcm.rate
     out_frames = int(pcm.frames * ratio)
     taps = 32
-    cutoff = ratio * 0.95
+    cutoff = min(ratio, 1.0) * 0.95
     t = np.arange(out_frames) / ratio
     base = np.floor(t).astype(np.int64)
     frac = t - base
@@ -269,11 +270,12 @@ def read_xma2_wav(data: bytes) -> XmaStream:
         num_streams = struct.unpack_from("<H", fmt, 18)[0]
         if num_streams != 1:
             raise AudioError("multi stream XMA is not supported, encode mono or stereo sounds")
-        return XmaStream(rate, channels, samples, body)
+        play_length = struct.unpack_from("<I", fmt, 36)[0] if len(fmt) >= 40 else 0
+        return XmaStream(rate, channels, samples, body, play_length or samples)
     if xma2 is not None:
         # XMA2WAVEFORMAT chunk (big endian)
         version, streams, _, loop_count, _, _, _, samples_encoded, rate, _, _, block_size, _, channels = struct.unpack_from(">BBBBIIIIIIIIHH", xma2 + bytes(64), 0)
-        return XmaStream(rate, channels, samples_encoded, body)
+        return XmaStream(rate, channels, samples_encoded, body, samples_encoded)
     raise AudioError("not an XMA2 file")
 
 
@@ -320,6 +322,8 @@ class XmaEncoder:
             with open(dst, "rb") as f:
                 stream = read_xma2_wav(f.read())
         # The SDNS sample count is the number of XMA frames in the packets times 512.
+        if not stream.valid_samples:
+            stream.valid_samples = stream.samples
         stream.samples = xma_frame_count(stream.data) * XMA_FRAME_SAMPLES
         return stream
 
@@ -350,6 +354,122 @@ def correlation(a: Pcm, b: Pcm) -> float:
         if denom:
             best = max(best, float((xs * ys).sum() / denom))
     return best
+
+
+# ---------------------------------------------------------------------------
+# Loaded (in zone) sounds
+#
+# Loaded sounds are XMA1: the frame bit stream is the same as XMA2, only the 32-bit packet
+# headers differ (XMA2: frame count 6, first frame bit offset 15, metadata 3, skip 8; XMA1:
+# sequence number 4, '10' 2, first frame bit offset 15, skip 11). CoD Xenon's converted maps
+# store them with a seek table (decoded sample count at the start of every packet) and an XAudio
+# format block (loop region in bits, XAUDIOSOURCEFORMAT, duration in milliseconds).
+
+# Sample rates the XMA1 hardware decoder supports.
+XMA1_RATES = (24000, 32000, 44100, 48000)
+XAUDIO_SAMPLE_TYPE_XMA = 3
+LOOP_SUBFRAME_SKIP = 3  # as in every loaded sound of CoD Xenon's converted maps
+
+
+def xma1_rate(rate: int) -> int:
+    """The XMA1 sample rate a sound of ``rate`` Hz is encoded at (the lowest one not below it)."""
+    for r in XMA1_RATES:
+        if rate <= r * 1.001:
+            return r
+    return XMA1_RATES[-1]
+
+
+def xma2_to_xma1(data: bytes) -> bytes:
+    out = bytearray(data)
+    for i, o in enumerate(range(0, len(out) - 3, XMA_PACKET_SIZE)):
+        header = struct.unpack_from(">I", out, o)[0]
+        offset = (header >> 11) & 0x7FFF
+        struct.pack_into(">I", out, o, ((i & 0xF) << 28) | (0x2 << 26) | (offset << 11))
+    return bytes(out)
+
+
+def xma_frames(data: bytes) -> List[Tuple[int, int]]:
+    """(absolute bit offset, bit length) of every XMA frame (XMA1 or XMA2 packets)."""
+    packets = len(data) // XMA_PACKET_SIZE
+    if not packets:
+        return []
+    payload_bits = (XMA_PACKET_SIZE - 4) * 8
+    payload = b"".join(data[i * XMA_PACKET_SIZE + 4 : (i + 1) * XMA_PACKET_SIZE] for i in range(packets))
+    value = int.from_bytes(payload, "big")
+    total = len(payload) * 8
+
+    def absolute(pos):
+        return (pos // payload_bits) * XMA_PACKET_SIZE * 8 + 32 + pos % payload_bits
+
+    frames = []
+    pos = (struct.unpack_from(">I", data, 0)[0] >> 11) & 0x7FFF
+    while pos + 15 <= total:
+        length = (value >> (total - pos - 15)) & 0x7FFF
+        if length == 0x7FFF or length < 15 or pos + length > total:
+            break
+        frames.append((absolute(pos), length))
+        pos += length
+    return frames
+
+
+def xma_seek_table(data: bytes, frames: List[Tuple[int, int]]) -> List[int]:
+    """Decoded sample count at the start of every packet."""
+    packets = len(data) // XMA_PACKET_SIZE
+    starts = [0] * packets
+    for bit, _ in frames:
+        starts[min(bit // (XMA_PACKET_SIZE * 8), packets - 1)] += 1
+    table, total = [], 0
+    for n in starts:
+        table.append(total)
+        total += n * XMA_FRAME_SAMPLES
+    return table
+
+
+@dataclass
+class LoadedXma:
+    rate: int
+    channels: int
+    data: bytes  # XMA1 packets
+    seek_table: List[int]
+    format: List[int]  # the 36 dwords of the console snd_asset format block
+
+
+def loaded_sound(stream: XmaStream, duration_ms: int) -> LoadedXma:
+    """Console loaded sound data from an xma2encode stream."""
+    data = xma2_to_xma1(stream.data)
+    frames = xma_frames(data)
+    if not frames:
+        raise AudioError("XMA stream without frames")
+    seek = xma_seek_table(data, frames)
+    valid = max(1, min(stream.valid_samples or stream.samples, len(frames) * XMA_FRAME_SAMPLES))
+    last = (valid - 1) // XMA_FRAME_SAMPLES
+    subframe_end = ((valid - 1) % XMA_FRAME_SAMPLES) // 128
+    loop_end = frames[last][0] + frames[last][1]
+    fmt = [0] * 36
+    fmt[0] = frames[0][0]  # loop start (bits)
+    fmt[1] = loop_end  # loop end (bits)
+    fmt[2] = (subframe_end << 24) | (LOOP_SUBFRAME_SKIP << 16)
+    # XAUDIOSOURCEFORMAT: sample type, stream count, then per stream sample rate and channel count
+    fmt[19] = XAUDIO_SAMPLE_TYPE_XMA << 24
+    fmt[20] = 1 << 24
+    fmt[21] = stream.rate
+    fmt[22] = stream.channels << 24
+    fmt[33] = duration_ms
+    fmt[34] = len(seek) + 2  # size of the seek table in dwords
+    fmt[35] = 0xFFFFFFFF
+    return LoadedXma(stream.rate, stream.channels, data, seek, fmt)
+
+
+def encode_loaded_sound(wav: bytes, encoder: "XmaEncoder", max_rate: int = 0, mono: bool = False) -> LoadedXma:
+    """PC loaded sound (a RIFF WAV: PCM, MS ADPCM, WMA, ...) -> console XMA1 loaded sound."""
+    pcm = read_wav(wav)
+    duration_ms = int(pcm.frames * 1000 // pcm.rate) if pcm.rate else 0
+    if mono and pcm.channels > 1:
+        pcm = downmix_mono(pcm)
+    target = xma1_rate(min(pcm.rate, max_rate) if max_rate else pcm.rate)
+    if pcm.rate != target:
+        pcm = resample(pcm, target)
+    return loaded_sound(encoder.encode(pcm), duration_ms)
 
 
 # ---------------------------------------------------------------------------
@@ -385,7 +505,7 @@ def convert_streamed_sounds(library, out_dir: str, encoder: XmaEncoder, max_rate
             pcm = read_wav(data) if name.endswith(".wav") else decode_with_ffmpeg(data)
             if mono:
                 pcm = downmix_mono(pcm)
-            if max_rate:
+            if max_rate and pcm.rate > max_rate:
                 pcm = resample(pcm, max_rate)
             stream = encoder.encode(pcm)
         except AudioError as e:
