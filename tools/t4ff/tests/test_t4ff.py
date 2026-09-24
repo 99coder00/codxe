@@ -94,6 +94,61 @@ class EncodingTests(unittest.TestCase):
         self.assertEqual(audio.xma1_rate(44094), 44100)
 
 
+class DepsTests(unittest.TestCase):
+    """Finding, installing and testing xma2encode.exe (with stand-ins for the real encoder)."""
+
+    def test_install_from_zip_in_downloads(self):
+        from unittest import mock
+
+        from t4ff import deps
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = os.path.join(tmp, "home")
+            os.makedirs(os.path.join(home, "Downloads"))
+            with zipfile.ZipFile(os.path.join(home, "Downloads", "xdk tools.zip"), "w") as z:
+                z.writestr("xdk/bin/win32/xma2encode.exe", b"exe")
+                z.writestr("xdk/bin/win32/xmaencoder.dll", b"dll")
+                z.writestr("xdk/readme.txt", b"")
+            bin_dir = os.path.join(tmp, "bin")
+            env = {"HOME": home, "USERPROFILE": home, "XMA2ENCODE": "", "XEDK": "", "PATH": tmp}
+            with mock.patch.dict(os.environ, env), mock.patch.object(deps, "BIN_DIR", bin_dir), mock.patch.object(deps, "TOOL_DIR", tmp):
+                found = deps.find_xma2encode(search_zips=True)
+                self.assertTrue(found.endswith("::xdk/bin/win32/xma2encode.exe"))
+                path = deps.install_xma2encode(found, log=lambda msg: None)
+                self.assertEqual(path, os.path.join(bin_dir, "xma2encode.exe"))
+                self.assertEqual(sorted(os.listdir(bin_dir)), ["xma2encode.exe", "xmaencoder.dll"])
+                self.assertEqual(deps.find_xma2encode(), path)  # found there from now on
+
+    @unittest.skipIf(sys.platform.startswith("win"), "uses a stand-in for wine")
+    def test_encoder_self_test(self):
+        from unittest import mock
+
+        from t4ff import deps
+
+        tool_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+        with tempfile.TemporaryDirectory() as tmp:
+            # a stand-in encoder (a Python script) writing a one packet XMA2 file, run by a stand-in wine
+            exe = os.path.join(tmp, "xma2encode.exe")
+            with open(exe, "w") as f:
+                f.write(textwrap.dedent(f"""
+                    import sys
+                    sys.path.insert(0, {tool_dir!r})
+                    from t4ff import audio
+                    pcm = audio.read_wav(open(sys.argv[1], "rb").read())
+                    packet = bytearray(audio.XMA_PACKET_SIZE)
+                    packet[0:4] = ((1 << 26) | (1 << 8)).to_bytes(4, "big")
+                    stream = audio.XmaStream(pcm.rate, pcm.channels, 512, bytes(packet))
+                    open(sys.argv[sys.argv.index("/TargetFile") + 1], "wb").write(audio.xma2_wav(stream))
+                """))
+            wine = os.path.join(tmp, "wine")
+            with open(wine, "w") as f:
+                f.write(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+            os.chmod(wine, os.stat(wine).st_mode | stat.S_IEXEC)
+            with mock.patch.dict(os.environ, {"PATH": tmp + os.pathsep + os.environ.get("PATH", "")}):
+                self.assertTrue(deps.test_xma2encode(exe, log=lambda msg: None))
+                self.assertFalse(deps.test_xma2encode(os.path.join(tmp, "missing.exe"), log=lambda msg: None))
+
+
 class GuiTests(unittest.TestCase):
     """The window's settings and the command line it runs (no display needed)."""
 

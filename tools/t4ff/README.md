@@ -27,18 +27,38 @@ tool reports success.
 
 ## Requirements
 
-- Python 3.9+
-- `pip install -r requirements.txt` (numpy, libclang, and imageio-ffmpeg for sounds)
+- Python 3.9+ (from python.org on Windows; the window needs its tkinter).
 - The `OpenAssetTools` folder of this repository. The PC structure definitions
   and zone streaming rules are read from it (`src/Common/Game/T4/T4_Assets.h`,
   `src/ZoneCode/Game/T4`).
-- For sounds: `xma2encode.exe` from the Xbox 360 XDK (also shipped with the
-  GDK and the XAudio2 desktop samples). No open source XMA encoder exists. Pass
-  it with `--xma-encoder`, or set `XMA2ENCODE` (or `XEDK`). On Linux and macOS
-  it runs through `wine`.
+- Python packages (numpy, libclang, imageio-ffmpeg with FFmpeg): installed
+  automatically when missing.
+- For sounds: `xma2encode.exe`. No open source XMA encoder exists, and this one
+  is part of Microsoft's licensed Xbox developer kits (Xbox 360 XDK, Xbox One
+  XDK, or the Microsoft GDK with Xbox extensions), so it cannot be downloaded
+  automatically. Once you have it, `t4ff` finds and installs it by itself (see
+  below). On Linux and macOS it runs through `wine`.
 - For technique sets: Xbox 360 World at War fastfiles, from your own copy of the
   game (for example `common.ff` and the stock zombie maps) or maps already
   converted by CoD Xenon. Several can be given; the first one that has an asset wins.
+
+### Installing dependencies
+
+```sh
+python -m t4ff setup                           # install what is missing and check it
+python -m t4ff setup --xma2encode <exe, folder or .zip>
+```
+
+The window does the same when it opens (it asks before installing packages)
+and with **Set up dependencies**. `convert`, `info` and `roundtrip` also install
+missing Python packages before running (`--no-install` turns this off).
+
+`xma2encode.exe` is looked up in `tools/t4ff/bin`, the `XMA2ENCODE` variable,
+the folders the Xbox developer kits install to (`XEDK`, `DurangoXDK`,
+`GXDKLatest`/`GameDK`, `Program Files (x86)\Microsoft Xbox 360 SDK`, ...), your
+Downloads and Desktop folders, and `.zip` files in Downloads. It is then copied
+(with the DLLs next to it) into `tools/t4ff/bin`, where every later run finds
+it, and tested by encoding a short tone.
 
 ## Usage
 

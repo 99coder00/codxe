@@ -4,6 +4,7 @@
     python -m t4ff roundtrip <fastfile>...
     python -m t4ff convert <pc fastfile or usermap folder> -o <output folder> [options]
     python -m t4ff gui
+    python -m t4ff setup [--xma2encode <exe, folder or zip>]
 """
 
 from __future__ import annotations
@@ -128,8 +129,18 @@ def cmd_convert(args):
     os.makedirs(out_dir, exist_ok=True)
 
     encoder = XmaEncoder(args.xma_encoder, args.xma_quality)
+    if not encoder.available and not args.no_sounds and not args.xma_encoder and not args.no_install:
+        # e.g. a download of it (or a .zip with it) sitting in the Downloads folder
+        from . import deps
+
+        found = deps.find_xma2encode(search_zips=True)
+        if found:
+            try:
+                encoder = XmaEncoder(deps.install_xma2encode(found), args.xma_quality)
+            except OSError as e:
+                print(f"warning: cannot install xma2encode.exe from {found}: {e}")
     if not encoder.available and not args.no_sounds:
-        print("warning: xma2encode.exe not found (--xma-encoder): sounds are not converted, the map will reference console sounds")
+        print("warning: xma2encode.exe not found: sounds are not converted, the map will reference console sounds (run python -m t4ff setup)")
 
     if not args.no_sounds and encoder.available:
         library = IwdLibrary(iwds)
@@ -174,6 +185,21 @@ def cmd_convert(args):
     return 0
 
 
+def cmd_setup(args):
+    from . import deps
+
+    state = deps.setup(args.xma2encode, test=not args.no_test)
+    print()
+    ready = state.get("python") and state.get("openassettools")
+    if ready and state.get("xma2encode"):
+        print("Ready: everything t4ff needs is installed.")
+    elif ready:
+        print("Ready to convert, without sounds (xma2encode.exe is missing, see above).")
+    else:
+        print("Not ready, see above.")
+    return 0 if ready else 1
+
+
 def cmd_gui(args):
     from .gui import main as gui_main
 
@@ -183,6 +209,7 @@ def cmd_gui(args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="t4ff", description="World at War fastfile tools (PC -> Xbox 360 conversion for CoD Xe)")
+    parser.add_argument("--no-install", action="store_true", help="do not install missing Python packages or xma2encode.exe automatically")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("info", help="list the content of a fastfile")
@@ -220,7 +247,17 @@ def main(argv=None):
     p = sub.add_parser("gui", help="open the converter window")
     p.set_defaults(func=cmd_gui)
 
+    p = sub.add_parser("setup", help="install missing dependencies (Python packages, xma2encode.exe) and check them")
+    p.add_argument("--xma2encode", help="xma2encode.exe, a folder or a .zip containing it (default: search this computer)")
+    p.add_argument("--no-test", action="store_true", help="do not test the encoder")
+    p.set_defaults(func=cmd_setup)
+
     args = parser.parse_args(argv)
+    if args.command in ("convert", "info", "roundtrip") and not args.no_install:
+        from . import deps
+
+        if not deps.ensure_python_packages():
+            return 1
     return args.func(args) or 0
 
 

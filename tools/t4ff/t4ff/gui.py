@@ -136,21 +136,46 @@ class _QueueWriter(io.TextIOBase):
         pass
 
 
-def run_cli(args: List[str], q: "queue.Queue[str]") -> bool:
-    """Run ``python -m t4ff <args>`` in this thread, sending its output to ``q``."""
-    from .__main__ import main as cli_main
-
+def run_captured(func, q: "queue.Queue[str]"):
+    """Call ``func()`` in this thread, sending what it prints to ``q``. None when it fails."""
     writer = _QueueWriter(q)
     with contextlib.redirect_stdout(writer), contextlib.redirect_stderr(writer):
         try:
-            return (cli_main(args) or 0) == 0
+            return func()
         except SystemExit as e:
             if e.code not in (0, None):
                 print(f"error: {e.code}" if not isinstance(e.code, int) else f"error: exit code {e.code}")
-            return e.code in (0, None)
+                return False
+            return True
         except Exception:
             traceback.print_exc()
-            return False
+            return None
+
+
+def run_cli(args: List[str], q: "queue.Queue[str]") -> bool:
+    """Run ``python -m t4ff <args>`` in this thread, sending its output to ``q``."""
+
+    def cli():
+        from .__main__ import main as cli_main
+
+        return (cli_main(args) or 0) == 0
+
+    return bool(run_captured(cli, q))
+
+
+def find_and_install_encoder():
+    """Worker: the encoder found on this computer, installed into tools/t4ff/bin (None if absent)."""
+    from . import deps
+
+    found = deps.find_xma2encode(search_zips=True)
+    if not found:
+        print("note: xma2encode.exe was not found on this computer. " + deps.ENCODER_HELP)
+        return None
+    installed = os.path.join(deps.BIN_DIR, deps.ENCODER_NAME)
+    if "::" in found or os.path.abspath(found) != os.path.abspath(installed):
+        found = deps.install_xma2encode(found)
+    print(f"note: using {found}")
+    return found
 
 
 def open_folder(path: str):
@@ -326,6 +351,8 @@ def main():
     inspect_button.pack(side="left", padx=2)
     open_button = ttk.Button(actions, text="Open output folder")
     open_button.pack(side="left", padx=2)
+    setup_button = ttk.Button(actions, text="Set up dependencies")
+    setup_button.pack(side="left", padx=2)
     progress = ttk.Progressbar(actions, mode="determinate", length=160)
     progress.pack(side="right", padx=4)
     status = ttk.Label(actions, text="Ready")
@@ -370,7 +397,7 @@ def main():
 
     def set_running(running: bool, text: str):
         state["running"] = running
-        for button in (convert_button, inspect_button):
+        for button in (convert_button, inspect_button, setup_button):
             button.configure(state="disabled" if running else "normal")
         status.configure(text=text)
         if running:
@@ -380,31 +407,39 @@ def main():
             progress.stop()
             progress.configure(mode="determinate", value=0)
 
-    def start(args: List[str], label: str, on_done=None):
+    def start_task(label: str, func, on_done=None, quiet: bool = False):
+        """Run ``func`` in a worker thread; ``on_done(result)`` runs in the window afterwards."""
         state["memory"] = ""
         set_running(True, label)
-        append("\n$ python -m t4ff " + " ".join(f'"{a}"' if " " in a else a for a in args) + "\n", "note")
 
         def work():
-            ok = run_cli(args, output_queue)
-            output_queue.put(("done", ok, on_done))
+            result = run_captured(func, output_queue)
+            output_queue.put(("done", result, on_done, quiet))
 
         threading.Thread(target=work, daemon=True).start()
+
+    def start(args: List[str], label: str, on_done=None):
+        append("\n$ python -m t4ff " + " ".join(f'"{a}"' if " " in a else a for a in args) + "\n", "note")
+        start_task(label, lambda: run_cli(args, output_queue), on_done)
 
     def poll():
         try:
             while True:
                 item = output_queue.get_nowait()
                 if isinstance(item, tuple):
-                    _, ok, on_done = item
+                    _, result, on_done, quiet = item
+                    ok = result not in (None, False)
                     if state["pending"]:
                         flush_line(state["pending"])
                         state["pending"] = ""
-                    summary = f"Done: the map needs {state['memory']}" if ok and state.get("memory") else "Done" if ok else "Failed, see the log"
-                    set_running(False, summary)
-                    append(("Finished.\n" if ok else "Failed.\n"), "note" if ok else "error")
+                    if quiet:
+                        set_running(False, "Ready")
+                    else:
+                        summary = f"Done: the map needs {state['memory']}" if ok and state.get("memory") else "Done" if ok else "Failed, see the log"
+                        set_running(False, summary)
+                        append(("Finished.\n" if ok else "Failed.\n"), "note" if ok else "error")
                     if on_done is not None:
-                        on_done(ok)
+                        on_done(result)
                     continue
                 text = state["pending"] + item
                 lines = text.split("\n")
@@ -454,9 +489,63 @@ def main():
         else:
             messagebox.showinfo("t4ff", "The output folder does not exist yet.")
 
+    def encoder_found(found):
+        if found:
+            var["xma_encoder"].set(found)
+            current_settings().save(path)
+
+    def set_up():
+        """Install missing Python packages, find / install / test xma2encode.exe."""
+        source = var["xma_encoder"].get().strip() or None
+        append("\nSetting up dependencies...\n", "note")
+
+        def work():
+            from . import deps
+
+            return deps.setup(source)
+
+        def done(result):
+            if not result:
+                return
+            encoder_found(result.get("xma2encode"))
+            lines = [
+                "Python packages: " + ("installed" if result.get("python") else "missing"),
+                "FFmpeg: " + ("found" if result.get("ffmpeg") else "missing"),
+                "xma2encode.exe: " + ("installed and working" if result.get("xma2encode") else "not found (sounds will not be encoded)"),
+            ]
+            if not sys.platform.startswith("win"):
+                lines.append("wine: " + ("found" if result.get("wine") else "missing"))
+            messagebox.showinfo("t4ff", "\n".join(lines) + ("" if result.get("xma2encode") else "\n\nxma2encode.exe comes with Microsoft's Xbox developer kits and cannot be downloaded automatically. Put it (or a .zip with it) in your Downloads folder, or pick it with File..., then set up again."))
+
+        start_task("Setting up...", work, done)
+
+    def startup():
+        """Offer to install missing Python packages, then look for xma2encode.exe."""
+        from . import deps
+
+        missing = deps.missing_python_packages()
+        encoder = var["xma_encoder"].get().strip()
+        need_encoder = not encoder or not os.path.exists(encoder)
+        if missing:
+            if messagebox.askyesno("t4ff", f"t4ff needs these Python packages: {', '.join(missing)}.\n\nInstall them now?"):
+                append(f"\nInstalling {', '.join(missing)}...\n", "note")
+
+                def work():
+                    if not deps.install_python_packages(missing):
+                        return None
+                    return find_and_install_encoder() if need_encoder else encoder
+
+                start_task("Installing...", work, encoder_found)
+            else:
+                append("The packages are needed to convert. Use Set up dependencies to install them later.\n", "warning")
+            return
+        if need_encoder:
+            start_task("Looking for xma2encode.exe...", find_and_install_encoder, encoder_found, quiet=True)
+
     convert_button.configure(command=convert)
     inspect_button.configure(command=inspect)
     open_button.configure(command=open_output)
+    setup_button.configure(command=set_up)
 
     def close():
         if state["running"] and not messagebox.askyesno("t4ff", "A conversion is running. Quit anyway?"):
@@ -467,6 +556,7 @@ def main():
     root.protocol("WM_DELETE_WINDOW", close)
     append("Choose the PC usermap folder, an output folder and the Xbox 360 fastfiles to take shaders from, then Convert.\n", "note")
     root.after(100, poll)
+    root.after(300, startup)
     root.mainloop()
 
 

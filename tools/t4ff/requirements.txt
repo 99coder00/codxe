@@ -1,3 +1,4 @@
+# Installed automatically when missing (python -m t4ff setup)
 numpy>=1.24
 libclang>=16
-imageio-ffmpeg>=0.4  # optional: decoding xWMA/ADPCM sounds and verifying XMA
+imageio-ffmpeg>=0.4  # FFmpeg: decoding PC sounds (ADPCM, WMA) and verifying XMA

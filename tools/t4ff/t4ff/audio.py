@@ -15,8 +15,9 @@ files use a small container recovered from CoD Xenon's converted maps:
 
 All values are big endian.
 
-There is no open source XMA encoder: encoding uses ``xma2encode.exe`` from the
-Xbox 360 XDK (also shipped with the GDK and the XAudio2 desktop samples).
+There is no open source XMA encoder: encoding uses ``xma2encode.exe`` from
+Microsoft's Xbox developer kits (Xbox 360 XDK, Xbox One XDK, GDK with Xbox
+extensions); see ``deps.py`` for how it is found and installed.
 Decoding for verification uses FFmpeg (``pip install imageio-ffmpeg``).
 """
 
@@ -287,13 +288,12 @@ class XmaEncoder:
     """Runs xma2encode.exe (directly on Windows, through wine elsewhere)."""
 
     def __init__(self, path: Optional[str] = None, quality: int = 60):
-        self.path = path or os.environ.get("XMA2ENCODE") or shutil.which("xma2encode") or shutil.which("xma2encode.exe")
-        if self.path is None:
-            xedk = os.environ.get("XEDK")
-            if xedk:
-                candidate = os.path.join(xedk, "bin", "win32", "xma2encode.exe")
-                if os.path.exists(candidate):
-                    self.path = candidate
+        self.path = path or os.environ.get("XMA2ENCODE")
+        if not self.path:
+            from .deps import find_xma2encode
+
+            # tools/t4ff/bin (python -m t4ff setup), the Xbox developer kits, Downloads, ...
+            self.path = find_xma2encode()
         self.quality = quality
 
     @property
@@ -302,7 +302,7 @@ class XmaEncoder:
 
     def encode(self, pcm: Pcm) -> XmaStream:
         if not self.available:
-            raise AudioError("xma2encode.exe not found (use --xma-encoder or set XMA2ENCODE / XEDK)")
+            raise AudioError("xma2encode.exe not found (run python -m t4ff setup, or use --xma-encoder)")
         if pcm.channels > 2:
             pcm = downmix_mono(pcm)
         with tempfile.TemporaryDirectory() as tmp:
@@ -312,9 +312,11 @@ class XmaEncoder:
                 f.write(write_wav(pcm))
             cmd = [self.path, src, "/TargetFile", dst, "/Quality", str(self.quality)]
             if os.name != "nt" and self.path.lower().endswith(".exe"):
-                wine = shutil.which("wine") or shutil.which("wine64")
+                from .deps import wine_advice, wine_path
+
+                wine = wine_path()
                 if wine is None:
-                    raise AudioError("xma2encode.exe needs wine on this platform")
+                    raise AudioError("xma2encode.exe needs wine on this platform: " + wine_advice())
                 cmd = [wine] + cmd
             result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode != 0 or not os.path.exists(dst):
