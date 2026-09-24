@@ -17,6 +17,7 @@ keeps them small enough for the console's memory:
   from Xbox 360 fastfiles you provide (`--console-zone`), together with any stock
   image, sound or other asset the PC map expects from the game.
 - **mod.ff** is merged into `<map>.ff`, because the console has no mod zone.
+  Assets both define (including textures nested in materials) are loaded once.
   `<map>_patch.ff` and `<map>_load.ff` are converted separately.
 
 Every written fastfile is read back with the console loading rules before the
@@ -59,7 +60,7 @@ Useful options:
 | --- | --- |
 | `--console-zone PATH` | Xbox 360 fastfile (or folder of them) to copy console only assets from: technique sets, and stock images, sounds, models... the PC map expects from the game. Repeatable. |
 | `--iwd PATH` | Extra `.iwd` files or folders to look up `images/*.iwi` and sounds (e.g. the PC game's `main` folder for stock images a map embeds). |
-| `--texture-budget MIB` | Texture memory budget. Largest textures lose their top mip level first. |
+| `--texture-budget MIB` | Texture memory budget for the map and its mod together, including textures copied from console fastfiles. Largest textures lose their top mip level first. |
 | `--max-texture-size N` | Cap texture dimensions. |
 | `--no-mips` | Drop all mip levels (about 25% less memory, but textures shimmer at a distance). |
 | `--no-compress` | Keep uncompressed textures uncompressed. |

@@ -496,7 +496,7 @@ class ZoneConverter:
             from .library import Cloner, ConsoleLibrary
 
             self.console_library = _shared_library(dst, tuple(self.options.console_zones), self.options.log)
-            self.cloner = Cloner(dst, self.script_strings)
+            self.cloner = Cloner(dst, self.script_strings, self._replace_library_asset)
         from . import assets
 
         assets.register_hooks(self)
@@ -691,7 +691,8 @@ class ZoneConverter:
 
     def convert_asset_node(self, asset_type: str, node: Node) -> Node:
         name = asset_display_name(self.src, node)
-        if name.startswith(","):
+        reduced = asset_type == "image" and self.image_drop_levels.get(name.lstrip(","), 0)
+        if name.startswith(",") and not reduced:
             # the PC zone expects this asset from another zone: the console library may have it
             copy = self.from_library(asset_type, name, node)
             if copy is not None:
@@ -709,6 +710,7 @@ class ZoneConverter:
                     for p in result.relocs.values()
                 ):
                     self.stats.count(self.stats.converted, asset_type)
+                    self.register_converted(asset_type, name, node)
                 return result
 
         missing = self.unverified_records(node)
@@ -717,7 +719,28 @@ class ZoneConverter:
             return self.reference_asset(asset_type, node, name)
 
         self.stats.count(self.stats.converted, asset_type)
+        self.register_converted(asset_type, name, node)
         return self.convert_node(node)
+
+    def _replace_library_asset(self, rec_name: str, name: str, library_node: Node) -> Optional[Node]:
+        """Nested assets of library copies: textures reduced by the budget are rebuilt."""
+        if rec_name == "GfxImage" and self.image_drop_levels.get(name):
+            from .assets import rebuild_console_image
+
+            return rebuild_console_image(self, name, library_node)
+        return None
+
+    def register_converted(self, asset_type: str, name: str, node: Node):
+        """Library copies use converted assets of the same name instead of copying them again."""
+        if self.cloner is None or not name or name.startswith(",") or asset_type not in ASSET_RECORDS:
+            return
+        loader = node.extra.get("ptr")
+        if loader is None or loader.kind not in ("follow", "insert"):
+            return
+        owner = loader.owner
+        if loader.kind == "follow" and (owner is None or owner.block not in (BLOCK_VIRTUAL, 5, 6)):
+            return  # the pointer slot is not addressable
+        self.cloner.register_asset(ASSET_RECORDS[asset_type], name, loader)
 
     def from_library(self, asset_type: str, name: str, src_node: Optional[Node] = None) -> Optional[Node]:
         """A copy of the console asset ``name`` from the console library, if it has one."""
@@ -735,6 +758,10 @@ class ZoneConverter:
             return None
         self.stats.count(self.stats.copied, asset_type)
         copy.extra["library"] = True
+        if asset_type == "image":
+            self.stats.texture_bytes += sum(len(n.data) for n in copy.walk() if n.extra.get("delayed"))
+        elif asset_type == "loaded_sound":
+            self.stats.sound_bytes += sum(len(n.data) for n in copy.walk() if (n.extra.get("origin") or ("", "", ""))[1:] == ("snd_asset", "data"))
         loader = src_node.extra.get("ptr") if src_node is not None else None
         if loader is not None and loader.kind in ("follow", "insert"):
             # later copies that use this asset alias the pointer that loads it
@@ -772,9 +799,10 @@ class ZoneConverter:
         script_node = zone.script_node
         assets_node = zone.assets_node
 
-        from .assets import plan_textures
+        if not getattr(self, "textures_planned", False):
+            from .assets import plan_textures
 
-        plan_textures(self, root)
+            plan_textures(self, root)
 
         for child in root.children:
             if child is assets_node:

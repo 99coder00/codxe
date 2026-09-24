@@ -87,8 +87,10 @@ def _ptr(kind: str, owner: Node, offset: int, node: Node = None, index: int = 0,
 class Cloner:
     """Copies library assets into one output zone."""
 
-    def __init__(self, platform: Platform, strings: List[Optional[str]]):
+    def __init__(self, platform: Platform, strings: List[Optional[str]], replace=None):
         self.p = platform
+        # replace(record, name, library node) -> Node or None: a substitute for a nested asset
+        self.replace = replace
         self.strings = strings  # script strings of the output zone (extended as needed)
         self.string_index = {s: i for i, s in enumerate(strings) if s is not None}
         self.copies: Dict[int, Node] = {}  # id(library node) -> copy
@@ -163,7 +165,7 @@ class Cloner:
                 self.slots[id(ptr)] = first
                 return _ptr("alias", owner, offset, slot=first, index=1 if first.kind == "insert" else 0)
             kind = "insert" if key is not None else ptr.kind
-            new = self._add_child(owner, offset, kind, self._copy(zone, target))
+            new = self._add_child(owner, offset, kind, self._copy_or_replace(zone, target, key))
             self.slots[id(ptr)] = new
             if key is not None:
                 self.assets[key] = new
@@ -203,13 +205,21 @@ class Cloner:
                     raise LibraryError(f"no pointer loads the copied asset {key[1]}")
                 return _ptr("ref", owner, offset, copied, 0, 0)
             kind = "insert" if key is not None else "follow"
-            new = self._add_child(owner, offset, kind, self._copy(zone, target))
+            new = self._add_child(owner, offset, kind, self._copy_or_replace(zone, target, key))
             self.slots[id(slot)] = new
             if key is not None:
                 self.assets[key] = new
             return new
 
         raise LibraryError(f"unsupported pointer {ptr!r}")
+
+    def _copy_or_replace(self, zone: Zone, target: Node, key) -> Node:
+        if key is not None and self.replace is not None:
+            substitute = self.replace(key[0], key[1], target)
+            if substitute is not None:
+                self.copies[id(target)] = substitute
+                return substitute
+        return self._copy(zone, target)
 
     def _asset_key(self, node: Node) -> Optional[Tuple[str, str]]:
         origin = node.extra.get("origin")

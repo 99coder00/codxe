@@ -174,6 +174,7 @@ def merge_zones(p: Platform, zones: List[Zone], log=print) -> Zone:
     root.children = [script_node, assets_node]
     zone = Zone(p.name, strings, merged_assets, [], 0, 0, script_node, assets_node)
     zone.extra_root = root
+    dedupe_nested_assets(p, zone, log)
     return zone
 
 
@@ -260,3 +261,59 @@ def _is_reference(p: Platform, node: Node) -> bool:
         return asset_name(p, node).startswith(",")
     except Exception:
         return False
+
+
+_NORMAL_BLOCKS = (4, 5, 6)  # virtual, large, physical: blocks whose pointer slots can be aliased
+
+
+def dedupe_nested_assets(p: Platform, zone: Zone, log=print) -> int:
+    """Load every named asset once: later nested copies (e.g. the images of mod materials that the
+    map already has) point to the first one instead."""
+    from .zone import asset_name
+
+    incoming: Dict[int, List[int]] = {}
+    alias_by_slot: Dict[int, List[Ptr]] = {}
+    for n in zone.extra_root.walk():
+        for ptr in n.relocs.values():
+            if ptr.kind == "ref" and ptr.node is not None:
+                incoming.setdefault(id(ptr.node), []).append(id(n))
+            elif ptr.kind == "alias" and ptr.slot is not None:
+                alias_by_slot.setdefault(id(ptr.slot), []).append(ptr)
+                if ptr.slot.owner is not None:
+                    incoming.setdefault(id(ptr.slot.owner), []).append(id(n))
+
+    first: Dict[Tuple[str, str], Ptr] = {}
+    removed = 0
+    # depth first in stream order: (node, pointer that loads it, parent)
+    stack = [(zone.extra_root, None, None)]
+    while stack:
+        node, ptr, parent = stack.pop()
+        origin = node.extra.get("origin")
+        if ptr is not None and ptr.kind in ("follow", "insert") and origin and origin[0] == "asset":
+            try:
+                name = asset_name(p, node)
+            except Exception:
+                name = ""
+            if name and not name.startswith(","):
+                key = (origin[1], name.lower())
+                kept = first.get(key)
+                if kept is None:
+                    if ptr.kind == "insert" or (parent is not None and parent.block in _NORMAL_BLOCKS):
+                        first[key] = ptr
+                else:
+                    inside = {id(x) for x in node.walk()}
+                    if not any(src not in inside for target in inside for src in incoming.get(target, ())):
+                        for alias in alias_by_slot.get(id(ptr), ()):
+                            if alias.index == 1:
+                                alias.slot = kept
+                                alias.index = 1 if kept.kind == "insert" else 0
+                        ptr.kind, ptr.node, ptr.slot, ptr.index = "alias", None, kept, 1 if kept.kind == "insert" else 0
+                        parent.children = [c for c in parent.children if c is not node]
+                        removed += 1
+                        continue
+        loaders = {id(q.node): q for q in node.relocs.values() if q.kind in ("follow", "insert") and q.node is not None}
+        for child in reversed(node.children):
+            stack.append((child, loaders.get(id(child)), node))
+    if removed:
+        log(f"merge: {removed} nested assets loaded by an earlier asset are shared")
+    return removed

@@ -181,6 +181,7 @@ def to_console_format(fmt: str) -> Optional[str]:
         "DXT1": "DXT1",
         "DXT3": "DXT3",
         "DXT5": "DXT5",
+        "DXN": "DXN",
         "A8R8G8B8": "A8R8G8B8",
         "A8L8": "A8L8",
         "L8": "L8",

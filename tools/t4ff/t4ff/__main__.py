@@ -69,16 +69,26 @@ def find_usermap(path: str):
     return name, files, iwds
 
 
-def convert_fastfile(path: str, options):
-    from .convert import ZoneConverter
-
-    start = time.time()
+def load_pc_zone(path: str):
     endian, _, data = read_fastfile(path)
     if endian != "<":
         raise SystemExit(f"{path}: not a PC fastfile")
-    zone = Reader(pc(), data).load()
-    print(f"{os.path.basename(path)}: {len(zone.assets)} assets")
-    converter = ZoneConverter(zone, pc(), x360(), options)
+    return Reader(pc(), data).load()
+
+
+def converters(paths, options):
+    """Zone converters for PC fastfiles that share one texture budget."""
+    from .assets import plan_textures_shared
+    from .convert import ZoneConverter
+
+    convs = [ZoneConverter(load_pc_zone(path), pc(), x360(), options) for path in paths]
+    plan_textures_shared(convs)
+    return convs
+
+
+def run_converter(path: str, converter):
+    start = time.time()
+    print(f"{os.path.basename(path)}: {len(converter.zone.assets)} assets")
     result = converter.convert()
     stats = converter.stats
     print(f"  converted:  {dict(sorted(stats.converted.items()))}")
@@ -88,6 +98,10 @@ def convert_fastfile(path: str, options):
         print(f"  referenced: {dict(sorted(stats.referenced.items()))}")
     print(f"  textures:   {stats.texture_bytes / 1048576:.1f} MiB, loaded sounds: {stats.sound_bytes / 1048576:.1f} MiB ({time.time() - start:.1f}s)")
     return result
+
+
+def convert_fastfile(path: str, options):
+    return run_converter(path, converters([path], options)[0])
 
 
 def write_zone(zone, target: str):
@@ -137,10 +151,9 @@ def cmd_convert(args):
         console_zones=args.console_zone,
     )
 
-    # The console has no mod.ff: the mod's assets are merged into the map zone.
-    zones = [convert_fastfile(files["map"], options)]
-    if "mod" in files and not args.no_mod:
-        zones.append(convert_fastfile(files["mod"], options))
+    # The console has no mod.ff: the mod's assets are merged into the map zone (one texture budget).
+    paths = [files["map"]] + ([files["mod"]] if "mod" in files and not args.no_mod else [])
+    zones = [run_converter(path, conv) for path, conv in zip(paths, converters(paths, options))]
     main_zone = zones[0] if len(zones) == 1 else merge_zones(x360(), zones)
     prune_references(x360(), main_zone)
     write_zone(main_zone, os.path.join(out_dir, f"{name}.ff"))

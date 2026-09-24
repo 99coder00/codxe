@@ -207,7 +207,11 @@ def _console_techniques(conv, material: Node):
 
 def image_hook(conv, asset_type, node, name):
     if name.startswith(","):
-        return None  # plain reference: generic conversion keeps it a reference
+        # a stock image: the console library copy is used as is, unless the texture budget
+        # reduces it (then it is rebuilt below from the console texture)
+        if not (conv.image_drop_levels.get(name[1:]) and console_image(conv, name[1:]) is not None):
+            return None
+        name = name[1:]
 
     p = conv.src
     rec = p.record("GfxImage")
@@ -221,12 +225,16 @@ def image_hook(conv, asset_type, node, name):
     category = field_value(rec, node.data, "category")
 
     source = image_source(conv, node, name)
+    if source is None and conv.image_drop_levels.get(name):
+        source = console_image(conv, name)  # a console library texture reduced by the budget
 
     if source is None or map_type != 3:
         reason = "cube/volume image" if map_type != 3 else "no pixel data found (add the .iwd that contains it)"
         if conv.options.reference_missing_images:
-            conv.warn(f"image '{name}': {reason}, emitting a reference to the console image")
-            return _reference(conv, asset_type, node, name)
+            new = _reference(conv, asset_type, node, name)
+            if not new.extra.get("library"):
+                conv.warn(f"image '{name}': {reason}, emitting a reference to the console image")
+            return new
         raise img.ImageError(f"image '{name}': {reason}")
 
     drop = conv.image_drop_levels.get(name, 0)
@@ -268,23 +276,111 @@ def image_source(conv, node: Node, name: str) -> Optional[img.ImageData]:
     return source
 
 
+def console_image(conv, name: str) -> Optional[img.ImageData]:
+    """The texture of the console library image ``name`` as linear levels (cached), if it has one
+    in a supported 2D format."""
+    cache = conv.__dict__.setdefault("_console_images", {})
+    if name in cache:
+        return cache[name]
+    result = None
+    library = getattr(conv, "console_library", None)
+    found = library.find("GfxImage", name) if library is not None else None
+    if found is not None:
+        try:
+            result = _decode_console_image(conv.dst, found[1], name)
+        except (img.ImageError, ValueError, KeyError, IndexError):
+            result = None
+    cache[name] = result
+    return result
+
+
+def _decode_console_image(p, node: Node, name: str) -> Optional[img.ImageData]:
+    from . import xenos
+
+    rec = p.record("GfxImage")
+
+    def get(rec_, data, fname):
+        f = find_field(rec_, fname)
+        return struct.unpack_from(p.endian + {1: "B", 2: "H", 4: "I"}[f.type.size], data, f.offset)[0]
+
+    if get(rec, node.data, "mapType") != 3:
+        return None
+    load_def = next((c for c in node.walk() if c.type.kind == "record" and c.type.name == "GfxImageLoadDef"), None)
+    pixels = next((c for c in node.children if c.extra.get("delayed") or (c.extra.get("origin") or ("", "", ""))[1:] == ("GfxImage", "pixels")), None)
+    if load_def is None or pixels is None:
+        return None
+    ld = p.record("GfxImageLoadDef")
+    levels = load_def.data[find_field(ld, "levelCount").offset]
+    flags = load_def.data[find_field(ld, "flags").offset]
+    d3d = struct.unpack_from(p.endian + "I", load_def.data, find_field(ld, "format").offset)[0]
+    fmt = next((f for f in xenos.FORMATS.values() if f.d3d == d3d), None)
+    width, height = get(rec, node.data, "width"), get(rec, node.data, "height")
+    if fmt is None or not width or not height:
+        return None
+    levels = max(levels, 1)
+    if xenos.mip_chain_layout(width, height, fmt, levels)[2] > len(pixels.data):
+        return None
+    linear = xenos.untile_mip_chain(bytes(pixels.data), width, height, fmt, levels) if levels > 1 else [xenos.untile_level(bytes(pixels.data), width, height, 0, fmt)]
+    return img.ImageData(name, fmt.name, width, height, linear, flags, "console")
+
+
 def plan_textures(conv, root: Node):
-    """Choose how many top mip levels to drop per image so the textures fit the memory budget."""
-    options = conv.options
+    plan_textures_shared([conv])
+
+
+def plan_textures_shared(convs):
+    """Choose how many top mip levels to drop per image so the textures of all the zones of
+    ``convs`` (e.g. a map and its mod, merged later) fit one memory budget.
+
+    Textures copied from the console library count too (and are rebuilt when reduced).
+    """
+    options = convs[0].options
     sources = {}
-    for node in root.walk():
-        if node.type.kind == "record" and node.type.name == "GfxImage" and (node.extra.get("origin") or ("",))[0] == "asset":
-            name = asset_display_name_pc(conv, node)
-            if not name or name.startswith(","):
+    for conv in convs:
+        for node in conv.zone.extra_root.walk():
+            if node.type.kind == "record" and node.type.name == "GfxImage" and (node.extra.get("origin") or ("",))[0] == "asset":
+                name = asset_display_name_pc(conv, node)
+                if not name:
+                    continue
+                plain = name.lstrip(",")
+                if plain in sources:
+                    continue
+                src = image_source(conv, node, plain) if not name.startswith(",") else None
+                if src is None and options.texture_budget:
+                    src = console_image(conv, plain)
+                if src is not None and src.format in ("DXT1", "DXT3", "DXT5", "DXN", "A8R8G8B8", "R8G8B8", "A8L8", "A8", "L8"):
+                    sources[plain] = src
+
+    # textures that console library copies of PC references (materials, models, effects, ...) bring along
+    if options.texture_budget:
+        for conv in convs:
+            library = getattr(conv, "console_library", None)
+            if library is None:
                 continue
-            src = image_source(conv, node, name)
-            if src is not None and src.format in ("DXT1", "DXT3", "DXT5", "A8R8G8B8", "R8G8B8", "A8L8", "A8", "L8"):
-                sources[name] = src
+            for node in conv.zone.extra_root.walk():
+                origin = node.extra.get("origin")
+                if not origin or origin[0] != "asset" or origin[1] == "GfxImage":
+                    continue
+                name = asset_display_name_pc(conv, node)
+                if not name or not name.startswith(","):
+                    continue
+                found = library.find(origin[1], name)
+                if found is None:
+                    continue
+                for nested in found[1].walk():
+                    o = nested.extra.get("origin")
+                    if o and o[0] == "asset" and o[1] == "GfxImage":
+                        image_name = asset_name_console(conv, nested)
+                        if image_name and image_name not in sources:
+                            src = console_image(conv, image_name)
+                            if src is not None:
+                                sources[image_name] = src
 
     drops = {n: 0 for n in sources}
 
     def size(n):
-        return img.console_texture_size(sources[n], options.max_texture_size, options.keep_mips, drops[n], options.compress_textures)
+        # pixel data is 4 KiB aligned in the zone
+        return (img.console_texture_size(sources[n], options.max_texture_size, options.keep_mips, drops[n], options.compress_textures) + 4095) & ~4095
 
     def can_drop(n):
         src = sources[n]
@@ -297,16 +393,48 @@ def plan_textures(conv, root: Node):
         while total > options.texture_budget:
             candidates = [n for n in sources if can_drop(n)]
             if not candidates:
-                conv.warn(f"textures need {total / 1048576:.1f} MiB, over the {options.texture_budget / 1048576:.1f} MiB budget, and cannot be reduced further")
+                convs[0].warn(f"textures need {total / 1048576:.1f} MiB, over the {options.texture_budget / 1048576:.1f} MiB budget, and cannot be reduced further")
                 break
             largest = max(candidates, key=size)
             old = size(largest)
             drops[largest] += 1
             total += size(largest) - old
-    conv.image_drop_levels = drops
+    for conv in convs:
+        conv.image_drop_levels = drops
+        conv.textures_planned = True
     if sources:
         reduced = sum(1 for n in drops if drops[n])
-        conv.log(f"textures: {len(sources)} images, {before / 1048576:.1f} MiB -> {total / 1048576:.1f} MiB ({reduced} reduced)")
+        convs[0].log(f"textures: {len(sources)} images, {before / 1048576:.1f} MiB -> {total / 1048576:.1f} MiB ({reduced} reduced)")
+
+
+def asset_name_console(conv, node: Node) -> str:
+    from .zone import asset_name
+
+    try:
+        return asset_name(conv.dst, node)
+    except Exception:
+        return ""
+
+
+def rebuild_console_image(conv, name: str, library_node: Node) -> Optional[Node]:
+    """A console library texture rebuilt with the top levels the texture budget drops."""
+    source = console_image(conv, name) or _decode_console_image(conv.dst, library_node, name)
+    if source is None:
+        return None
+    rec = conv.dst.record("GfxImage")
+
+    def get(fname):
+        f = find_field(rec, fname)
+        return struct.unpack_from(conv.dst.endian + {1: "B", 2: "H", 4: "I"}[f.type.size], library_node.data, f.offset)[0]
+
+    try:
+        tex = img.build_console_texture(source, conv.options.max_texture_size, conv.options.keep_mips, conv.image_drop_levels.get(name, 0), conv.options.compress_textures)
+    except img.ImageError:
+        return None
+    conv.stats.texture_bytes += len(tex.pixels)
+    image = build_console_image(conv, name, tex, get("semantic"), get("category"), source.flags)
+    image.extra["library"] = True
+    return image
 
 
 def asset_display_name_pc(conv, node: Node) -> str:
