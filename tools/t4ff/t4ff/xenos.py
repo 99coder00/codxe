@@ -171,3 +171,128 @@ def fetch_constant(width: int, height: int, fmt: Format, levels: int, tiled: boo
 def texture_header(width: int, height: int, fmt: Format, levels: int, mip_address: int = 0) -> bytes:
     """D3DBaseTexture (52 bytes, little endian) as stored in T4 360 zones."""
     return struct.pack("<7I", 3, 1, 0, 0, 0, 0xFFFF0000, 0xFFFF0000) + fetch_constant(width, height, fmt, levels, True, mip_address)
+
+
+# ---------------------------------------------------------------------------
+# Mip chains
+
+
+def _log2_ceil(value: int) -> int:
+    return max(0, (value - 1).bit_length())
+
+
+def packed_mip_level(width: int, height: int) -> int:
+    """First mip level stored in the packed mip tail (its smaller side is 16 texels or less)."""
+    log2_size = _log2_ceil(min(width, height))
+    return log2_size - 4 if log2_size > 4 else 0
+
+
+def packed_mip_offset(width: int, height: int, level: int, fmt: Format):
+    """Block offset (x, y) of ``level`` inside the packed mip tail (Xenia's GetPackedMipOffset)."""
+    log2_w = _log2_ceil(width)
+    log2_h = _log2_ceil(height)
+    log2_size = min(log2_w, log2_h)
+    if log2_size > 4 + level:
+        return 0, 0
+    base = log2_size - 4 if log2_size > 4 else 0
+    packed = level - base
+    if packed < 3:
+        if log2_w > log2_h:
+            x, y = 0, 16 >> packed
+        else:
+            x, y = 16 >> packed, 0
+    else:
+        if log2_w > log2_h:
+            x, y = (1 << (log2_w - base)) >> (packed - 2), 0
+        else:
+            x, y = 0, (1 << (log2_h - base)) >> (packed - 2)
+    return x // fmt.block, y // fmt.block
+
+
+def _tiled_index(xs: np.ndarray, ys: np.ndarray, stored_w: int, bpb: int) -> np.ndarray:
+    log2 = _log2_bpb(bpb)
+    y = ys.astype(np.int64)
+    x = xs.astype(np.int64)
+    macro = ((y // 32) * (stored_w // 32)) << (log2 + 7)
+    micro = ((y & 6) << 2) << log2
+    row = macro + ((micro & ~0xF) << 1) + (micro & 0xF) + ((y & 8) << (3 + log2)) + ((y & 1) << 4)
+    macro = (x // 32) << (log2 + 7)
+    micro = (x & 7) << log2
+    offset = row + macro + ((micro & ~0xF) << 1) + (micro & 0xF)
+    tiled = ((offset & ~0x1FF) << 3) + ((offset & 0x1C0) << 2) + (offset & 0x3F) + ((y & 16) << 7) + (((((y & 8) >> 2) + (x >> 3)) & 3) << 6)
+    return tiled >> log2
+
+
+def mip_chain_layout(width: int, height: int, fmt: Format, levels: int):
+    """Byte offset of every level region and the total size.
+
+    Returns (base size, [(level, region offset, region stored width blocks, x blocks, y blocks)], total size).
+    Levels from the packed mip level on share the region of the packed level.
+    """
+    base_size = level_layout(width, height, 0, fmt)[4]
+    packed = packed_mip_level(width, height)
+    placements = []
+    offset = base_size
+    region = None
+    for level in range(1, levels):
+        if packed and level >= packed:
+            if region is None:
+                _, _, stored_w, _, size = level_layout(width, height, packed, fmt)
+                region = (offset, stored_w)
+                offset += size
+            x, y = packed_mip_offset(width, height, level, fmt)
+            placements.append((level, region[0], region[1], x, y))
+        else:
+            _, _, stored_w, _, size = level_layout(width, height, level, fmt)
+            placements.append((level, offset, stored_w, 0, 0))
+            offset += size
+    return base_size, placements, offset
+
+
+def tile_mip_chain(levels: list, width: int, height: int, fmt: Format) -> bytes:
+    """Tile a full mip chain (linear PC data, largest level first). The base level must be larger
+    than 16 texels in both dimensions when more than one level is given."""
+    base_size, placements, total = mip_chain_layout(width, height, fmt, len(levels))
+    out = np.zeros(total, dtype=np.uint8)
+    # tile_level applies the endian swap, undo it: the whole allocation is swapped at the end
+    out[:base_size] = np.frombuffer(endian_swap(tile_level(levels[0], width, height, 0, fmt), fmt.endian), dtype=np.uint8)
+    bpb = fmt.bytes_per_block
+    for level, region, stored_w, bx, by in placements:
+        mw = max(width >> level, 1)
+        mh = max(height >> level, 1)
+        wb = max(1, (mw + fmt.block - 1) // fmt.block)
+        hb = max(1, (mh + fmt.block - 1) // fmt.block)
+        src = np.frombuffer(levels[level], dtype=np.uint8)[: wb * hb * bpb].reshape(wb * hb, bpb)
+        ys, xs = np.meshgrid(np.arange(hb) + by, np.arange(wb) + bx, indexing="ij")
+        idx = _tiled_index(xs.reshape(-1), ys.reshape(-1), stored_w, bpb)
+        view = out[region:].reshape(-1, bpb) if (total - region) % bpb == 0 else None
+        view[idx] = src
+    # the GPU endian swap applies to the whole allocation
+    return endian_swap(out.tobytes(), fmt.endian)
+
+
+def untile_mip_chain(data: bytes, width: int, height: int, fmt: Format, levels: int) -> list:
+    base_size, placements, total = mip_chain_layout(width, height, fmt, levels)
+    raw = np.frombuffer(endian_swap(data[:total], fmt.endian), dtype=np.uint8)
+    result = [untile_level(endian_swap(raw[:base_size].tobytes(), fmt.endian), width, height, 0, fmt)]
+    bpb = fmt.bytes_per_block
+    for level, region, stored_w, bx, by in placements:
+        mw = max(width >> level, 1)
+        mh = max(height >> level, 1)
+        wb = max(1, (mw + fmt.block - 1) // fmt.block)
+        hb = max(1, (mh + fmt.block - 1) // fmt.block)
+        ys, xs = np.meshgrid(np.arange(hb) + by, np.arange(wb) + bx, indexing="ij")
+        idx = _tiled_index(xs.reshape(-1), ys.reshape(-1), stored_w, bpb)
+        result.append(raw[region:].reshape(-1, bpb)[idx].tobytes())
+    return result
+
+
+def texture_header_mips(width: int, height: int, fmt: Format, levels: int) -> bytes:
+    """D3DBaseTexture360 for a texture with a mip chain (mip address relative to the base)."""
+    base_size, placements, _ = mip_chain_layout(width, height, fmt, levels)
+    packed = any(bx or by for _, _, _, bx, by in placements) or (packed_mip_level(width, height) and levels > packed_mip_level(width, height))
+    header = bytearray(texture_header(width, height, fmt, levels, (base_size >> 12) if levels > 1 else 0))
+    if levels > 1 and packed:
+        dword5 = struct.unpack_from("<I", header, 28 + 20)[0] | (1 << 11)
+        struct.pack_into("<I", header, 28 + 20, dword5)
+    return bytes(header)

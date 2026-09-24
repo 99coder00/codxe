@@ -506,6 +506,10 @@ class ZoneConverter:
         script_node = zone.script_node
         assets_node = zone.assets_node
 
+        from .assets import plan_textures
+
+        plan_textures(self, root)
+
         for child in root.children:
             if child is assets_node:
                 new_root.children.append(self.convert_assets_node(child))

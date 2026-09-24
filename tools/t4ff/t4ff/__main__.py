@@ -74,8 +74,22 @@ def cmd_convert(args):
         allow_unverified=args.allow_unverified,
         max_texture_size=args.max_texture_size,
         texture_budget=int(args.texture_budget * 1024 * 1024),
+        keep_mips=not args.no_mips,
         iwd_paths=iwds + args.iwd,
     )
+
+    if not args.no_sounds:
+        from .audio import XmaEncoder, convert_streamed_sounds
+        from .images import IwdLibrary
+
+        library = IwdLibrary(iwds)
+        encoder = XmaEncoder(args.xma_encoder, args.xma_quality)
+        stats = convert_streamed_sounds(library, out_dir, encoder, args.stream_rate, args.mono_streams)
+        if stats["sounds"]:
+            print(
+                f"streamed sounds: {stats['converted']}/{stats['sounds']} converted, "
+                f"{stats['input_bytes'] / 1048576:.1f} MiB -> {stats['output_bytes'] / 1048576:.1f} MiB"
+            )
 
     for path in files:
         start = time.time()
@@ -116,6 +130,12 @@ def main(argv=None):
     p.add_argument("--iwd", action="append", default=[], help="extra .iwd files or folders to take images/sounds from (e.g. the PC game's main folder)")
     p.add_argument("--max-texture-size", type=int, default=0, help="largest texture dimension, bigger textures are downscaled (default: no limit)")
     p.add_argument("--texture-budget", type=float, default=0, help="texture memory budget in MiB (default: no limit)")
+    p.add_argument("--xma-encoder", help="path to xma2encode.exe (Xbox 360 XDK); also read from XMA2ENCODE or XEDK")
+    p.add_argument("--xma-quality", type=int, default=60, help="xma2encode quality 1-100 (default 60)")
+    p.add_argument("--stream-rate", type=int, default=0, help="resample streamed sounds above this rate (e.g. 32000)")
+    p.add_argument("--mono-streams", action="store_true", help="downmix streamed sounds to mono")
+    p.add_argument("--no-sounds", action="store_true", help="do not convert streamed sounds")
+    p.add_argument("--no-mips", action="store_true", help="drop all mip levels (saves ~25%% memory, textures shimmer at distance)")
     p.add_argument("--allow-unverified", action="store_true", help="also convert assets whose console layout is not verified (may crash the game)")
     p.set_defaults(func=cmd_convert)
 

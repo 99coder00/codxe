@@ -219,8 +219,7 @@ def build_console_texture(image: ImageData, max_size: int = 0, keep_mips: bool =
     """Tile ``image`` for the Xbox 360.
 
     ``max_size`` limits the base level dimensions and ``drop_levels`` removes additional top
-    levels (both only when mip levels are available). Mip levels are only kept when ``keep_mips``
-    is set; the console mip layout is not emitted yet, so textures are currently single level.
+    levels (both only when mip levels are available, texture data is never re-encoded).
     """
 
     if image.format == "R8G8B8":
@@ -234,14 +233,46 @@ def build_console_texture(image: ImageData, max_size: int = 0, keep_mips: bool =
 
     first = 0
     width, height = image.width, image.height
-    while first + 1 < len(image.levels) and (
-        (max_size and (width > max_size or height > max_size)) or first < drop_levels
-    ):
+    while first + 1 < len(image.levels) and ((max_size and (width > max_size or height > max_size)) or first < drop_levels):
         first += 1
         width, height = max(width >> 1, 1), max(height >> 1, 1)
 
-    # TODO: emit mip levels with the Xenos packed mip tail layout once it is validated.
-    levels = 1
-    pixels = xenos.tile_level(image.levels[first], width, height, 0, fmt)
-    header = xenos.texture_header(width, height, fmt, levels)
-    return ConsoleTexture(fmt, width, height, levels, header, pixels, first)
+    levels = [image.levels[first]]
+    if keep_mips and min(width, height) > 16:
+        w, h = width, height
+        for level in image.levels[first + 1 :]:
+            w, h = max(w >> 1, 1), max(h >> 1, 1)
+            # stop before levels smaller than one compression block
+            if min(w, h) < fmt.block:
+                break
+            levels.append(level)
+
+    if len(levels) > 1:
+        pixels = xenos.tile_mip_chain(levels, width, height, fmt)
+        header = xenos.texture_header_mips(width, height, fmt, len(levels))
+    else:
+        pixels = xenos.tile_level(levels[0], width, height, 0, fmt)
+        header = xenos.texture_header(width, height, fmt, 1)
+    return ConsoleTexture(fmt, width, height, len(levels), header, pixels, first)
+
+
+def console_texture_size(image: ImageData, max_size: int = 0, keep_mips: bool = True, drop_levels: int = 0) -> int:
+    """Size of the console texture :func:`build_console_texture` would produce (without tiling)."""
+    fmt_name = {"R8G8B8": "A8R8G8B8", "A8": "A8L8"}.get(image.format, image.format)
+    cfmt = to_console_format(fmt_name)
+    if cfmt is None:
+        return 0
+    fmt = xenos.FORMATS[cfmt]
+    first, width, height = 0, image.width, image.height
+    while first + 1 < len(image.levels) and ((max_size and (width > max_size or height > max_size)) or first < drop_levels):
+        first += 1
+        width, height = max(width >> 1, 1), max(height >> 1, 1)
+    count = 1
+    if keep_mips and min(width, height) > 16:
+        w, h = width, height
+        for _ in image.levels[first + 1 :]:
+            w, h = max(w >> 1, 1), max(h >> 1, 1)
+            if min(w, h) < fmt.block:
+                break
+            count += 1
+    return xenos.mip_chain_layout(width, height, fmt, count)[2]

@@ -138,19 +138,7 @@ def image_hook(conv, asset_type, node, name):
     semantic = field_value(rec, node.data, "semantic")
     category = field_value(rec, node.data, "category")
 
-    source: Optional[img.ImageData] = None
-    load_def = next((c for c in node.children if c.type.kind == "record" and c.type.name == "GfxImageLoadDef"), None)
-    if load_def is not None:
-        ld_rec = p.record("GfxImageLoadDef")
-        resource_size = field_value(ld_rec, load_def.data, "resourceSize")
-        if resource_size:
-            source = _image_from_load_def(p, name, load_def)
-
-    if source is None and conv.library is not None:
-        try:
-            source = conv.library.image(name)
-        except img.ImageError as e:
-            conv.warn(str(e))
+    source = image_source(conv, node, name)
 
     if source is None or map_type != 3:
         reason = "cube/volume image" if map_type != 3 else "no pixel data found (add the .iwd that contains it)"
@@ -171,6 +159,78 @@ def image_hook(conv, asset_type, node, name):
     conv.node_map[id(node)] = new
     conv.offset_maps[id(node)] = lambda off: off
     return new
+
+
+def image_source(conv, node: Node, name: str) -> Optional[img.ImageData]:
+    """Pixel data of a PC image asset: from its load def or from images/<name>.iwi (cached)."""
+    cache = conv.__dict__.setdefault("_image_sources", {})
+    if name in cache:
+        return cache[name]
+    p = conv.src
+    source = None
+    load_def = next((c for c in node.children if c.type.kind == "record" and c.type.name == "GfxImageLoadDef"), None)
+    if load_def is not None:
+        ld_rec = p.record("GfxImageLoadDef")
+        f = find_field(ld_rec, "resourceSize")
+        if struct.unpack_from("<I", load_def.data, f.offset)[0]:
+            try:
+                source = _image_from_load_def(p, name, load_def)
+            except img.ImageError as e:
+                conv.warn(str(e))
+    if source is None and conv.library is not None:
+        try:
+            source = conv.library.image(name)
+        except img.ImageError as e:
+            conv.warn(str(e))
+    cache[name] = source
+    return source
+
+
+def plan_textures(conv, root: Node):
+    """Choose how many top mip levels to drop per image so the textures fit the memory budget."""
+    options = conv.options
+    sources = {}
+    for node in root.walk():
+        if node.type.kind == "record" and node.type.name == "GfxImage" and (node.extra.get("origin") or ("",))[0] == "asset":
+            name = asset_display_name_pc(conv, node)
+            if not name or name.startswith(","):
+                continue
+            src = image_source(conv, node, name)
+            if src is not None and src.format in ("DXT1", "DXT3", "DXT5", "A8R8G8B8", "R8G8B8", "A8L8", "A8", "L8"):
+                sources[name] = src
+
+    drops = {n: 0 for n in sources}
+
+    def size(n):
+        return img.console_texture_size(sources[n], options.max_texture_size, options.keep_mips, drops[n])
+
+    def can_drop(n):
+        src = sources[n]
+        level = drops[n] + 1
+        return level < len(src.levels) and min(src.width >> level, src.height >> level) >= 64
+
+    total = sum(size(n) for n in sources)
+    before = total
+    if options.texture_budget:
+        while total > options.texture_budget:
+            candidates = [n for n in sources if can_drop(n)]
+            if not candidates:
+                conv.warn(f"textures need {total / 1048576:.1f} MiB, over the {options.texture_budget / 1048576:.1f} MiB budget, and cannot be reduced further")
+                break
+            largest = max(candidates, key=size)
+            old = size(largest)
+            drops[largest] += 1
+            total += size(largest) - old
+    conv.image_drop_levels = drops
+    if sources:
+        reduced = sum(1 for n in drops if drops[n])
+        conv.log(f"textures: {len(sources)} images, {before / 1048576:.1f} MiB -> {total / 1048576:.1f} MiB ({reduced} reduced)")
+
+
+def asset_display_name_pc(conv, node: Node) -> str:
+    from .zone import asset_name
+
+    return asset_name(conv.src, node)
 
 
 def _reference(conv, asset_type, node, name):
