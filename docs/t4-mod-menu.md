@@ -81,6 +81,7 @@ multiplayer mod, set `active_mod` to `codjumper`.
 | The level won't load after editing a script | A GSC compile error stops the level from loading. Run the [checker](#validating-gsc-changes) on your changes. |
 | Text starts with `UNLOCALIZED:` | The menu turns `loc_warnings` off by itself. If you still see it, your mod files are older than the fix; copy the `mod_menu` folder again. |
 | Menu rows run together on one line, separated by dots | Your mod files are from before rows became separate elements (T4 singleplayer HUD text can't show line breaks). Copy the `mod_menu` folder again. |
+| Values (`ON`/`OFF`, slider numbers, `>`) missing from the lower rows, no footer | Your mod files are from before the menu split its HUD elements across both element pools. Copy the `mod_menu` folder again. |
 | Some rows show `...` | The menu has used its budget of distinct on-screen strings for this level (see [How it works](#how-it-works)). Highlight the row: its name is printed in the message feed. The budget resets on the next level. |
 | Menu feels sluggish | Scripts run on game time, so the menu slows down with **World & Physics → Timescale**. Set it back to 1. |
 
@@ -164,7 +165,7 @@ of the sky with fall damage off until you land.
 
 Bullet Mode applies to every shot:
 
-| Mode           | What happens where the bullet lands                                 |
+| Mode           | What happens                                                        |
 | -------------- | ------------------------------------------------------------------- |
 | Explosive      | Explosion with physics push. It never hurts players                 |
 | Teleport       | You teleport to the impact point                                    |
@@ -173,21 +174,41 @@ Bullet Mode applies to every shot:
 | Tesla Chain    | Electrocutes the target and arcs through up to 6 nearby enemies     |
 | Magic Missile  | Fires a real rocket from any rocket weapon the map has loaded       |
 | Airstrike      | Six explosions scattered around the impact                          |
+| Cluster Bomb   | One blast, then six more in a ring around it                        |
+| Time Bomb      | The enemy you hit sparks for two seconds, then explodes             |
 | Black Hole     | 6-second vortex that pulls enemies and physics objects in, then detonates |
 | Portal Gun     | Shots alternate orange/blue portals; players and AI walk through    |
-| Prop Cannon    | Fires random props from the map                                     |
+| Prop Cannon    | Fires random props from the map. They knock over whatever they hit  |
+| Zombie Cannon  | Fires a zombie (a soldier in the campaign, where it's called Soldier Cannon) out of your gun. It lands alive |
+| Zombie Rocket  | The same, but it explodes on impact (Soldier Rocket in the campaign) |
 | AI Summoner    | Spawns a soldier (or zombie) where you shoot                        |
 | FX Gun         | Plays the effect last picked in the FX Browser                      |
 
-Also Aimbot (hold LT to snap to the nearest visible enemy) and Death Stare (enemies you look at
-die).
+Also on this page:
+
+- **Model Gun**: every shot also fires a model (the same toggle as in [Forge](#forge)).
+- **Projectile Speed** (600–3000) for the Model Gun, Prop Cannon and Zombie Cannon/Rocket.
+- **Aimbot**: hold LT to snap to the nearest visible enemy.
+- **Death Stare**: enemies you look at die.
+
+Projectiles fly on a real arc and stop at the first wall or character they hit. At most 24 props
+and 6 fired enemies exist at once; firing more removes the oldest. On zombies maps a fired zombie
+that is still alive after 45 seconds is removed, so the round can end.
 
 ### Fun & Chaos
 
-- **Chaos Mode**: a random event every 5–60 seconds (moon gravity, bullet time, fast forward, weird
-  vision, meteor shower, rapture, mass gibbing, earthquake, blood rain, disco, weapon roulette,
-  sonic speed, silent film, hurricane, upside-down physics, enemies launched). Timed events undo
+- **Chaos Mode**: a random event every 5–60 seconds, from 22 events. Timed events undo
   themselves.
+  - World: moon gravity, bullet time, fast forward, weird vision, earthquake, disco, silent
+    film, hurricane, upside-down physics.
+  - Carnage: meteor shower, rapture, mass gibbing, blood rain, enemies launched.
+  - Players: weapon roulette, sonic speed.
+  - Spawns: props raining from the sky, random effects from the level's FX list, an ambush of
+    zombies/soldiers around a player, zombies/paratroopers dropped from the sky, a prop tornado
+    around a player, and zombie artillery (zombies fired at the players that explode on impact).
+
+  Chaos spawns are capped: 40 props and effects and 6 AI. Each one is removed on its own after
+  8–30 seconds, and turning Chaos Mode off wipes them all at once.
 - **Jetpack**: hold A in the air to fly where you look.
 - **Rocket Ride**: ride a missile, steer it with your view, and explode on impact.
 - **Human Cannonball**, **Ground Pound** (RS in the air slams down with a shockwave) and
@@ -196,7 +217,9 @@ die).
 - Tactical Nuke, Meteor Shower, The Rapture (every enemy floats up and explodes), Blood Rain and
   Earthquake.
 - **FX Browser**: lists every effect the current level loaded. Selecting one plays it at your
-  crosshair and loads it into the FX Gun.
+  crosshair for 10 seconds and loads it into the FX Gun. Looping effects stop too.
+- **Clean Up Spawns** removes every temporary prop, effect and AI the menu has spawned right away.
+  Forge props stay.
 
 ### Enemies
 
@@ -223,7 +246,7 @@ These items only appear on zombies maps.
 
 ### World & Physics
 
-Timescale (0.1x–3x), Gravity, Ragdoll Gravity (Moon / Zero-G / Upside Down) and Hurricane Winds.
+Timescale (0.2x–3x), Gravity, Ragdoll Gravity (Moon / Zero-G / Upside Down) and Hurricane Winds.
 Also detonate every destructible, destroy all vehicles, and **Drivable Vehicles** (walk up to a
 tank or truck and press X).
 
@@ -238,12 +261,26 @@ tank or truck and press X).
 ### Forge
 
 - **Spawn Model** lists props the level placed plus weapon world models, so every entry is loaded.
+  **Spawn Random Model** picks one for you.
 - **Solid Spawns** uses CoD Xe's `SpawnCollision()`, so props you spawn have real collision if the
   model has collision data.
 - **Physics Spawns** uses real physics where the model supports it.
+- **Model Gun**: every shot also fires a model.
+  - **Gun Model**: pick the model, or Random Models.
+  - **Gun Style**:
+    - **Bounce**: the model tumbles on physics if it has any and disappears after 10 seconds.
+    - **Build**: the model becomes a Forge prop where it lands, following Solid/Physics Spawns.
+    - **Explode**: the model explodes on impact.
+  - **Models Per Shot** (1–5) turns it into a shotgun.
+- **Model Rain** drops 14 random props around your crosshair. They're temporary.
+- **Ring Of Props** places eight copies of your last model in a circle around you.
 - **Grab Mode**: hold LB to pick up the prop you're aiming at, RB spins it, and letting go throws
   it.
-- Launch, delete (props, doors, AI), undo and clear.
+- Rotate (45°), clone, launch and delete what you're aiming at (delete also works on doors and
+  AI). Also undo and clear.
+
+All players share a limit of 64 Forge props, because each prop is a game entity and running out
+of entities is a fatal error.
 
 ### Death Cards (campaign)
 
@@ -275,6 +312,19 @@ Menu Settings: 8 color themes, left/right placement, the open button combo, Cont
   `anim._effect["animscript_gib_fx"]`. The stock scripts load both on every singleplayer level.
 - **One text element per row.** T4 singleplayer HUD text doesn't render line breaks (they show
   up as dots), so each row and each value is its own element, at fixed positions.
+- **Two HUD element pools.** Each player's snapshot has two fixed-size HUD element arrays, and an
+  element's `archived` flag picks one (IW3 has `current[31]` and `archival[31]`). With all 27
+  menu elements in one array, only about 21 were drawn. Now the background, highlight, header,
+  title and labels (16) use one array, and the value column and footer (11) use the other, along
+  with the menu's zombie counter and perk icons.
+- **Temporary entity pools.** Projectiles, chaos props, effect anchors and extra AI go into named
+  pools, each with a size cap and a lifetime (`mm_pool_add` in `util.gsc`).
+  - A full pool removes its oldest entry.
+  - One level thread removes expired entries.
+  - Spam recycles old spawns instead of exhausting the level's entities or AI slots.
+- **Effects that can be wiped.** A looping effect started with `playFX()` never stops. Temporary
+  effects are played with `playFXOnTag()` on a pooled `tag_origin` model, and deleting the model
+  ends the effect.
 - **HUD string budget.** Every distinct string passed to `setText()` takes a localized-string
   config slot until the level ends. WaW has roughly 1,070 of them, shared with
   `PrecacheString()`, and running out ends the game with `G_FindConfigstringIndex: overflow`.
@@ -300,6 +350,9 @@ Menu Settings: 8 color themes, left/right placement, the open button combo, Cont
 - D-pad navigation uses the stock `buttonPressed()`, which may be developer-only on retail builds.
   If it is, the menu quietly falls back to the other buttons.
 - Solid Spawns only gives collision to models that have collision data.
+- Fired and chaos enemies come from the level's own spawners, so after landing they carry on
+  with whatever the level's AI scripts give that spawner to do. On campaign maps the cannon fires
+  enemy soldiers, while AI Summoner can also spawn friendlies.
 - Death Cards appear only in the campaign menu.
 
 ## Adding features

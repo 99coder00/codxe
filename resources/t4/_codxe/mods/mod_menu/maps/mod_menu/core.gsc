@@ -485,10 +485,19 @@ mm_create_hud()
 	for (r = 0; r < rows; r++)
 		hud["row" + r] = self mm_hud_text(x + 10, self.mm_list_y + r * rowH, "left", level.mm.font_scale, 4);
 
+	// A player's snapshot carries two fixed-size HUD element pools (IW3 has current[31] and
+	// archival[31], picked by .archived). With all 27 menu elements in one pool only the first
+	// ~21 were drawn: the values from the sixth row on and the footer vanished. The value column
+	// and footer go in the archival pool (with the mod's zombie counter and perk icons), leaving
+	// 16 menu elements in the other.
 	for (r = 0; r < rows; r++)
+	{
 		hud["val" + r] = self mm_hud_text(x + width - 10, self.mm_list_y + r * rowH, "right", level.mm.font_scale, 4);
+		hud["val" + r].archived = true;
+	}
 
 	hud["footer"] = self mm_hud_text(x + 10, y + height - 20, "left", 1.0, 4);
+	hud["footer"].archived = true;
 	hud["footer"].alpha = 0.65;
 	hud["footer"] setText("LT/RT Move  A Select  RS Back");
 

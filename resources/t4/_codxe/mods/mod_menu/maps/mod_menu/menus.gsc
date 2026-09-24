@@ -104,6 +104,8 @@ build_bullets()
 {
 	mm_menu("bullets", "Bullets & Aim", "main");
 	mm_add_choice("bullets", "Bullet Mode", "bullets", maps\mod_menu\weapons::bullet_mode_set, maps\mod_menu\weapons::bullet_mode_names());
+	mm_add_toggle("bullets", "Model Gun", "model_gun", maps\mod_menu\forge::model_gun_set);
+	mm_add_slider("bullets", "Projectile Speed", "shot_speed", maps\mod_menu\shots::shot_speed_set, 600, 3000, 200, 1400);
 	mm_add_toggle("bullets", "Aimbot (hold LT)", "aimbot", maps\mod_menu\weapons::aimbot_set);
 	mm_add_toggle("bullets", "Death Stare", "stare", maps\mod_menu\weapons::death_stare_set);
 }
@@ -127,6 +129,7 @@ build_fun()
 	mm_add_action("fun", "Blood Rain", maps\mod_menu\fun::blood_rain);
 	mm_add_action("fun", "Earthquake", maps\mod_menu\fun::earthquake_now);
 	mm_add_sub("fun", "FX Browser", "fx");
+	mm_add_action("fun", "Clean Up Spawns", maps\mod_menu\fun::cleanup_spawns);
 
 	mm_menu("fx", "FX Browser", "fun");
 	mm_set_builder("fx", ::fill_fx);
@@ -224,9 +227,18 @@ build_forge()
 {
 	mm_menu("forge", "Forge", "main");
 	mm_add_sub("forge", "Spawn Model", "models");
+	mm_add_action("forge", "Spawn Random Model", maps\mod_menu\forge::spawn_random_model);
 	mm_add_toggle("forge", "Solid Spawns", "forge_solid", maps\mod_menu\forge::solid_set);
 	mm_add_toggle("forge", "Physics Spawns", "forge_physics", maps\mod_menu\forge::physics_set);
+	mm_add_toggle("forge", "Model Gun", "model_gun", maps\mod_menu\forge::model_gun_set);
+	mm_add_sub("forge", "Gun Model", "gun_models");
+	mm_add_choice("forge", "Gun Style", "model_gun_style", maps\mod_menu\forge::model_gun_style_set, maps\mod_menu\forge::model_gun_style_names());
+	mm_add_slider("forge", "Models Per Shot", "model_gun_count", maps\mod_menu\forge::model_gun_count_set, 1, 5, 1, 1);
+	mm_add_action("forge", "Model Rain", maps\mod_menu\forge::model_rain);
+	mm_add_action("forge", "Ring Of Props", maps\mod_menu\forge::model_ring);
 	mm_add_toggle("forge", "Grab Mode (hold LB)", "pickup", maps\mod_menu\forge::pickup_set);
+	mm_add_action("forge", "Rotate Aimed", maps\mod_menu\forge::rotate_aimed);
+	mm_add_action("forge", "Clone Aimed", maps\mod_menu\forge::clone_aimed);
 	mm_add_action("forge", "Launch Aimed", maps\mod_menu\forge::launch_aimed);
 	mm_add_action("forge", "Delete Aimed", maps\mod_menu\forge::delete_aimed);
 	mm_add_action("forge", "Undo Last Spawn", maps\mod_menu\forge::undo_spawn);
@@ -234,6 +246,9 @@ build_forge()
 
 	mm_menu("models", "Spawn Model", "forge");
 	mm_set_builder("models", ::fill_models);
+
+	mm_menu("gun_models", "Gun Model", "forge");
+	mm_set_builder("gun_models", ::fill_gun_models);
 }
 
 fill_models(key)
@@ -242,6 +257,15 @@ fill_models(key)
 	models = maps\mod_menu\forge::model_list();
 	for (i = 0; i < models.size; i++)
 		mm_add_action(key, mm_short(models[i], 24), maps\mod_menu\forge::spawn_model, models[i]);
+}
+
+fill_gun_models(key)
+{
+	mm_clear(key);
+	mm_add_action(key, "Random Models", maps\mod_menu\forge::gun_model_pick, "random");
+	models = maps\mod_menu\forge::model_list();
+	for (i = 0; i < models.size; i++)
+		mm_add_action(key, mm_short(models[i], 24), maps\mod_menu\forge::gun_model_pick, models[i]);
 }
 
 build_cards()

@@ -110,6 +110,7 @@ perk_icon(perk)
 		return;
 
 	hud = newClientHudElem(self);
+	hud.archived = true; // keeps it out of the menu's HUD element pool (see mm_create_hud)
 	hud.foreground = true;
 	hud.sort = 1;
 	hud.hidewheninmenu = false;
@@ -441,6 +442,7 @@ zombie_counter_set(on)
 	self endon("disconnect");
 
 	label = newClientHudElem(self);
+	label.archived = true; // keeps it out of the menu's HUD element pool (see mm_create_hud)
 	label.alignX = "right";
 	label.alignY = "top";
 	label.horzAlign = "right";
@@ -455,6 +457,7 @@ zombie_counter_set(on)
 	self.mm_counter_label = label;
 
 	counter = newClientHudElem(self);
+	counter.archived = true;
 	counter.alignX = "right";
 	counter.alignY = "top";
 	counter.horzAlign = "right";

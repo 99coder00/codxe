@@ -360,6 +360,212 @@ mm_spawn_mover(origin, angles)
 	return mover;
 }
 
+// Flies ent along a ballistic arc in server frames (800 units/s^2 gravity), stopping at the
+// first surface or character in its path. Returns that trace, or undefined when the flight
+// timed out or ent was removed. spin (optional) is degrees per second.
+mm_fly(ent, velocity, maxTime, ignore, spin)
+{
+	for (t = 0; t < maxTime; t += 0.05)
+	{
+		if (!isDefined(ent))
+			return undefined;
+		start = ent.origin;
+		velocity = velocity - (0, 0, 40);
+		end = start + velocity * 0.05;
+		trace = bulletTrace(start, end, true, ignore);
+		if (isDefined(spin))
+			ent rotateTo(ent.angles + spin * 0.05, 0.05);
+		if (trace["fraction"] < 1)
+		{
+			ent moveTo(trace["position"] - vectorNormalize(velocity) * 4, 0.05);
+			wait 0.05;
+			return trace;
+		}
+		ent moveTo(end, 0.05);
+		wait 0.05;
+	}
+	return undefined;
+}
+
+// A random spot near player that the player can see, so spawns do not end up inside walls or
+// outside the map.
+mm_spot_near(player, minDist, maxDist)
+{
+	yaw = randomFloat(360);
+	dist = randomFloatRange(minDist, maxDist);
+	eye = player getEye();
+	target = eye + (cos(yaw) * dist, sin(yaw) * dist, 0);
+	trace = bulletTrace(eye, target, false, player);
+	spot = trace["position"] - vectorNormalize(target - eye) * 32;
+	return mm_ground(spot);
+}
+
+// ---------------------------------------------------------------------------
+// Temporary entity pools
+// ---------------------------------------------------------------------------
+
+// Everything the mod spawns for effect (projectiles, chaos props, FX anchors, extra AI) goes in
+// a named pool with a size cap and a lifetime in seconds (0 = until the pool is full or
+// cleared). A full pool frees its oldest entry and one level thread frees expired entries, so
+// spam recycles old spawns instead of running the level out of entities or AI slots.
+mm_pool_add(pool, ent, lifetime, cap)
+{
+	if (!isDefined(ent))
+		return;
+	if (!isDefined(level.mm_pools))
+		level.mm_pools = [];
+
+	list = mm_pool_list(pool);
+	drop = list.size - cap + 1;
+	kept = [];
+	for (i = 0; i < list.size; i++)
+	{
+		if (i < drop)
+			mm_pool_free(list[i], pool);
+		else
+			kept[kept.size] = list[i];
+	}
+
+	ent.mm_expire = 0;
+	if (lifetime > 0)
+		ent.mm_expire = getTime() + int(lifetime * 1000);
+	kept[kept.size] = ent;
+	level.mm_pools[pool] = kept;
+
+	// Restart the reaper if it is not running (or a runtime error killed it).
+	if (!isDefined(level.mm_pool_beat) || getTime() - level.mm_pool_beat > 2000)
+	{
+		level.mm_pool_beat = getTime();
+		level thread mm_pool_reaper();
+	}
+}
+
+// AI pools track living actors: a dead one leaves the pool and its corpse is left to the game.
+mm_pool_add_ai(pool, ai, lifetime, cap)
+{
+	if (!isDefined(level.mm_pool_ai))
+		level.mm_pool_ai = [];
+	level.mm_pool_ai[pool] = true;
+	mm_pool_add(pool, ai, lifetime, cap);
+}
+
+mm_pool_is_ai(pool)
+{
+	return isDefined(level.mm_pool_ai) && isDefined(level.mm_pool_ai[pool]);
+}
+
+mm_pool_list(pool)
+{
+	list = [];
+	if (!isDefined(level.mm_pools) || !isDefined(level.mm_pools[pool]))
+		return list;
+	isAi = mm_pool_is_ai(pool);
+	all = level.mm_pools[pool];
+	for (i = 0; i < all.size; i++)
+	{
+		if (!isDefined(all[i]))
+			continue;
+		if (isAi && !isAlive(all[i]))
+			continue;
+		list[list.size] = all[i];
+	}
+	return list;
+}
+
+mm_pool_free(ent, pool)
+{
+	if (!isDefined(ent))
+		return;
+	if (mm_pool_is_ai(pool))
+	{
+		if (isAlive(ent))
+		{
+			ent unlink();
+			mm_kill(ent);
+		}
+		return;
+	}
+	if (isDefined(ent.mm_rider) && isAlive(ent.mm_rider))
+		ent.mm_rider unlink();
+	ent delete();
+}
+
+mm_pool_remove(pool, ent)
+{
+	list = mm_pool_list(pool);
+	kept = [];
+	for (i = 0; i < list.size; i++)
+	{
+		if (list[i] != ent)
+			kept[kept.size] = list[i];
+	}
+	level.mm_pools[pool] = kept;
+}
+
+// Frees everything in a pool now. Returns how many entries it removed.
+mm_pool_clear(pool)
+{
+	list = mm_pool_list(pool);
+	count = list.size;
+	for (i = 0; i < count; i++)
+		mm_pool_free(list[i], pool);
+	if (isDefined(level.mm_pools))
+		level.mm_pools[pool] = [];
+	return count;
+}
+
+mm_pool_clear_all()
+{
+	count = 0;
+	if (!isDefined(level.mm_pools))
+		return count;
+	pools = getArrayKeys(level.mm_pools);
+	for (p = 0; p < pools.size; p++)
+		count += mm_pool_clear(pools[p]);
+	return count;
+}
+
+mm_pool_reaper()
+{
+	level notify("mm_pool_reaper");
+	level endon("mm_pool_reaper");
+	for (;;)
+	{
+		wait 0.5;
+		level.mm_pool_beat = getTime();
+		now = getTime();
+		pools = getArrayKeys(level.mm_pools);
+		for (p = 0; p < pools.size; p++)
+		{
+			list = mm_pool_list(pools[p]);
+			kept = [];
+			for (i = 0; i < list.size; i++)
+			{
+				expire = list[i].mm_expire;
+				if (isDefined(expire) && expire > 0 && expire <= now)
+					mm_pool_free(list[i], pools[p]);
+				else
+					kept[kept.size] = list[i];
+			}
+			level.mm_pools[pools[p]] = kept;
+		}
+	}
+}
+
+// Looping effects started with playFX never stop, so temporary effects are played on a pooled
+// tag_origin model instead: an effect on an entity ends when the entity is deleted. Pitch 270
+// points the effect up, like a createfx effect with default angles.
+mm_pool_fx(pool, fx, pos, lifetime, cap)
+{
+	if (!isDefined(fx))
+		return;
+	anchor = mm_spawn_mover(pos, (270, 0, 0));
+	mm_pool_add(pool, anchor, lifetime, cap);
+	wait 0.05; // give the new entity a frame to reach the client before attaching the effect
+	if (isDefined(anchor))
+		playFXOnTag(fx, anchor, "tag_origin");
+}
+
 mm_array_contains(array, value)
 {
 	for (i = 0; i < array.size; i++)

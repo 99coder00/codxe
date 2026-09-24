@@ -162,34 +162,55 @@ fast_reload_set(on)
 // Bullet modes
 // ---------------------------------------------------------------------------
 
+bullet_modes()
+{
+	modes = [];
+	modes[modes.size] = "Normal";
+	modes[modes.size] = "Explosive";
+	modes[modes.size] = "Teleport";
+	modes[modes.size] = "Gib Blaster";
+	modes[modes.size] = "Ragdoll Cannon";
+	modes[modes.size] = "Tesla Chain";
+	modes[modes.size] = "Magic Missile";
+	modes[modes.size] = "Airstrike";
+	modes[modes.size] = "Cluster Bomb";
+	modes[modes.size] = "Time Bomb";
+	modes[modes.size] = "Black Hole";
+	modes[modes.size] = "Portal Gun";
+	modes[modes.size] = "Prop Cannon";
+	modes[modes.size] = "Zombie Cannon";
+	modes[modes.size] = "Zombie Rocket";
+	modes[modes.size] = "AI Summoner";
+	modes[modes.size] = "FX Gun";
+	return modes;
+}
+
+// Same order as bullet_modes(); the zombie shots fire soldiers on campaign maps.
 bullet_mode_names()
 {
-	names = [];
-	names[names.size] = "Normal";
-	names[names.size] = "Explosive";
-	names[names.size] = "Teleport";
-	names[names.size] = "Gib Blaster";
-	names[names.size] = "Ragdoll Cannon";
-	names[names.size] = "Tesla Chain";
-	names[names.size] = "Magic Missile";
-	names[names.size] = "Airstrike";
-	names[names.size] = "Black Hole";
-	names[names.size] = "Portal Gun";
-	names[names.size] = "Prop Cannon";
-	names[names.size] = "AI Summoner";
-	names[names.size] = "FX Gun";
+	names = bullet_modes();
+	if (mm_is_zombies())
+		return names;
+	for (i = 0; i < names.size; i++)
+	{
+		if (names[i] == "Zombie Cannon")
+			names[i] = "Soldier Cannon";
+		else if (names[i] == "Zombie Rocket")
+			names[i] = "Soldier Rocket";
+	}
 	return names;
 }
 
 bullet_mode_set(index)
 {
+	modes = bullet_modes();
 	names = bullet_mode_names();
-	self.mm_bullet_mode = names[index];
+	self.mm_bullet_mode = modes[index];
 	self notify("mm_stop_bullets");
 	self.mm_portals = undefined;
 	self.mm_portal_next = undefined;
 	self.mm_portal_thread = undefined;
-	self iprintln("Bullets: ^3" + self.mm_bullet_mode);
+	self iprintln("Bullets: ^3" + names[index]);
 
 	if (self.mm_bullet_mode == "Normal")
 		return;
@@ -283,6 +304,14 @@ bullet_effect(mode, trace)
 	case "Airstrike":
 		self thread airstrike(pos);
 		break;
+	case "Cluster Bomb":
+		self thread cluster_bomb(pos + trace["normal"] * 8);
+		break;
+	case "Time Bomb":
+		target = bullet_target(trace, 72);
+		if (isDefined(target) && !isDefined(target.mm_time_bomb))
+			self thread time_bomb(target);
+		break;
 	case "Black Hole":
 		if (!isDefined(self.mm_black_hole) || getTime() > self.mm_black_hole)
 			self thread black_hole(pos);
@@ -291,14 +320,20 @@ bullet_effect(mode, trace)
 		self thread portal_place(pos + trace["normal"] * 32);
 		break;
 	case "Prop Cannon":
-		self thread prop_cannon(pos, dir);
+		self thread prop_cannon(dir);
+		break;
+	case "Zombie Cannon":
+		self thread maps\mod_menu\shots::fire_ai(false);
+		break;
+	case "Zombie Rocket":
+		self thread maps\mod_menu\shots::fire_ai(true);
 		break;
 	case "AI Summoner":
 		self thread summon_at(pos + trace["normal"] * 16);
 		break;
 	case "FX Gun":
 		if (isDefined(self.mm_fx_key) && isDefined(level._effect[self.mm_fx_key]))
-			playFX(level._effect[self.mm_fx_key], pos);
+			thread mm_pool_fx("fx", level._effect[self.mm_fx_key], pos, 5, 12);
 		else
 			self iprintln("^1Pick an effect in Fun > FX Browser first");
 		break;
@@ -452,22 +487,50 @@ portal_think()
 	}
 }
 
-prop_cannon(pos, dir)
+// A random model per shot, knocking over whatever it hits.
+prop_cannon(dir)
 {
+	if (isDefined(self.mm_prop_next) && self.mm_prop_next > getTime())
+		return;
+	self.mm_prop_next = getTime() + 150;
 	models = maps\mod_menu\forge::model_list();
 	if (models.size == 0)
-	{
-		mm_explode(pos, 150, self);
 		return;
-	}
 	start = self getEye() + dir * 60;
-	prop = spawn("script_model", start);
-	prop setModel(models[randomInt(models.size)]);
-	prop.angles = (randomInt(360), randomInt(360), 0);
-	prop moveGravity(dir * 1400 + (0, 0, 120), 6);
-	wait 6;
-	if (isDefined(prop))
-		prop delete();
+	self maps\mod_menu\shots::model_shot(models[randomInt(models.size)], start, dir * self maps\mod_menu\shots::shot_speed(), "Bounce");
+}
+
+// One blast, then six more scattered around it.
+cluster_bomb(pos)
+{
+	mm_explode(pos, 180, self);
+	wait 0.3;
+	for (i = 0; i < 6; i++)
+	{
+		yaw = i * 60 + randomIntRange(-20, 20);
+		dist = randomIntRange(120, 260);
+		mm_explode(mm_ground(pos + (cos(yaw) * dist, sin(yaw) * dist, 48)), 160, self);
+		wait 0.12;
+	}
+}
+
+// The enemy you shoot sparks for two seconds, then explodes, taking its friends with it.
+time_bomb(target)
+{
+	target.mm_time_bomb = true;
+	pos = target.origin;
+	for (i = 0; i < 8; i++)
+	{
+		if (!isAlive(target))
+			break;
+		pos = target.origin;
+		target setElectrified(0.25);
+		mm_blood(pos + (0, 0, 50));
+		wait 0.25;
+	}
+	if (isAlive(target))
+		thread mm_fling(target, (0, 0, 450), self);
+	mm_explode(pos + (0, 0, 30), 260, self);
 }
 
 summon_at(pos)

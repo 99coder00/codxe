@@ -326,6 +326,32 @@ spawn_random_enemy_at(pos)
 	return spawn_from(types[randomInt(types.size)], pos);
 }
 
+// Spawner types for enemies: every type on zombies maps (zombies and dogs), otherwise the
+// actor_axis_* soldier types, falling back to every type if the map names them differently.
+enemy_spawner_types()
+{
+	types = spawner_types();
+	if (mm_is_zombies())
+		return types;
+	enemies = [];
+	for (i = 0; i < types.size; i++)
+	{
+		if (isSubStr(types[i].classname, "axis"))
+			enemies[enemies.size] = types[i];
+	}
+	if (enemies.size == 0)
+		return types;
+	return enemies;
+}
+
+spawn_enemy_at(pos)
+{
+	types = enemy_spawner_types();
+	if (types.size == 0)
+		return undefined;
+	return spawn_from(types[randomInt(types.size)], pos);
+}
+
 // Spawns an AI, flips it to your team and keeps it at your side.
 bodyguard()
 {

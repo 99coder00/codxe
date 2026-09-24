@@ -440,6 +440,13 @@ fx_play(key)
 	if (!isDefined(level._effect[key]))
 		return;
 	self.mm_fx_key = key;
-	playFX(level._effect[key], self mm_aim_pos());
+	thread mm_pool_fx("fx", level._effect[key], self mm_aim_pos(), 10, 12);
 	self iprintln("Playing ^3" + key + "^7 (also loaded into FX Gun)");
+}
+
+// Removes every temporary prop, effect and AI the mod has spawned (Forge props excluded).
+cleanup_spawns()
+{
+	count = mm_pool_clear_all();
+	self iprintln("Cleaned up ^3" + count + "^7 spawns");
 }
