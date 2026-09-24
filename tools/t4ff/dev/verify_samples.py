@@ -20,22 +20,32 @@ from t4ff.zone import Reader, Writer  # noqa: E402
 VERIFIED = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "t4ff", "defs", "x360_verified.txt")
 
 
-def records_of(zone):
+def records_of(zone, platform):
+    """Record types streamed by the zone, ignoring name only reference assets (all zero data)."""
+    from t4ff.zone import asset_name
+
     names = set()
-    for node in zone.extra_root.walk():
+    stack = [zone.extra_root]
+    while stack:
+        node = stack.pop()
+        origin = node.extra.get("origin")
+        if origin and origin[0] == "asset" and asset_name(platform, node).startswith(","):
+            continue
         for t, _, _, _ in node.segments:
             while t.kind == "array":
                 t = t.elem
             if t.kind == "record":
                 names.add(t.name)
+        stack.extend(node.children)
     return names
 
 
 def main(paths):
     verified = set()
-    if os.path.exists(VERIFIED):
+    if os.path.exists(VERIFIED) and "--reset" not in paths:
         with open(VERIFIED, "r", encoding="utf-8") as f:
             verified = {line.strip() for line in f if line.strip() and not line.startswith("#")}
+    paths = [p for p in paths if p != "--reset"]
 
     for path in paths:
         endian, _, data = read_fastfile(path)
@@ -45,7 +55,7 @@ def main(paths):
         platform = for_endian(endian)
         zone = Reader(platform, data).load()
         identical = Writer(platform).write(zone) == data
-        found = records_of(zone)
+        found = records_of(zone, platform)
         print(f"{path}: {len(zone.assets)} assets, round trip {'identical' if identical else 'DIFFERENT'}, {len(found)} record types")
         if identical:
             verified |= found

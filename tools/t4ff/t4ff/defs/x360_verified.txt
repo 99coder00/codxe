@@ -22,7 +22,6 @@ WeaponDef
 XAnimDeltaPart
 XAnimNotifyInfo
 XAnimParts
-XModel
 editFieldDef_s
 expressionEntry
 itemDef_s

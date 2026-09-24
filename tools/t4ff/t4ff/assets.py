@@ -330,7 +330,22 @@ def _load_def_flags(iwi_flags: int) -> int:
     return iwi_flags & 0x3
 
 
+# Asset types whose console layout is known but whose PC -> console conversion is not.
+UNSUPPORTED_CONVERSIONS = {
+    "xanim": "the console has 12 animation part types, the PC -> console mapping is not known yet",
+}
+
+
+def unsupported_hook(conv, asset_type, node, name):
+    if name.startswith(",") or conv.options.allow_unverified:
+        return None
+    conv.warn(f"{asset_type} '{name}': {UNSUPPORTED_CONVERSIONS[asset_type]}, emitting a reference")
+    return _reference(conv, asset_type, node, name)
+
+
 def register_hooks(conv):
+    for asset_type in UNSUPPORTED_CONVERSIONS:
+        conv.hooks[asset_type] = unsupported_hook
     conv.hooks["techset"] = techset_hook
     conv.hooks["material"] = material_hook
     conv.hooks["image"] = image_hook

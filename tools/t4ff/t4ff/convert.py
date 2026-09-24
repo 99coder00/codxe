@@ -346,7 +346,13 @@ class ZoneConverter:
     def unverified_records(self, node: Node) -> Set[str]:
         """Record types used by ``node``'s subtree that were not verified on console."""
         missing = set()
-        for n in node.walk():
+        stack = [node]
+        while stack:
+            n = stack.pop()
+            # nested assets are converted (or referenced) on their own
+            for child in n.children:
+                if (child.extra.get("origin") or ("",))[0] != "asset":
+                    stack.append(child)
             for t, _, _, _ in n.segments:
                 while t.kind == "array":
                     t = t.elem
