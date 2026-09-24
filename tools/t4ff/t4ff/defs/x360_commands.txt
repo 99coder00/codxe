@@ -35,3 +35,6 @@ set allocalign physicalPart 32;
 
 use MaterialPass;
 set reusable vertexShaderArray;
+
+use XAnimParts;
+set count names boneCount[11];

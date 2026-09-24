@@ -261,3 +261,45 @@
         Material* backgroundItemListbox;
         Material* highlightTexture;
     };
+
+    // Console animations have 12 part types (6 rotation, 5 translation, all): PART_TYPE_ALL is 11.
+    struct XAnimParts
+    {
+        const char* name;
+        uint16_t dataByteCount;
+        uint16_t dataShortCount;
+        uint16_t dataIntCount;
+        uint16_t randomDataByteCount;
+        uint16_t randomDataIntCount;
+        uint16_t numframes;
+        bool bLoop;
+        bool bDelta;
+        unsigned char boneCount[12];
+        unsigned char notifyCount;
+        unsigned char assetType;
+        bool isDefault;
+        unsigned int randomDataShortCount;
+        unsigned int indexCount;
+        float framerate;
+        float frequency;
+        ScriptString* names;
+        unsigned char* dataByte;
+        int16_t* dataShort;
+        int* dataInt;
+        int16_t* randomDataShort;
+        unsigned char* randomDataByte;
+        int* randomDataInt;
+        XAnimIndices indices;
+        XAnimNotifyInfo* notify;
+        XAnimDeltaPart* deltaPart;
+    };
+
+    // UNVERIFIED: only reference (name only) models were available. The 360 XModel is 16 bytes
+    // smaller than on PC; the PC only static model cache fields of the lod infos are assumed missing.
+    struct XModelLodInfo
+    {
+        float dist;
+        uint16_t numsurfs;
+        uint16_t surfIndex;
+        int partBits[4];
+    };
