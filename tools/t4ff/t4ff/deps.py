@@ -41,6 +41,10 @@ PYTHON_PACKAGES = [
 
 Log = Callable[[str], None]
 
+# Console programs started from the window (which has no console) would each open a console
+# window on Windows without this.
+NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform.startswith("win") else {}
+
 
 # ---------------------------------------------------------------------------
 # Python packages
@@ -60,7 +64,7 @@ def _pip(args: List[str], log: Log) -> bool:
     cmd = [sys.executable, "-m", "pip"] + args
     log("$ " + " ".join(cmd))
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, errors="replace", stdin=subprocess.DEVNULL, **NO_WINDOW)
     except OSError as e:
         log(f"pip could not be started: {e}")
         return False
@@ -74,9 +78,9 @@ def install_python_packages(packages: List[str], log: Log = print) -> bool:
     """pip install ``packages`` for this Python (user installation as a fallback)."""
     if not packages:
         return True
-    if subprocess.run([sys.executable, "-m", "pip", "--version"], capture_output=True).returncode != 0:
+    if subprocess.run([sys.executable, "-m", "pip", "--version"], capture_output=True, **NO_WINDOW).returncode != 0:
         log("pip is missing, installing it (ensurepip)")
-        subprocess.run([sys.executable, "-m", "ensurepip", "--upgrade"], capture_output=True)
+        subprocess.run([sys.executable, "-m", "ensurepip", "--upgrade"], capture_output=True, **NO_WINDOW)
     ok = _pip(["install", "--disable-pip-version-check"] + packages, log)
     if not ok:
         ok = _pip(["install", "--disable-pip-version-check", "--user"] + packages, log)

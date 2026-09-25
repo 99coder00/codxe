@@ -20,6 +20,7 @@ from typing import Callable, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
+from . import progress
 from .commands import NEVER
 from .layout import Record, SCALARS, TypeRef
 from .zone import (
@@ -841,8 +842,11 @@ class ZoneConverter:
         for off, ptr in node.relocs.items():
             new.relocs[off] = ptr
             self.ptrs.append((ptr, new))
-        for child in node.children:
+        label = getattr(self, "progress_label", None) or "Converting assets"
+        for index, child in enumerate(node.children):
+            progress.step(label, index, len(node.children))
             new.children.append(self.convert_child(child))
+        progress.step(label, len(node.children), len(node.children))
         return new
 
     def fix_pointers(self):

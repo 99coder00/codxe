@@ -70,9 +70,12 @@ options: please include that output when reporting the problem.
 Double click `t4ff_gui.pyw` (Windows), or run `python -m t4ff gui`. Choose the
 PC usermap folder, an output folder, `xma2encode.exe` and the Xbox 360
 fastfiles to take shaders from, set the memory options and press **Convert**.
-The log shows the conversion and, at the end, the memory the map needs;
-settings are remembered for the next run. **Inspect fastfile...** lists the
-content of any PC or Xbox 360 fastfile.
+The conversion runs as a separate process, so the window stays usable. The
+line under the buttons shows the current step with its count (for example
+`Converting mod.ff (file 3 of 3): 1200/2400 (50%)`), **Stop** ends it. The log
+shows the conversion and, at the end, the memory the map needs; settings are
+remembered for the next run. **Inspect fastfile...** lists the content of any
+PC or Xbox 360 fastfile.
 
 The window uses tkinter, which the python.org installers include (on Linux:
 `sudo apt install python3-tk`).

@@ -16,6 +16,7 @@ import sys
 import time
 import zipfile
 
+from . import progress
 from .fastfile import read_fastfile, write_fastfile
 from .platforms import for_endian, pc, x360
 from .zone import BLOCK_NAMES, Reader, Writer
@@ -103,8 +104,14 @@ def converters(paths, options):
     from .assets import plan_textures_shared
     from .convert import ZoneConverter
 
-    convs = [ZoneConverter(load_pc_zone(path), pc(), x360(), options) for path in paths]
+    convs = []
+    for index, path in enumerate(paths):
+        progress.step("Reading PC fastfiles", index, len(paths))
+        convs.append(ZoneConverter(load_pc_zone(path), pc(), x360(), options))
+    progress.step("Planning texture memory")
     plan_textures_shared(convs)
+    for index, (path, conv) in enumerate(zip(paths, convs)):
+        conv.progress_label = f"Converting {os.path.basename(path)}" + (f" (file {index + 1} of {len(paths)})" if len(paths) > 1 else "")
     return convs
 
 
@@ -127,9 +134,11 @@ def convert_fastfile(path: str, options):
 
 
 def write_zone(zone, target: str):
+    progress.step(f"Writing {os.path.basename(target)}")
     out = Writer(x360()).write(zone)
     write_fastfile(target, ">", out)
     # reading the zone back checks it with the console loading rules
+    progress.step(f"Checking {os.path.basename(target)}")
     sizes = Reader(x360(), out).load().block_sizes
     blocks = ", ".join(f"{n.split('_BLOCK_')[1].lower()} {s / 1048576:.1f}" for n, s in zip(BLOCK_NAMES, sizes) if s)
     print(f"wrote {target} ({os.path.getsize(target) / 1048576:.1f} MiB compressed)")
@@ -198,6 +207,8 @@ def cmd_convert(args):
     if "mod" in files and not args.no_mod:
         paths.append(files["mod"])
     zones = [run_converter(path, conv) for path, conv in zip(paths, converters(paths, options))]
+    if len(zones) > 1:
+        progress.step("Merging into one fastfile")
     main_zone = zones[0] if len(zones) == 1 else merge_zones(x360(), zones)
     prune_references(x360(), main_zone)
     write_zone(main_zone, os.path.join(out_dir, f"{name}.ff"))
@@ -235,6 +246,7 @@ def cmd_gui(args):
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="t4ff", description="World at War fastfile tools (PC -> Xbox 360 conversion for CoD Xe)")
     parser.add_argument("--no-install", action="store_true", help="do not install missing Python packages or xma2encode.exe automatically")
+    parser.add_argument("--progress-lines", action="store_true", help="report progress as '@progress <done> <total> <step>' lines (for the window)")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("info", help="list the content of a fastfile")
@@ -278,6 +290,7 @@ def main(argv=None):
     p.set_defaults(func=cmd_setup)
 
     args = parser.parse_args(argv)
+    progress.use_lines(args.progress_lines)
     if args.command in ("convert", "info", "roundtrip") and not args.no_install:
         from . import deps
 

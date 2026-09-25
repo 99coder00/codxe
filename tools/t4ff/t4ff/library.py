@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 from typing import Dict, List, Optional, Tuple
 
+from . import progress
 from .fastfile import read_fastfile
 from .merge import node_script_string_offsets
 from .zone import ASSET_RECORDS, Node, Platform, Ptr, Reader, Zone, asset_name
@@ -45,30 +46,34 @@ class ConsoleLibrary:
         if self._zones is not None:
             return
         self._zones = []
+        files = []
         for path in self.paths:
-            files = [path]
             if os.path.isdir(path):
-                files = sorted(os.path.join(root, f) for root, _, fs in os.walk(path) for f in fs if f.lower().endswith(".ff"))
-            for f in files:
-                try:
-                    endian, _, data = read_fastfile(f)
-                    if endian != ">":
-                        self.log(f"warning: {f}: not an Xbox 360 fastfile, ignored")
-                        continue
-                    zone = Reader(self.p, data).load()
-                except Exception as e:  # a library zone that cannot be read is skipped
-                    self.log(f"warning: {f}: cannot be read ({e}), ignored")
+                files += sorted(os.path.join(root, f) for root, _, fs in os.walk(path) for f in fs if f.lower().endswith(".ff"))
+            else:
+                files.append(path)
+        for index, f in enumerate(files):
+            progress.step("Reading Xbox 360 fastfiles", index, len(files))
+            try:
+                endian, _, data = read_fastfile(f)
+                if endian != ">":
+                    self.log(f"warning: {f}: not an Xbox 360 fastfile, ignored")
                     continue
-                self._zones.append(zone)
-                count = 0
-                for node in zone.extra_root.walk():
-                    origin = node.extra.get("origin")
-                    if not origin or origin[0] != "asset":
-                        continue
-                    name = asset_name(self.p, node)
-                    if name and not name.startswith(","):
-                        count += self._index.setdefault((origin[1], name.lower()), (zone, node)) == (zone, node)
-                self.log(f"console library: {os.path.basename(f)}: {count} assets")
+                zone = Reader(self.p, data).load()
+            except Exception as e:  # a library zone that cannot be read is skipped
+                self.log(f"warning: {f}: cannot be read ({e}), ignored")
+                continue
+            self._zones.append(zone)
+            count = 0
+            for node in zone.extra_root.walk():
+                origin = node.extra.get("origin")
+                if not origin or origin[0] != "asset":
+                    continue
+                name = asset_name(self.p, node)
+                if name and not name.startswith(","):
+                    count += self._index.setdefault((origin[1], name.lower()), (zone, node)) == (zone, node)
+            self.log(f"console library: {os.path.basename(f)}: {count} assets")
+        progress.step("Reading Xbox 360 fastfiles", len(files), len(files))
 
     def find(self, rec_name: str, name: str) -> Optional[Tuple[Zone, Node]]:
         if not self.paths:

@@ -2,8 +2,9 @@
 
     python -m t4ff gui          (or double click t4ff_gui.pyw on Windows)
 
-The window runs the same conversion as ``python -m t4ff convert`` in a background
-thread and shows its output. Settings are remembered between runs.
+The window runs ``python -m t4ff convert`` as a separate process (so it stays responsive while
+the conversion keeps a processor busy), shows its output and follows its progress. Settings are
+remembered between runs.
 """
 
 from __future__ import annotations
@@ -20,6 +21,8 @@ import traceback
 import zipfile
 from dataclasses import asdict, dataclass, field
 from typing import List
+
+from .progress import parse as parse_progress
 
 SOUND_RATES = ("keep", "48000", "44100", "32000", "24000")
 STREAM_RATES = ("keep", "44100", "32000", "24000", "22050")
@@ -153,15 +156,46 @@ def run_captured(func, q: "queue.Queue[str]"):
             return None
 
 
-def run_cli(args: List[str], q: "queue.Queue[str]") -> bool:
-    """Run ``python -m t4ff <args>`` in this thread, sending its output to ``q``."""
+TOOL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-    def cli():
-        from .__main__ import main as cli_main
 
-        return (cli_main(args) or 0) == 0
+def python_executable() -> str:
+    """The Python running the window; its console variant for pythonw.exe (whose output could be
+    lost), started without a console window."""
+    exe = sys.executable
+    if os.path.basename(exe).lower() == "pythonw.exe":
+        console = os.path.join(os.path.dirname(exe), "python.exe")
+        if os.path.exists(console):
+            return console
+    return exe
 
-    return bool(run_captured(cli, q))
+
+def cli_command(args: List[str]) -> List[str]:
+    """``python -m t4ff <args>`` in a separate process reporting its progress: the conversion
+    keeps its own Python, so the window stays responsive."""
+    return [python_executable(), "-u", "-m", "t4ff", "--progress-lines"] + args
+
+
+def process_options() -> dict:
+    """subprocess.Popen options for :func:`cli_command`: output as text lines, no console window."""
+    from .deps import NO_WINDOW
+
+    env = dict(os.environ)
+    env["PYTHONPATH"] = TOOL_DIR + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUNBUFFERED"] = "1"
+    return dict(
+        cwd=TOOL_DIR,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+        **NO_WINDOW,
+    )
 
 
 def find_and_install_encoder():
@@ -356,10 +390,15 @@ def main():
     open_button.pack(side="left", padx=2)
     setup_button = ttk.Button(actions, text="Set up dependencies")
     setup_button.pack(side="left", padx=2)
-    progress = ttk.Progressbar(actions, mode="determinate", length=160)
+    stop_button = ttk.Button(actions, text="Stop", state="disabled")
+    stop_button.pack(side="left", padx=2)
+    # what the conversion is doing: the step, its count and a bar
+    status_row = ttk.Frame(root)
+    status_row.pack(fill="x", padx=pad["padx"])
+    status = ttk.Label(status_row, text="Ready", anchor="w")
+    status.pack(side="left", fill="x", expand=True, padx=2)
+    progress = ttk.Progressbar(status_row, mode="determinate", length=280)
     progress.pack(side="right", padx=4)
-    status = ttk.Label(actions, text="Ready")
-    status.pack(side="right", padx=6)
 
     log = ScrolledText(root, height=14, wrap="char", state="disabled", font=("Consolas", 9) if sys.platform.startswith("win") else ("TkFixedFont", 9))
     log.pack(fill="both", expand=True, **pad)
@@ -368,7 +407,7 @@ def main():
     log.tag_configure("note", foreground="#175cd3")
 
     output_queue: "queue.Queue[str]" = queue.Queue()
-    state = {"running": False, "pending": ""}
+    state = {"running": False, "pending": "", "process": None, "stopped": False}
 
     def append(text: str, tag: str = ""):
         log.configure(state="normal")
@@ -402,13 +441,24 @@ def main():
         state["running"] = running
         for button in (convert_button, inspect_button, setup_button):
             button.configure(state="disabled" if running else "normal")
+        stop_button.configure(state="normal" if running and state["process"] is not None else "disabled")
         status.configure(text=text)
         if running:
-            progress.configure(mode="indeterminate")
-            progress.start(12)
+            show_progress(0, 0)
         else:
             progress.stop()
             progress.configure(mode="determinate", value=0)
+
+    def show_progress(done: int, total: int):
+        """A count (``total`` > 0) fills the bar, a step without one animates it."""
+        if total > 0:
+            if str(progress.cget("mode")) != "determinate":
+                progress.stop()
+                progress.configure(mode="determinate")
+            progress.configure(value=100.0 * done / total)
+        elif str(progress.cget("mode")) != "indeterminate":
+            progress.configure(mode="indeterminate", value=0)
+            progress.start(12)
 
     def start_task(label: str, func, on_done=None, quiet: bool = False):
         """Run ``func`` in a worker thread; ``on_done(result)`` runs in the window afterwards."""
@@ -422,8 +472,31 @@ def main():
         threading.Thread(target=work, daemon=True).start()
 
     def start(args: List[str], label: str, on_done=None):
+        """Run ``python -m t4ff <args>`` as a separate process, its output going to the log."""
         append("\n$ python -m t4ff " + " ".join(f'"{a}"' if " " in a else a for a in args) + "\n", "note")
-        start_task(label, lambda: run_cli(args, output_queue), on_done)
+        try:
+            process = subprocess.Popen(cli_command(args), **process_options())
+        except OSError as e:
+            append(f"error: cannot start the converter: {e}\n", "error")
+            return
+        state.update(memory="", process=process, stopped=False)
+        set_running(True, label)
+
+        def read():
+            for line in process.stdout:
+                output_queue.put(line)
+            code = process.wait()
+            output_queue.put(("done", code == 0, on_done, False))
+
+        threading.Thread(target=read, daemon=True).start()
+
+    def stop():
+        process = state["process"]
+        if process is not None and process.poll() is None:
+            state["stopped"] = True
+            process.terminate()
+            stop_button.configure(state="disabled")
+            status.configure(text="Stopping...")
 
     def poll():
         try:
@@ -435,8 +508,14 @@ def main():
                     if state["pending"]:
                         flush_line(state["pending"])
                         state["pending"] = ""
+                    stopped = state["stopped"]
+                    state.update(process=None, stopped=False)
                     if quiet:
                         set_running(False, "Ready")
+                    elif stopped:
+                        set_running(False, "Stopped")
+                        append("Stopped.\n", "warning")
+                        continue
                     else:
                         summary = f"Done: the map needs {state['memory']}" if ok and state.get("memory") else "Done" if ok else "Failed, see the log"
                         set_running(False, summary)
@@ -454,6 +533,12 @@ def main():
         root.after(100, poll)
 
     def flush_line(line: str):
+        report = parse_progress(line)
+        if report is not None:
+            done, total, step = report
+            status.configure(text=f"{step}: {done}/{total} ({100 * done // total}%)" if total > 0 else f"{step}...")
+            show_progress(done, total)
+            return
         if line.startswith("  memory:") and not state.get("memory"):
             state["memory"] = line.split(":", 1)[1].split("(")[0].strip()  # the first zone written is the map
         lower = line.lower()
@@ -549,10 +634,14 @@ def main():
     inspect_button.configure(command=inspect)
     open_button.configure(command=open_output)
     setup_button.configure(command=set_up)
+    stop_button.configure(command=stop)
 
     def close():
         if state["running"] and not messagebox.askyesno("t4ff", "A conversion is running. Quit anyway?"):
             return
+        process = state["process"]
+        if process is not None and process.poll() is None:
+            process.terminate()
         current_settings().save(path)
         root.destroy()
 

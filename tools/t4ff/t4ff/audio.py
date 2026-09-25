@@ -33,6 +33,9 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 
+from . import progress
+from .deps import NO_WINDOW
+
 SDNS_MAGIC = b"SDNS"
 SDNS_HEADER_SIZE = 0x1000
 XMA_PACKET_SIZE = 2048
@@ -151,7 +154,7 @@ def decode_with_ffmpeg(data: bytes, channels: Optional[int] = None) -> Pcm:
         src = os.path.join(tmp, "in.bin")
         with open(src, "wb") as f:
             f.write(data)
-        probe = subprocess.run([exe, "-hide_banner", "-i", src], capture_output=True, text=True)
+        probe = subprocess.run([exe, "-hide_banner", "-i", src], capture_output=True, text=True, errors="replace", **NO_WINDOW)
         rate, chans = 44100, 1
         for line in probe.stderr.splitlines():
             if "Audio:" in line:
@@ -167,7 +170,7 @@ def decode_with_ffmpeg(data: bytes, channels: Optional[int] = None) -> Pcm:
                         chans = int(part.split()[0])
                 break
         chans = channels or chans
-        out = subprocess.run([exe, "-hide_banner", "-loglevel", "error", "-i", src, "-f", "s16le", "-ac", str(chans), "-"], capture_output=True)
+        out = subprocess.run([exe, "-hide_banner", "-loglevel", "error", "-i", src, "-f", "s16le", "-ac", str(chans), "-"], capture_output=True, **NO_WINDOW)
         if out.returncode != 0:
             raise AudioError(f"FFmpeg failed: {out.stderr.decode(errors='replace').strip()}")
     s = np.frombuffer(out.stdout, dtype="<i2")
@@ -313,7 +316,7 @@ class XmaEncoder:
                 raise AudioError("xma2encode.exe needs wine on this platform: " + wine_advice())
             cmd = [wine] + cmd
         try:
-            return subprocess.run(cmd, capture_output=True, text=True, errors="replace", stdin=subprocess.DEVNULL, timeout=timeout)
+            return subprocess.run(cmd, capture_output=True, text=True, errors="replace", stdin=subprocess.DEVNULL, timeout=timeout, **NO_WINDOW)
         except OSError as e:
             raise AudioError(f"cannot run {self.path}: {e}") from e
         except subprocess.TimeoutExpired as e:
@@ -590,7 +593,8 @@ def convert_streamed_sounds(library, out_dir: str, encoder: XmaEncoder, max_rate
         log(f"warning: {len(names)} streamed sounds need xma2encode.exe (Xbox 360 XDK), skipped. Use --xma-encoder.")
         stats["failed"] = len(names)
         return stats
-    for name in names:
+    for index, name in enumerate(names):
+        progress.step("Encoding streamed sounds", index, len(names))
         data = library.read(name)
         stats["input_bytes"] += len(data)
         try:
@@ -611,4 +615,5 @@ def convert_streamed_sounds(library, out_dir: str, encoder: XmaEncoder, max_rate
             f.write(out)
         stats["converted"] += 1
         stats["output_bytes"] += len(out)
+    progress.step("Encoding streamed sounds", len(names), len(names))
     return stats

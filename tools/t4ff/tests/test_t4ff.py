@@ -189,6 +189,42 @@ class DepsTests(unittest.TestCase):
                 self.assertTrue(any("usage: xma2encode" in line for line in logged))
 
 
+class ProgressTests(unittest.TestCase):
+    def test_progress_lines(self):
+        import contextlib
+        import io
+
+        from t4ff import progress
+
+        out = io.StringIO()
+        try:
+            progress.use_lines(True)
+            with contextlib.redirect_stdout(out):
+                for i in range(1001):
+                    progress.step("Converting mod.ff (file 3 of 3)", i, 1000)
+                progress.step("Writing nazi_zombie_aztec.ff")
+        finally:
+            progress.use_lines(False)
+        reports = [progress.parse(line) for line in out.getvalue().splitlines()]
+        self.assertEqual(reports[0], (0, 1000, "Converting mod.ff (file 3 of 3)"))
+        self.assertEqual(reports[-2:], [(1000, 1000, "Converting mod.ff (file 3 of 3)"), (0, 0, "Writing nazi_zombie_aztec.ff")])
+        self.assertLess(len(reports), 20)  # throttled
+        self.assertIsNone(progress.parse("warning: @progress 1 2 x"))
+
+    def test_progress_in_a_terminal(self):
+        import contextlib
+        import io
+
+        from t4ff import progress
+
+        out = io.StringIO()
+        progress.use_lines(False)
+        with contextlib.redirect_stdout(out):
+            for i in range(9):
+                progress.step("Encoding streamed sounds", i, 8)
+        self.assertEqual(out.getvalue().splitlines(), [f"  Encoding streamed sounds: {p}% ({n}/8)" for p, n in ((25, 2), (50, 4), (75, 6))])
+
+
 class UsermapTests(unittest.TestCase):
     def test_find_usermap(self):
         """The folder or any fastfile of the map finds the map, its _patch and _load, and mod.ff
@@ -220,6 +256,22 @@ class UsermapTests(unittest.TestCase):
 
 
 class GuiTests(unittest.TestCase):
+    def test_cli_runs_in_a_separate_process(self):
+        """The window runs the converter as a child process (it keeps the window responsive)."""
+        import subprocess
+
+        from t4ff import gui
+
+        command = gui.cli_command(["convert", "--help"])
+        self.assertEqual(command[1:5], ["-u", "-m", "t4ff", "--progress-lines"])
+        with tempfile.TemporaryDirectory() as tmp:
+            options = gui.process_options()
+            options["cwd"] = tmp  # found through PYTHONPATH wherever it runs
+            with subprocess.Popen(command, **options) as process:
+                output = process.stdout.read()
+            self.assertEqual(process.returncode, 0, output)
+        self.assertIn("usage: t4ff convert", output)
+
     """The window's settings and the command line it runs (no display needed)."""
 
     def test_convert_args(self):
@@ -425,7 +477,22 @@ class SampleZoneTests(unittest.TestCase):
         _, _, data = read_fastfile(sample("pc", "nazi_zombie_aztec_load.ff"))
         zone = Reader(pc(), data).load()
         options = ConvertOptions(iwd_paths=[sample("pc", "nazi_zombie_aztec.iwd")], log=lambda msg: None)
-        out = Writer(x360()).write(ZoneConverter(zone, pc(), x360(), options).convert())
+        import contextlib
+        import io
+
+        from t4ff import progress
+
+        reports = io.StringIO()
+        try:
+            progress.use_lines(True)
+            with contextlib.redirect_stdout(reports):
+                out = Writer(x360()).write(ZoneConverter(zone, pc(), x360(), options).convert())
+        finally:
+            progress.use_lines(False)
+        steps = [progress.parse(line) for line in reports.getvalue().splitlines()]
+        count = len(zone.assets_node.children)
+        self.assertIn((0, count, "Converting assets"), steps)
+        self.assertEqual(steps[-1], (count, count, "Converting assets"))
         converted = Reader(x360(), out).load()
         self.assertEqual([a.type for a in converted.assets], [a.type for a in zone.assets])
         self.assertEqual(Writer(x360()).write(converted), out)
