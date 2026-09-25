@@ -110,7 +110,8 @@ Useful options:
 | `--stream-rate HZ`, `--mono-streams` | Resample or downmix streamed sounds. |
 | `--xma-quality N` | xma2encode quality (1-100, default 60). |
 | `--no-mod`, `--no-patch` | Do not merge `mod.ff` / `<map>_patch.ff` into the map fastfile. |
-| `--load-zone` | Also write `<map>_load.ff`, the loading screen zone. Experimental: CoD Xenon's converted maps have none. |
+| `--load-zone` | Also write `<map>_load.ff`, the loading screen zone (CoD Xenon's 0.2.0 maps have one). Its technique sets stay name references to the game's own, as in CoD Xenon's: the zone is unloaded once the map runs. |
+| `--t4-layout` | Write `_codxe/t4/usermaps/<map>`, CoD Xe's newer layout. CoD Xe reads `_codxe\t4` when it exists (CoD Xenon's 0.2.0 maps use it) and then ignores `_codxe\usermaps`, so use this when the console has a `_codxe\t4` folder. |
 | `--allow-unverified` | Also convert asset types whose console layout was not verified. Expect crashes. |
 | `--max-loaded-sounds N` | Loaded (in memory) sounds the map may have, default 1500. The console holds 1600, the game's own included; a map with more stops with "Exceeded limit of 1600 'loaded_sound' assets". Identical sounds are shared, then the longest ones become streamed sounds played from the map's `sounds` folder. 0: no limit. |
 | `--jobs N` | Sounds encoded at a time and threads compressing the fastfile (default: one per processor). |

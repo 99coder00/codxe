@@ -158,7 +158,8 @@ def cmd_convert(args):
         print(f"  {role + ':':6} {files.get(role, 'not found')}")
     for iwd in iwds:
         print(f"  iwd:   {iwd}")
-    out_dir = os.path.join(args.output, "_codxe", "usermaps", name)
+    # CoD Xe reads _codxe\t4 when it exists (its newer layout, CoD Xenon's 0.2.0 maps), else _codxe
+    out_dir = os.path.join(args.output, "_codxe", *(["t4"] if args.t4_layout else []), "usermaps", name)
     os.makedirs(out_dir, exist_ok=True)
 
     encoder = XmaEncoder(args.xma_encoder, args.xma_quality)
@@ -233,8 +234,10 @@ def cmd_convert(args):
     write_zone(main_zone, os.path.join(out_dir, f"{name}.ff"), args.jobs)
 
     if "load" in files and args.load_zone:
-        # experimental: CoD Xe serves <map>_load.ff as the loading screen zone
-        zone = convert_fastfile(files["load"], options)
+        # CoD Xe serves <map>_load.ff as the loading screen zone (CoD Xenon's 0.2.0 maps have one)
+        import dataclasses
+
+        zone = convert_fastfile(files["load"], dataclasses.replace(options, reference_techsets=True))
         prune_references(x360(), zone)
         write_zone(zone, os.path.join(out_dir, os.path.basename(files["load"])), args.jobs)
     return 0
@@ -293,6 +296,7 @@ def main(argv=None):
     p.add_argument("--no-sounds", action="store_true", help="do not convert streamed sounds")
     p.add_argument("--no-mod", action="store_true", help="do not merge the usermap's mod.ff into the map fastfile")
     p.add_argument("--no-patch", action="store_true", help="do not merge the usermap's <map>_patch.ff into the map fastfile")
+    p.add_argument("--t4-layout", action="store_true", help="write _codxe/t4/usermaps/<map> (CoD Xe's newer layout: use it when the console has a _codxe/t4 folder, e.g. from CoD Xenon's 0.2.0 maps; CoD Xe then ignores _codxe/usermaps)")
     p.add_argument("--load-zone", action="store_true", help="also convert <map>_load.ff (loading screen; experimental, CoD Xenon's maps have none)")
     p.add_argument("--no-load", action="store_true", help=argparse.SUPPRESS)  # the default now
     p.add_argument("--no-compress", action="store_true", help="keep uncompressed textures uncompressed (they are DXT compressed by default)")

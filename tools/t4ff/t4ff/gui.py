@@ -50,6 +50,7 @@ class Settings:
     no_mod: bool = False
     no_patch: bool = False
     load_zone: bool = False
+    t4_layout: bool = False
     no_sounds: bool = False
 
     @classmethod
@@ -100,7 +101,7 @@ def convert_args(s: Settings) -> List[str]:
         args += ["--xma-quality", str(s.xma_quality)]
     if s.max_loaded_sounds != DEFAULT_MAX_LOADED_SOUNDS:
         args += ["--max-loaded-sounds", str(s.max_loaded_sounds)]
-    for flag in ("mono_sounds", "mono_streams", "no_mips", "no_compress", "no_mod", "no_patch", "load_zone", "no_sounds"):
+    for flag in ("mono_sounds", "mono_streams", "no_mips", "no_compress", "no_mod", "no_patch", "load_zone", "no_sounds", "t4_layout"):
         if getattr(s, flag):
             args.append("--" + flag.replace("_", "-"))
     return args
@@ -261,7 +262,7 @@ def main():
     }
     flags = {
         name: tk.BooleanVar(value=getattr(settings, name))
-        for name in ("mono_sounds", "mono_streams", "no_mips", "no_compress", "no_mod", "no_patch", "load_zone", "no_sounds")
+        for name in ("mono_sounds", "mono_streams", "no_mips", "no_compress", "no_mod", "no_patch", "load_zone", "no_sounds", "t4_layout")
     }
 
     # -- paths ----------------------------------------------------------------
@@ -381,6 +382,7 @@ def main():
             ("no_patch", "Skip _patch.ff"),
             ("no_sounds", "Skip sounds"),
             ("load_zone", "Write _load.ff (loading screen, experimental)"),
+            ("t4_layout", "CoD Xe t4 layout (_codxe\\t4\\usermaps)"),
         ]
     ):
         ttk.Checkbutton(checks, text=text, variable=flags[name]).grid(row=i // 4, column=i % 4, sticky="w", padx=6, pady=1)

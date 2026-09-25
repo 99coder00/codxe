@@ -138,7 +138,15 @@ def _map_name_string(conv, src_node: Node, rec_name: str, new_string: Node):
 
 def techset_hook(conv, asset_type, node, name):
     # PC techniques carry PC shaders: the console technique set of the same name is copied from
-    # the console library (as CoD Xenon's converter does), or referenced by name.
+    # the console library (as CoD Xenon's converter does), or referenced by name. Zones unloaded
+    # while the game runs (the loading screen zone) only reference them, as CoD Xenon's do: a copy
+    # would replace the game's own, which its menus then use after the zone is gone.
+    if conv.options.reference_techsets:
+        conv.stats.count(conv.stats.referenced, asset_type)
+        new = build_reference(conv, asset_type, node, "," + name.lstrip(","))
+        conv.node_map[id(node)] = new
+        conv.offset_maps[id(node)] = lambda off: off
+        return new
     return _reference(conv, asset_type, node, name)
 
 

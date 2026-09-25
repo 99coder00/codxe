@@ -445,6 +445,8 @@ class ConvertOptions:
     log: Callable[[str], None] = print
     # parallel jobs for sound encoding (0: one per processor)
     jobs: int = 0
+    # technique sets only referenced by name (zones unloaded while the game runs)
+    reference_techsets: bool = False
     # encoded loaded sounds (or the error encoding them), shared by the zones converted together
     sound_cache: Dict[Tuple[str, int], object] = field(default_factory=dict, repr=False, compare=False)
 
@@ -697,7 +699,8 @@ class ZoneConverter:
     def convert_asset_node(self, asset_type: str, node: Node) -> Node:
         name = asset_display_name(self.src, node)
         reduced = asset_type == "image" and self.image_drop_levels.get(name.lstrip(","), 0)
-        if name.startswith(",") and not reduced:
+        stock_techset = asset_type == "techset" and self.options.reference_techsets
+        if name.startswith(",") and not reduced and not stock_techset:
             # the PC zone expects this asset from another zone: the console library may have it
             copy = self.from_library(asset_type, name, node)
             if copy is not None:

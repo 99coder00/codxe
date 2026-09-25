@@ -560,7 +560,7 @@ class SampleZoneTests(unittest.TestCase):
         from t4ff.convert import ConvertOptions, ZoneConverter
         from t4ff.fastfile import read_fastfile
         from t4ff.platforms import pc, x360
-        from t4ff.zone import Reader, Writer
+        from t4ff.zone import BLOCK_PHYSICAL, Reader, Writer
 
         _, _, data = read_fastfile(sample("pc", "nazi_zombie_aztec_load.ff"))
         zone = Reader(pc(), data).load()
@@ -584,6 +584,16 @@ class SampleZoneTests(unittest.TestCase):
         converted = Reader(x360(), out).load()
         self.assertEqual([a.type for a in converted.assets], [a.type for a in zone.assets])
         self.assertEqual(Writer(x360()).write(converted), out)
+
+        # with console fastfiles given, the technique set stays a reference to the game's own (as in
+        # CoD Xenon's): a copy in a zone unloaded once the map runs would leave the menus without it
+        _, _, data = read_fastfile(sample("pc", "nazi_zombie_aztec_load.ff"))
+        options = ConvertOptions(console_zones=[sample("x360", "nazi_zombie_aztec.ff")], reference_techsets=True, log=lambda msg: None)
+        with contextlib.redirect_stdout(io.StringIO()):
+            load = ZoneConverter(Reader(pc(), data).load(), pc(), x360(), options).convert()
+        again = Reader(x360(), Writer(x360()).write(load)).load()
+        self.assertEqual([a.name for a in again.assets if a.type == "techset"], [",2d"])
+        self.assertEqual(again.block_sizes[BLOCK_PHYSICAL], 0)  # no shaders
 
     def test_loaded_sound(self):
         """A PC loaded sound becomes an XMA1 console loaded sound (the encoder is replaced by CoD
