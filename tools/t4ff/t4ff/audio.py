@@ -502,6 +502,53 @@ def xma2_to_xma1(data: bytes) -> bytes:
     return bytes(out)
 
 
+def xma1_repack(data: bytes) -> bytes:
+    """XMA1 packets holding the frames of ``data`` (XMA1 or XMA2 packets) back to back.
+
+    XMA2 frames do not cross the 64 KiB blocks of xma2encode, whose last packet ends in padding;
+    XMA1 streams run their frames on from packet to packet (as CoD Xenon's loaded sounds do, and as
+    XMA1 decoders read them: the top bits of an XMA1 header are a sequence number, not the frame
+    count XMA2 decoders skip the padding with). The frames keep their bits; only the last bit of
+    each, set when another frame starts in its packet, follows the new packets.
+    """
+    frames = xma_frames(data)
+    if not frames:
+        return xma2_to_xma1(data)
+    packet_bits = XMA_PACKET_SIZE * 8
+    payload_bits = (XMA_PACKET_SIZE - 4) * 8
+    source = np.unpackbits(np.frombuffer(data, dtype=np.uint8))
+    total = sum(length for _, length in frames)
+    packets = -(-total // payload_bits)
+    bits = np.ones(packets * payload_bits, dtype=np.uint8)
+    starts = []
+    pos = 0
+    for bit, length in frames:
+        # the source frame, without the packet headers it may span
+        chunks, remaining, at = [], length, bit
+        while remaining:
+            in_packet = packet_bits - at % packet_bits
+            take = min(remaining, in_packet)
+            chunks.append(source[at : at + take])
+            remaining -= take
+            at += take + 32  # the next packet's header
+        bits[pos : pos + length] = np.concatenate(chunks) if len(chunks) > 1 else chunks[0]
+        starts.append(pos)
+        pos += length
+    lengths = [length for _, length in frames]
+    for i, start in enumerate(starts):
+        last_in_packet = i + 1 == len(starts) or starts[i + 1] // payload_bits != start // payload_bits
+        bits[start + lengths[i] - 1] = 0 if last_in_packet else 1
+    out = bytearray()
+    first = {}
+    for start in starts:
+        first.setdefault(start // payload_bits, start % payload_bits)
+    for k in range(packets):
+        offset = first.get(k, 0x7FFF)
+        out += (((k & 0xF) << 28) | (0x2 << 26) | (offset << 11)).to_bytes(4, "big")
+        out += np.packbits(bits[k * payload_bits : (k + 1) * payload_bits]).tobytes()
+    return bytes(out)
+
+
 def xma_frames(data: bytes) -> List[Tuple[int, int]]:
     """(absolute bit offset, bit length) of every XMA frame in decoding order (XMA1 or XMA2).
 
@@ -580,7 +627,7 @@ def loaded_sound(stream: XmaStream, duration_ms: int) -> LoadedXma:
     ``i`` of the sound is decoded sample ``i + 384``), and ends in the subframe holding the last
     sample of the sound (decoded sample ``length + 383``) of the frame at the loop end offset.
     """
-    data = xma2_to_xma1(stream.data)
+    data = xma1_repack(stream.data)
     frames = xma_frames(data)
     if not frames:
         raise AudioError("XMA stream without frames")

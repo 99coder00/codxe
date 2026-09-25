@@ -424,11 +424,33 @@ class AudioTests(unittest.TestCase):
         self.assertEqual(audio.xma_frames(audio.xma2_to_xma1(data)), expected)
         self.assertEqual(audio.xma_frame_count(data), len(lengths))
 
+    def test_xma1_repack(self):
+        """Loaded sounds are XMA1 with the frames back to back: the padding ending every 64 KiB
+        block of xma2encode is dropped, the frames keep their bits (all but the last one, set when
+        another frame starts in its packet), every packet header gives its first frame."""
+        lengths = [3000 + 97 * i % 2000 for i in range(40)]
+        lengths[7] = 30000
+        data, _ = xma2_packets(lengths)
+        packed = audio.xma1_repack(data)
+        frames = audio.xma_frames(packed)
+        self.assertEqual([length for _, length in frames], lengths)
+        payload = (audio.XMA_PACKET_SIZE - 4) * 8
+
+        def rel(bit):
+            return (bit // (audio.XMA_PACKET_SIZE * 8)) * payload + bit % (audio.XMA_PACKET_SIZE * 8) - 32
+
+        self.assertEqual([rel(bit) for bit, _ in frames], [sum(lengths[:i]) for i in range(len(lengths))])
+        self.assertEqual(len(packed) // audio.XMA_PACKET_SIZE, -(-sum(lengths) // payload))
+        headers = [int.from_bytes(packed[o : o + 4], "big") for o in range(0, len(packed), audio.XMA_PACKET_SIZE)]
+        self.assertEqual([h >> 28 for h in headers], [k & 0xF for k in range(len(headers))])
+        self.assertTrue(all((h >> 26) & 3 == 2 and h & 0x7FF == 0 for h in headers))
+
     def test_loaded_sound_loop_region(self):
         """The loop region is laid out as in CoD Xenon's loaded sounds: from 3 subframes into the
         first frame to the subframe of decoded sample length + 383."""
         lengths = [3000 + 97 * i % 2000 for i in range(40)]
-        data, expected = xma2_packets(lengths)
+        data, _ = xma2_packets(lengths)
+        expected = audio.xma_frames(audio.xma1_repack(data))  # the frames of the loaded sound
         for valid, frame, subframe in ((40 * 512 - 384, 39, 3), (40 * 512, 39, 3), (1000, 2, 2), (20 * 512 - 380, 20, 0)):
             stream = audio.XmaStream(48000, 1, 40 * 512, data, valid)
             sound = audio.loaded_sound(stream, 1234)
@@ -438,7 +460,7 @@ class AudioTests(unittest.TestCase):
             self.assertEqual((sound.format[33], sound.format[34]), (1234, len(sound.seek_table) + 2))
         # decoded samples before every packet (frames starting in the packets before it)
         packet_starts = [bit // (audio.XMA_PACKET_SIZE * 8) for bit, _ in expected]
-        self.assertEqual(sound.seek_table, [512 * sum(p < k for p in packet_starts) for k in range(len(data) // audio.XMA_PACKET_SIZE)])
+        self.assertEqual(sound.seek_table, [512 * sum(p < k for p in packet_starts) for k in range(len(sound.data) // audio.XMA_PACKET_SIZE)])
 
     def test_ffmpeg_message_is_one_line(self):
         report = "[wmav2 @ 0x1] next_block_len_bits 4 out of range\n[dec] Error submitting packet\n\n[dec] Task finished\n"
@@ -493,6 +515,10 @@ class AudioTests(unittest.TestCase):
         self.assertEqual(sound.seek_table[-1] + 512 * sum(1 for bit, _ in frames if bit // (audio.XMA_PACKET_SIZE * 8) == len(sound.seek_table) - 1), len(frames) * 512)
         decoded = audio.decode_loaded_sound(sound)
         self.assertEqual(decoded.frames, source.frames)
+        # repacking the frames changes nothing to the audio
+        as_is = audio.decode_loaded_sound(audio.LoadedXma(stream.rate, 1, audio.xma2_to_xma1(stream.data), [], []))
+        self.assertTrue(np.array_equal(decoded.samples, as_is.samples))
+        self.assertLess(len(sound.data), len(stream.data))
         tail = slice(source.frames - 200000, source.frames - 1000)
         a = source.samples[tail, 0].astype(np.float64)
         b = decoded.samples[tail, 0].astype(np.float64)
