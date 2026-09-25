@@ -243,6 +243,28 @@ class FastfileTests(unittest.TestCase):
         self.assertLess(len(packed), len(zlib.compress(data, 9)) * 1.01)
 
 
+class ScriptTests(unittest.TestCase):
+    def test_script_references(self):
+        from t4ff.scripts import script_references
+
+        text = b"""#include maps\\_utility;
+#include common_scripts\\utility ;
+init()
+{
+    // maps\\_commented_out::nothing();
+    /* maps\\_block_comment::nothing(); */
+    level thread maps\\_zombiemode_weapons_sumpf::init();
+    self local_function();
+    thread clientscripts\\_fx::main();
+}
+"""
+        self.assertEqual(
+            script_references("maps/_zombiemode.gsc", text),
+            {"maps/_utility.gsc", "common_scripts/utility.gsc", "maps/_zombiemode_weapons_sumpf.gsc", "clientscripts/_fx.gsc"},
+        )
+        self.assertEqual(script_references("clientscripts/x.csc", b"#include clientscripts\\_utility;"), {"clientscripts/_utility.csc"})
+
+
 class UsermapTests(unittest.TestCase):
     def test_find_usermap(self):
         """The folder or any fastfile of the map finds the map, its _patch and _load, and mod.ff
@@ -722,41 +744,66 @@ class SampleZoneTests(unittest.TestCase):
             self.assertGreater(int(np.abs(pcm.samples.astype(np.int32)).max()), 1000, name)
 
     def test_convert_map(self):
-        """The whole usermap (map + mod, merged) converts to a zone the console loader reads."""
+        """The whole usermap (map + patch + mod, merged) converts to a zone the console loader reads,
+        with the scripts the PC game runs: the map's loose scripts win over its fastfiles, and scripts
+        it uses from the game's own zones are added (from the console fastfiles), as in CoD Xenon's."""
         from t4ff.convert import ConvertOptions, ZoneConverter
         from t4ff.fastfile import read_fastfile
+        from t4ff.images import IwdLibrary
         from t4ff.merge import merge_zones, prune_references
         from t4ff.platforms import pc, x360
-        from t4ff.zone import Reader, Writer
+        from t4ff.scripts import missing_scripts_zone, override_scripts
+        from t4ff.zone import Reader, Writer, asset_name
 
-        library = os.path.join(SAMPLES, "x360", "nazi_zombie_aztec.ff")
-        options = ConvertOptions(
-            iwd_paths=[sample("pc", "nazi_zombie_aztec.iwd")],
-            console_zones=[library] if os.path.exists(library) else [],
-            log=lambda msg: None,
-        )
-        def script(zone, name):
-            asset = next(a for a in zone.assets if a.type == "rawfile" and a.name == name and a.ptr is not None and a.ptr.kind == "follow")
-            return bytes(next(c for c in asset.ptr.node.children if (c.extra.get("origin") or ("", "", ""))[-1] == "buffer").data)
+        library = sample("x360", "nazi_zombie_aztec.ff")
+        iwd = sample("pc", "nazi_zombie_aztec.iwd")
+        options = ConvertOptions(iwd_paths=[iwd], console_zones=[library], log=lambda msg: None)
 
-        zones, expected = [], {}
+        def scripts(zone):
+            found = {}
+            for node in zone.extra_root.walk():
+                if (node.extra.get("origin") or ("",))[0] == "asset" and node.type.name == "RawFile":
+                    name = asset_name(zone_platform[id(zone)], node)
+                    buffer = next((c for c in node.children if (c.extra.get("origin") or ("", "", ""))[-1] == "buffer"), None)
+                    found.setdefault(name, bytes(buffer.data).rstrip(b"\0") if buffer is not None else None)
+            return found
+
+        zone_platform = {}
+        pc_zones, expected = [], {}
         for name in ("nazi_zombie_aztec.ff", "nazi_zombie_aztec_patch.ff", "mod.ff"):
             _, _, data = read_fastfile(sample("pc", name))
             zone = Reader(pc(), data).load()
-            for script_name in ("maps/_laststand.gsc", "animscripts/dog_init.gsc"):
-                if any(a.name == script_name for a in zone.assets):
-                    expected[script_name] = script(zone, script_name)  # the last zone's version
-            zones.append(ZoneConverter(zone, pc(), x360(), options).convert())
-        merged = merge_zones(x360(), zones, log=lambda msg: None)
+            zone_platform[id(zone)] = pc()
+            expected.update({k: v for k, v in scripts(zone).items() if not k.startswith(",")})  # the last zone's version
+            pc_zones.append(zone)
+        map_files = IwdLibrary([iwd])
+        self.assertEqual(override_scripts(pc(), pc_zones, map_files, log=lambda msg: None), 3)
+        for name in ("maps/_zombiemode.gsc", "maps/_zombiemode_spawner.gsc", "maps/_loadout.gsc"):
+            expected[name] = map_files.read(name).rstrip(b"\0")
+        convs = [ZoneConverter(zone, pc(), x360(), options) for zone in pc_zones]
+        merged = merge_zones(x360(), [c.convert() for c in convs], log=lambda msg: None)
+        extra = missing_scripts_zone(x360(), merged, [map_files], convs[0].console_library, log=lambda msg: None)
+        self.assertEqual([a.name for a in extra.assets], ["maps/_zombiemode_weapons_sumpf.gsc"])
+        merged = merge_zones(x360(), [merged, extra], log=lambda msg: None)
         prune_references(x360(), merged, log=lambda msg: None)
         out = Writer(x360()).write(merged)
         converted = Reader(x360(), out).load()
+        zone_platform[id(converted)] = x360()
         self.assertEqual(len(converted.assets), len(merged.assets))
         self.assertEqual(Writer(x360()).write(converted), out)
 
-        # mod.ff overrides <map>_patch.ff, which overrides the map; patch only scripts are kept
-        for script_name, data in expected.items():
-            self.assertEqual(script(converted, script_name), data, script_name)
+        ours = scripts(converted)
+        # every script is there in full (merging twice keeps them), with the version PC runs
+        self.assertEqual({n[1:] for n in ours if n.startswith(",")} - set(ours), set())
+        for name, data in expected.items():
+            self.assertEqual(ours[name], data, name)
+        _, _, data = read_fastfile(library)
+        xenon = Reader(x360(), data).load()
+        zone_platform[id(xenon)] = x360()
+        theirs = {k: v for k, v in scripts(xenon).items() if not k.startswith(",")}
+        self.assertEqual(set(theirs), {k for k in ours if not k.startswith(",")})
+        # CoD Xenon edited one script by hand (split screen fog)
+        self.assertEqual([n for n in theirs if theirs[n] != ours[n]], ["maps/createart/nazi_zombie_aztec_art.gsc"])
 
 
 if __name__ == "__main__":

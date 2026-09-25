@@ -91,6 +91,17 @@ def _content(node: Node) -> bytes:
     return b"".join(bytes(n.data) for n in node.walk())
 
 
+def _is_reference(p: Platform, node: Optional[Node]) -> bool:
+    from .zone import asset_name
+
+    if node is None or (node.extra.get("origin") or ("",))[0] != "asset":
+        return False
+    try:
+        return asset_name(p, node).startswith(",")
+    except Exception:
+        return False
+
+
 def merge_zones(p: Platform, zones: List[Zone], log=print) -> Zone:
     from . import assets as asset_hooks
 
@@ -135,6 +146,9 @@ def merge_zones(p: Platform, zones: List[Zone], log=print) -> Zone:
         for i, asset in enumerate(zone.assets):
             ptr = node.relocs.get(8 * i + 4)
             key = (asset.type, asset.name.lstrip(","))
+            if not asset.name.startswith(",") and ptr is not None and ptr.kind in ("follow", "insert") and _is_reference(p, ptr.node):
+                # a name reference (e.g. left by an earlier merge) under the plain name
+                asset = ZoneAsset(asset.type, ptr, "," + asset.name)
             duplicate = key in seen and not asset.name.startswith(",")
             if ptr is not None and ptr.kind in ("follow", "insert") and duplicate:
                 target = ptr.node
@@ -157,6 +171,7 @@ def merge_zones(p: Platform, zones: List[Zone], log=print) -> Zone:
                     ptr.node = ref
                     child_for_ptr[id(ptr)] = ref
                     duplicates += 1
+                    asset = ZoneAsset(asset.type, ptr, "," + asset.name)
             elif ptr is not None and ptr.kind in ("follow", "insert") and not asset.name.startswith(",") and key not in defined:
                 defined[key] = (zone, ptr, len(asset_children))
             seen.add(key)

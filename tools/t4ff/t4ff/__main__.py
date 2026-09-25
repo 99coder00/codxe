@@ -208,10 +208,20 @@ def cmd_convert(args):
         paths.append(files["patch"])
     if "mod" in files and not args.no_mod:
         paths.append(files["mod"])
-    zones = [run_converter(path, conv) for path, conv in zip(paths, converters(paths, options))]
+    convs = converters(paths, options)
+    # the map's own loose scripts win over those of its fastfiles, as on PC
+    from .scripts import missing_scripts_zone, override_scripts
+
+    map_files = IwdLibrary(list(dict.fromkeys([os.path.dirname(os.path.abspath(files["map"]))] + [os.path.dirname(os.path.abspath(p)) for p in iwds])))
+    override_scripts(pc(), [c.zone for c in convs], map_files)
+    zones = [run_converter(path, conv) for path, conv in zip(paths, convs)]
     if len(zones) > 1:
         progress.step("Merging into one fastfile")
     main_zone = zones[0] if len(zones) == 1 else merge_zones(x360(), zones)
+    progress.step("Checking the scripts")
+    extra = missing_scripts_zone(x360(), main_zone, [map_files, IwdLibrary(args.iwd)], convs[0].console_library)
+    if extra is not None:
+        main_zone = merge_zones(x360(), [main_zone, extra], log=lambda msg: None)
     prune_references(x360(), main_zone)
     if args.max_loaded_sounds:
         from .audio import LoadedXma

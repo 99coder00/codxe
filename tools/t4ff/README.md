@@ -156,6 +156,21 @@ conversion of the same map is there to compare with:
 If the game stops while loading, run `python -m t4ff info` on the fastfile and
 report the output together with the step that failed.
 
+### Scripts
+
+On PC, with the map's mod active, the game reads scripts from the mod's own
+files (its `.iwd` files and loose files) before its fastfiles, and scripts can
+use those of the game's own zones. The console reads scripts from fastfiles
+only. So the map's loose scripts replace those of its fastfiles (PC Aztec ships
+newer `_zombiemode.gsc`, `_zombiemode_spawner.gsc` and `_loadout.gsc` in its
+`.iwd`), and scripts the map's scripts include or call but its fastfiles lack
+are added: from the map's files, the Xbox 360 fastfiles given, or the PC game
+folder (also its `raw` folder). PC Aztec calls
+`maps\_zombiemode_weapons_sumpf` from Shi No Numa, which the console does not
+load for a usermap ("Could not find script"); it comes from CoD Xenon's Aztec
+when that is given with `--console-zone`. Scripts found nowhere are left to the
+game's own zones, and the log lists them.
+
 ### Memory
 
 The tool prints the memory each fastfile needs once loaded. CoD Xenon's own
