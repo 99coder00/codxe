@@ -301,6 +301,24 @@ class GuiTests(unittest.TestCase):
             self.assertTrue(gui.check_settings(gui.Settings()))
 
 
+class IwiTests(unittest.TestCase):
+    def test_luminance_and_alpha_formats(self):
+        """IWI format 4 is luminance (L8 on the console), 5 is alpha (A8L8 with white luminance)."""
+        import struct
+
+        def iwi(fmt):
+            pixels = bytes(range(64))  # 8x8, one byte per texel, no mip maps
+            return b"IWi\x06" + bytes([fmt, 0x02]) + struct.pack("<3H", 8, 8, 1) + bytes(16) + pixels
+
+        luminance = images.parse_iwi("gray", iwi(4))
+        self.assertEqual(luminance.format, "L8")
+        self.assertEqual(images.build_console_texture(luminance, compress=True).format.name, "L8")
+        alpha = images.parse_iwi("mask", iwi(5))
+        self.assertEqual(alpha.format, "A8")
+        texture = images.build_console_texture(alpha, compress=True)
+        self.assertEqual(texture.format.name, "A8L8")
+
+
 class XenosTests(unittest.TestCase):
     def test_tiling_roundtrip(self):
         rng = np.random.default_rng(1)
