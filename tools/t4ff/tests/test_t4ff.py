@@ -265,6 +265,53 @@ init()
         )
         self.assertEqual(script_references("clientscripts/x.csc", b"#include clientscripts\\_utility;"), {"clientscripts/_utility.csc"})
 
+    def test_named_assets(self):
+        """What the game looks up by name: the animations of the player animation script and the
+        shellshock files the scripts may name."""
+        from t4ff.library import is_game_zone
+        from t4ff.named import player_animations, shellshock_candidates
+
+        script = b"""// both pb_commented_out
+state combat
+{
+\tidle
+\t{
+\t\tplayerAnimType satchel
+\t\t{
+\t\t\tboth pb_hold_idle_satchel
+\t\t}
+\t\tDEFAULT
+\t\t{
+   \t\t\tboth PB_Hold_Idle   // the first match wins
+\t\t\ttorso pt_hold_throw_satchel
+\t\t\tboth pb_hold_idle_satchel
+\t\t}
+\t}
+}
+
+scriptevent
+{
+\tevent lvt_ride_player2
+\t{
+\t\tboth crew_lvt4_peleliu1_character4_player
+\t}
+}
+
+death
+{
+\tdefault
+\t{
+\t\tboth pb_stand_death_legs
+\t}
+}
+"""
+        self.assertEqual(player_animations(script), ["pb_hold_idle_satchel", "pb_hold_idle", "pt_hold_throw_satchel", "pb_stand_death_legs"])
+        scripts = [("maps/_zombiemode.gsc", b'init_shellshocks()\n{\n\tlevel.player_killed_shellshock = "zombie_death";\n\t// "commented"\n}\n')]
+        self.assertEqual(shellshock_candidates(scripts), ["shock/zombie_death.shock"])
+        for name, game in (("common.ff", True), ("D:/zone/code_post_gfx.ff", True), ("patch.ff", True), ("localized_common.ff", True),
+                           ("patch_ui.ff", False), ("nazi_zombie_aztec_patch.ff", False), ("nazi_zombie_aztec.ff", False)):
+            self.assertEqual(is_game_zone(name), game, name)
+
 
 class UsermapTests(unittest.TestCase):
     def test_find_usermap(self):
@@ -340,6 +387,38 @@ class GuiTests(unittest.TestCase):
             self.assertEqual(gui.Settings.load(path), s)
             self.assertEqual(gui.Settings.load(os.path.join(tmp, "missing.json")), gui.Settings())
             self.assertTrue(gui.check_settings(gui.Settings()))
+
+    def test_t4_layout_is_the_default(self):
+        """CoD Xe reads _codxe\\t4 once it exists: the window and the command line write there
+        unless told otherwise, and settings saved before that get it checked."""
+        import json
+
+        from t4ff import gui
+        from t4ff.__main__ import main
+
+        self.assertTrue(gui.Settings().t4_layout)
+        self.assertNotIn("--no-t4-layout", gui.convert_args(gui.Settings(input="in", output="out")))
+        self.assertIn("--no-t4-layout", gui.convert_args(gui.Settings(input="in", output="out", t4_layout=False)))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "gui.json")
+            with open(path, "w") as f:
+                json.dump({"input": "x", "t4_layout": False}, f)  # an older settings file
+            self.assertTrue(gui.Settings.load(path).t4_layout)
+            gui.Settings(input="x", t4_layout=False).save(path)  # unchecked since
+            self.assertFalse(gui.Settings.load(path).t4_layout)
+
+        # the command line
+        from t4ff import __main__ as cli
+
+        seen = []
+        original = cli.cmd_convert
+        cli.cmd_convert = lambda args: seen.append(args.t4_layout)
+        try:
+            for extra in ([], ["--no-t4-layout"], ["--t4-layout"]):
+                main(["--no-install", "convert", "in", "-o", "out"] + extra)
+        finally:
+            cli.cmd_convert = original
+        self.assertEqual(seen, [True, False, True])
 
 
 class IwiTests(unittest.TestCase):

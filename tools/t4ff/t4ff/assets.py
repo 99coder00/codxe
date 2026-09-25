@@ -205,8 +205,15 @@ def _console_techniques(conv, material: Node):
     ptr = material.relocs.get(off)
     src = ptr.target() if ptr is not None and ptr.kind != "null" else None
     techset = conv.node_map.get(id(src)) if src is not None else None
-    if techset is None or not techset.extra.get("library"):
+    if techset is None:
         return None
+    if not techset.extra.get("library"):
+        # a reference to a technique set of the game's zones: the library may have it
+        library = getattr(conv, "console_library", None)
+        found = library.find("MaterialTechniqueSet", asset_name_console(conv, techset)) if library is not None else None
+        if found is None:
+            return None
+        techset = found[1]
     f = find_field(conv.dst.record("MaterialTechniqueSet"), "techniques")
     present = []
     for i in range(X360_TECHNIQUE_COUNT):
@@ -242,7 +249,7 @@ def image_hook(conv, asset_type, node, name):
         reason = "cube/volume image" if map_type != 3 else "no pixel data found (add the .iwd that contains it)"
         if conv.options.reference_missing_images:
             new = _reference(conv, asset_type, node, name)
-            if not new.extra.get("library"):
+            if not new.extra.get("library") and not in_game_zones(conv, "GfxImage", name):
                 conv.warn(f"image '{name}': {reason}, emitting a reference to the console image")
             return new
         raise img.ImageError(f"image '{name}': {reason}")
@@ -284,6 +291,12 @@ def image_source(conv, node: Node, name: str) -> Optional[img.ImageData]:
             conv.warn(str(e))
     cache[name] = source
     return source
+
+
+def in_game_zones(conv, rec_name: str, name: str) -> bool:
+    """Whether the game's own zones (in the console library) load the asset."""
+    library = getattr(conv, "console_library", None)
+    return library is not None and library.in_game_zones(rec_name, name)
 
 
 def console_image(conv, name: str) -> Optional[img.ImageData]:
@@ -356,7 +369,7 @@ def plan_textures_shared(convs):
                 if plain in sources:
                     continue
                 src = image_source(conv, node, plain) if not name.startswith(",") else None
-                if src is None and options.texture_budget:
+                if src is None and options.texture_budget and not in_game_zones(conv, "GfxImage", plain):
                     src = console_image(conv, plain)
                 if src is not None and src.format in ("DXT1", "DXT3", "DXT5", "DXN", "A8R8G8B8", "R8G8B8", "A8L8", "A8", "L8"):
                     sources[plain] = src
@@ -372,7 +385,7 @@ def plan_textures_shared(convs):
                 if not origin or origin[0] != "asset" or origin[1] == "GfxImage":
                     continue
                 name = asset_display_name_pc(conv, node)
-                if not name or not name.startswith(","):
+                if not name or not name.startswith(",") or library.in_game_zones(origin[1], name):
                     continue
                 found = library.find(origin[1], name)
                 if found is None:

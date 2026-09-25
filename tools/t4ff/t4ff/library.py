@@ -32,6 +32,15 @@ class LibraryError(Exception):
     pass
 
 
+# Zones the game loads itself, before the map: what they have need not be in the map's fastfile.
+GAME_ZONES = ("code_pre_gfx", "code_post_gfx", "common", "patch")
+
+
+def is_game_zone(path: str) -> bool:
+    stem = os.path.splitext(os.path.basename(path))[0].lower()
+    return stem in GAME_ZONES or (stem.startswith("localized_") and stem[len("localized_") :] in GAME_ZONES)
+
+
 class ConsoleLibrary:
     """Assets of Xbox 360 fastfiles, looked up by type and name (loaded on first use)."""
 
@@ -41,6 +50,7 @@ class ConsoleLibrary:
         self.log = log
         self._zones: Optional[List[Zone]] = None
         self._index: Dict[Tuple[str, str], Tuple[Zone, Node]] = {}
+        self._game: Dict[Tuple[str, str], Tuple[Zone, Node]] = {}  # assets of the game's own zones among them
 
     def _load(self):
         if self._zones is not None:
@@ -64,6 +74,7 @@ class ConsoleLibrary:
                 self.log(f"warning: {f}: cannot be read ({e}), ignored")
                 continue
             self._zones.append(zone)
+            game = is_game_zone(f)
             count = 0
             for node in zone.extra_root.walk():
                 origin = node.extra.get("origin")
@@ -72,6 +83,8 @@ class ConsoleLibrary:
                 name = asset_name(self.p, node)
                 if name and not name.startswith(","):
                     count += self._index.setdefault((origin[1], name.lower()), (zone, node)) == (zone, node)
+                    if game:
+                        self._game.setdefault((origin[1], name.lower()), (zone, node))
             self.log(f"console library: {os.path.basename(f)}: {count} assets")
         progress.step("Reading Xbox 360 fastfiles", len(files), len(files))
 
@@ -80,6 +93,22 @@ class ConsoleLibrary:
             return None
         self._load()
         return self._index.get((rec_name, name.lstrip(",").lower()))
+
+    def in_game_zones(self, rec_name: str, name: str) -> bool:
+        """Whether a zone the game loads itself (e.g. ``common.ff``) among the library has the asset:
+        the map can refer to it by name instead of carrying a copy."""
+        if not self.paths:
+            return False
+        self._load()
+        return (rec_name, name.lstrip(",").lower()) in self._game
+
+    def find_in_game_zones(self, rec_name: str, name: str) -> Optional[Tuple[Zone, Node]]:
+        """The asset as the game's own zones among the library have it (maps may carry changed
+        copies of the game's raw files)."""
+        if not self.paths:
+            return None
+        self._load()
+        return self._game.get((rec_name, name.lstrip(",").lower()))
 
 
 def _ptr(kind: str, owner: Node, offset: int, node: Node = None, index: int = 0, inner: int = 0, slot: Ptr = None) -> Ptr:

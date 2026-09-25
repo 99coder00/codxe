@@ -754,6 +754,8 @@ class ZoneConverter:
         """A copy of the console asset ``name`` from the console library, if it has one."""
         if self.console_library is None or asset_type not in ASSET_RECORDS:
             return None
+        if self.console_library.in_game_zones(ASSET_RECORDS[asset_type], name):
+            return None  # the game's own zones load it: a reference does (and costs no memory)
         found = self.console_library.find(ASSET_RECORDS[asset_type], name)
         if found is None:
             return None

@@ -1,7 +1,7 @@
 # t4ff: World at War PC to Xbox 360 fastfile converter
 
 `t4ff` converts PC Call of Duty: World at War usermaps (custom zombie maps) into
-fastfiles that CoD Xe loads on the Xbox 360 (`_codxe/usermaps/<map>/`), and
+fastfiles that CoD Xe loads on the Xbox 360 (`_codxe/t4/usermaps/<map>/`), and
 keeps them small enough for the console's memory:
 
 - **Every asset type of a map is converted**: models, animations, the world
@@ -15,7 +15,11 @@ keeps them small enough for the console's memory:
   Both can be downsampled or downmixed to save memory.
 - **Technique sets (shaders)** cannot be converted from PC data. They are copied
   from Xbox 360 fastfiles you provide (`--console-zone`), together with any stock
-  image, sound or other asset the PC map expects from the game.
+  image, sound or other asset the PC map expects from the game. What the game's
+  own zones (`common.ff`, ...) already load stays a name reference when those
+  zones are among the fastfiles given.
+- **Assets the game looks up by name** that a PC map lacks (player body
+  animations, shellshock files) are added from the Xbox 360 fastfiles given.
 - **One fastfile per map**, as in CoD Xenon's converted maps: `mod.ff` (the
   console has no mod zone) and `<map>_patch.ff` are merged into `<map>.ff`.
   Scripts of later zones win (`_patch` over the map, `mod.ff` over both), and
@@ -88,8 +92,8 @@ cd tools/t4ff
 # Convert a PC usermap folder (containing <map>.ff, mod.ff, *.iwd, ...)
 python -m t4ff convert "C:/.../mods/nazi_zombie_aztec" -o out \
     --xma-encoder "C:/Program Files (x86)/Microsoft Xbox 360 SDK/bin/win32/xma2encode.exe" \
-    --console-zone "D:/360/WaW/zone/english/nazi_zombie_factory.ff" \
-    --console-zone "D:/360/WaW/zone/english/common.ff" \
+    --console-zone "D:/codxe-t4-fastfiles-v0.2.0/_codxe/t4/usermaps/nazi_zombie_aztec/nazi_zombie_aztec.ff" \
+    --console-zone "D:/codxe-t4-fastfiles-v0.2.0/_codxe/t4" \
     --iwd "C:/Program Files (x86)/Activision/Call of Duty - World at War/main" \
     --texture-budget 64 --sound-rate 32000
 
@@ -100,7 +104,7 @@ Useful options:
 
 | Option | Effect |
 | --- | --- |
-| `--console-zone PATH` | Xbox 360 fastfile (or folder of them) to copy console only assets from: technique sets, and stock images, sounds, models... the PC map expects from the game. Repeatable. |
+| `--console-zone PATH` | Xbox 360 fastfile (or folder of them) to copy console only assets from: technique sets, and stock images, sounds, models... the PC map expects from the game. Repeatable; the first one that has an asset wins. See [Console fastfiles](#console-fastfiles). |
 | `--iwd PATH` | Extra `.iwd` files or folders to look up `images/*.iwi` and sounds (e.g. the PC game's `main` folder for stock images a map embeds). |
 | `--texture-budget MIB` | Texture memory budget for the map and its mod together, including textures copied from console fastfiles. Largest textures lose their top mip level first. |
 | `--max-texture-size N` | Cap texture dimensions. |
@@ -111,7 +115,7 @@ Useful options:
 | `--xma-quality N` | xma2encode quality (1-100, default 60). |
 | `--no-mod`, `--no-patch` | Do not merge `mod.ff` / `<map>_patch.ff` into the map fastfile. |
 | `--load-zone` | Also write `<map>_load.ff`, the loading screen zone (CoD Xenon's 0.2.0 maps have one). Its technique sets stay name references to the game's own, as in CoD Xenon's: the zone is unloaded once the map runs. |
-| `--t4-layout` | Write `_codxe/t4/usermaps/<map>`, CoD Xe's newer layout. CoD Xe reads `_codxe\t4` when it exists (CoD Xenon's 0.2.0 maps use it) and then ignores `_codxe\usermaps`, so use this when the console has a `_codxe\t4` folder. |
+| `--no-t4-layout` | Write `_codxe/usermaps/<map>` instead of `_codxe/t4/usermaps/<map>`. CoD Xe reads `_codxe\t4` when it exists (its newer layout, used by CoD Xenon's 0.2.0 maps) and then ignores `_codxe\usermaps`, so this is only for a console without a `_codxe\t4` folder. |
 | `--allow-unverified` | Also convert asset types whose console layout was not verified. Expect crashes. |
 | `--max-loaded-sounds N` | Loaded (in memory) sounds the map may have, default 1500. The console holds 1600, the game's own included; a map with more stops with "Exceeded limit of 1600 'loaded_sound' assets". Identical sounds are shared, then the longest ones become streamed sounds played from the map's `sounds` folder. 0: no limit. |
 | `--jobs N` | Sounds encoded at a time and threads compressing the fastfile (default: one per processor). |
@@ -127,14 +131,13 @@ python -m t4ff roundtrip <fastfile>...    # read + rewrite, checks the result is
 
 **How CoD Xe finds the map.** CoD Xe does not keep a list of usermaps: when the
 game opens the fastfile of a zone, CoD Xe serves
-`_codxe/usermaps/<zone>/<zone>.ff` instead if it exists (and the sounds of the
+`_codxe/t4/usermaps/<zone>/<zone>.ff` instead if it exists (and the sounds of the
 active map from its `sounds` folder). So the folder and the fastfile must carry
 the map's name exactly; `t4ff` names them after the PC map fastfile.
 
 **How it appears in the menu.** The map list is part of CoD Xenon's
-`_codxe/zone/patch_ui.ff` (one button per map that runs `devmap <map>`) and
-`patch.ff` (map names and descriptions). It lists the six maps of their
-release. A map converted by `t4ff` with one of these names (e.g.
+`_codxe/t4/zone/patch_ui.ff` (one button per map that runs `devmap <map>`) and
+`patch.ff` (map names and descriptions). It lists the maps of their release. A map converted by `t4ff` with one of these names (e.g.
 `nazi_zombie_aztec`) is started from that button. Any other map is started from
 the CoD Xe console: plug a USB keyboard into the console, press the console key
 (`~`) and type `devmap <map>`.
@@ -148,7 +151,7 @@ conversion of the same map is there to compare with:
    `nazi_zombie_aztec.ff` as a console fastfile: shaders, stock textures and
    loaded sounds then come from a version known to work, and the test isolates
    what `t4ff` converts (models, animations, world, scripts, effects, weapons).
-3. Back up their `_codxe/usermaps/nazi_zombie_aztec/nazi_zombie_aztec.ff`,
+3. Back up their `_codxe/t4/usermaps/nazi_zombie_aztec/nazi_zombie_aztec.ff`,
    replace it with yours and start Aztec from the menu.
 4. Then convert again with stock Xbox 360 fastfiles of your game as console
    fastfiles (and `xma2encode.exe`) instead, which is how other maps are
@@ -171,6 +174,38 @@ folder (also its `raw` folder). PC Aztec calls
 load for a usermap ("Could not find script"); it comes from CoD Xenon's Aztec
 when that is given with `--console-zone`. Scripts found nowhere are left to the
 game's own zones, and the log lists them.
+
+### Console fastfiles
+
+The Xbox 360 fastfiles given with `--console-zone` (the window's "Xbox 360
+fastfiles" list) are where technique sets and other console only assets come
+from, so the more a map shares with them, the more of it converts. The best set
+is CoD Xenon's whole 0.2.0 package: give the map's own conversion by CoD Xenon
+first when there is one (it has what they already fixed for that map), then the
+package's `_codxe/t4` folder (all its maps and its `zone` folder). Use the
+extracted download, not the folder the game reads, which your own conversions
+go into. Reading all of it takes a few minutes and about 4.5 GiB of memory.
+
+`common.ff`, `code_post_gfx.ff` and `patch.ff` among them are recognized as the
+game's own zones, loaded before any map, which makes the conversion better:
+
+- what the map expects from the game and those zones have (technique sets,
+  stock images, sounds...) stays a name reference instead of a copy (less
+  memory, fewer asset slots used);
+- scripts they have are not copied into the map;
+- assets the game looks up by name while the map starts, which the PC map lacks
+  too, are added from the other fastfiles: the player body animations the
+  player animation script of `common.ff` lists (PC Aztec and CoD Xenon's Aztec
+  have no satchel ones, "Could not load xanim pb_hold_run_satchel", CoD
+  Xenon's `zm_tranzit` has them; the campaign vehicle rides of its
+  `scriptevent` block are left out), and the shellshock files the scripts name
+  (`shock/zombie_death.shock`: the zombie scripts play it when a player dies,
+  but most maps lack it, and the game then prints "'0' is not a valid value for
+  dvar 'bg_shock_viewKickPeriod'"; CoD Xenon's `nazi_zombie_derberg` has it).
+
+Some errors in the console log come from the PC map itself and are harmless:
+PC Aztec's zombie type names a `walther` sidearm zombies never draw, and
+`collision_geo_32x32x128` is precached but never used.
 
 ### Memory
 

@@ -50,8 +50,9 @@ class Settings:
     no_mod: bool = False
     no_patch: bool = False
     load_zone: bool = False
-    t4_layout: bool = False
+    t4_layout: bool = True
     no_sounds: bool = False
+    version: int = 2  # of the settings file: 2 made the t4 layout the default
 
     @classmethod
     def load(cls, path: str) -> "Settings":
@@ -61,6 +62,9 @@ class Settings:
         except (OSError, ValueError):
             return cls()
         known = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
+        if known.get("version", 1) < 2:
+            # saved before the t4 layout became the default (CoD Xe reads _codxe\t4 once it exists)
+            known.update(t4_layout=True, version=2)
         try:
             return cls(**known)
         except TypeError:
@@ -101,9 +105,11 @@ def convert_args(s: Settings) -> List[str]:
         args += ["--xma-quality", str(s.xma_quality)]
     if s.max_loaded_sounds != DEFAULT_MAX_LOADED_SOUNDS:
         args += ["--max-loaded-sounds", str(s.max_loaded_sounds)]
-    for flag in ("mono_sounds", "mono_streams", "no_mips", "no_compress", "no_mod", "no_patch", "load_zone", "no_sounds", "t4_layout"):
+    for flag in ("mono_sounds", "mono_streams", "no_mips", "no_compress", "no_mod", "no_patch", "load_zone", "no_sounds"):
         if getattr(s, flag):
             args.append("--" + flag.replace("_", "-"))
+    if not s.t4_layout:
+        args.append("--no-t4-layout")
     return args
 
 
@@ -122,11 +128,25 @@ def check_settings(s: Settings) -> List[str]:
     return problems
 
 
+def _has_game_zone(path: str) -> bool:
+    from .library import is_game_zone
+
+    if os.path.isdir(path):
+        return any(is_game_zone(f) for _, _, files in os.walk(path) for f in files if f.lower().endswith(".ff"))
+    return is_game_zone(path)
+
+
 def advice(s: Settings) -> List[str]:
     """Hints printed before a conversion."""
     notes = []
     if not s.console_zones:
         notes.append("No Xbox 360 fastfiles given: technique sets (shaders) and stock assets are only referenced by name.")
+    elif not any(_has_game_zone(path) for path in s.console_zones):
+        notes.append(
+            "None of the Xbox 360 fastfiles is one of the game's own zones (common.ff, code_post_gfx.ff, patch.ff): "
+            "add CoD Xenon's _codxe\\t4\\zone folder (or their whole _codxe\\t4 folder), so what the game already has "
+            "stays a reference and the player animations maps lack are added."
+        )
     if not s.xma_encoder and not s.no_sounds:
         notes.append("No xma2encode.exe given: sounds are not encoded (loaded sounds come from the 360 fastfiles, if they have them).")
     return notes
@@ -344,7 +364,7 @@ def main():
         settings.console_zones,
         [("Fastfiles", "*.ff"), ("All files", "*")],
         True,
-        "Stock zones of your 360 game, or CoD Xenon converted maps",
+        "CoD Xenon's map of the same name first, then their _codxe\\t4 folder",
     )
     iwds_box = path_list(
         1,

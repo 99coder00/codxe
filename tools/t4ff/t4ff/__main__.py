@@ -223,6 +223,12 @@ def cmd_convert(args):
     extra = missing_scripts_zone(x360(), main_zone, [map_files, IwdLibrary(args.iwd)], convs[0].console_library)
     if extra is not None:
         main_zone = merge_zones(x360(), [main_zone, extra], log=lambda msg: None)
+    # assets the game looks up by name (player body animations, shellshock files) no zone has
+    from .named import named_assets_zone
+
+    extra = named_assets_zone(x360(), main_zone, [map_files, IwdLibrary(args.iwd)], convs[0].console_library)
+    if extra is not None:
+        main_zone = merge_zones(x360(), [main_zone, extra], log=lambda msg: None)
     prune_references(x360(), main_zone)
     if args.max_loaded_sounds:
         from .audio import LoadedXma
@@ -301,7 +307,7 @@ def main(argv=None):
     p.add_argument("--no-sounds", action="store_true", help="do not convert streamed sounds")
     p.add_argument("--no-mod", action="store_true", help="do not merge the usermap's mod.ff into the map fastfile")
     p.add_argument("--no-patch", action="store_true", help="do not merge the usermap's <map>_patch.ff into the map fastfile")
-    p.add_argument("--t4-layout", action="store_true", help="write _codxe/t4/usermaps/<map> (CoD Xe's newer layout: use it when the console has a _codxe/t4 folder, e.g. from CoD Xenon's 0.2.0 maps; CoD Xe then ignores _codxe/usermaps)")
+    p.add_argument("--t4-layout", action=argparse.BooleanOptionalAction, default=True, help="write _codxe/t4/usermaps/<map>, CoD Xe's newer layout (default; CoD Xe reads _codxe/t4 when it exists, e.g. with CoD Xenon's 0.2.0 maps, and then ignores _codxe/usermaps). --no-t4-layout: _codxe/usermaps/<map>")
     p.add_argument("--load-zone", action="store_true", help="also convert <map>_load.ff (loading screen; experimental, CoD Xenon's maps have none)")
     p.add_argument("--no-load", action="store_true", help=argparse.SUPPRESS)  # the default now
     p.add_argument("--no-compress", action="store_true", help="keep uncompressed textures uncompressed (they are DXT compressed by default)")

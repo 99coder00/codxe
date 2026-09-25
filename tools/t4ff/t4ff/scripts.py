@@ -125,8 +125,9 @@ def make_rawfile(p: Platform, template: Node, name: str, text: bytes) -> Node:
     return node
 
 
-def zone_of_assets(p: Platform, assets: List[Tuple[str, str, Node]]) -> Zone:
-    """A zone loading ``assets`` ((asset type, name, header node)), to merge into another."""
+def zone_of_assets(p: Platform, assets: List[Tuple[str, str, Node]], strings: Optional[List[Optional[str]]] = None) -> Zone:
+    """A zone loading ``assets`` ((asset type, name, header node)), to merge into another.
+    ``strings``: the script strings the assets use (e.g. those of the Cloner that copied them)."""
     from .zone import BLOCK_VIRTUAL
 
     count = len(assets)
@@ -147,7 +148,7 @@ def zone_of_assets(p: Platform, assets: List[Tuple[str, str, Node]]) -> Zone:
     root = Node(uint, 4, -1)
     root.data = bytearray(16)
     root.children = [node]
-    zone = Zone(p.name, [None], zone_assets, [], 0, 0, None, node)
+    zone = Zone(p.name, list(strings) if strings else [None], zone_assets, [], 0, 0, None, node)
     zone.extra_root = root
     return zone
 
@@ -156,9 +157,7 @@ def missing_scripts_zone(p: Platform, zone: Zone, sources: List, console_library
     """A zone with the scripts ``zone``'s scripts use but no zone of the map has: from the map's own
     files (``sources[0]``, images.IwdLibrary), the console library, then other PC files
     (``sources[1:]``)."""
-    from .library import Cloner, LibraryError
-
-    defined: Dict[str, Node] = {}
+    defined: Dict[str, Optional[Node]] = {}
     texts: Dict[str, bytes] = {}
     template = None
     for name, node in _rawfiles(p, zone):
@@ -176,37 +175,21 @@ def missing_scripts_zone(p: Platform, zone: Zone, sources: List, console_library
     added: List[Tuple[str, str, Node]] = []
     origins: Dict[str, str] = {}
     unknown: Dict[str, str] = {}
-    cloner = Cloner(p, [None]) if console_library is not None else None
+    finder = RawfileFinder(p, template, sources, console_library)
     queue = list(texts.items())
     while queue:
         user, text = queue.pop()
         for ref in sorted(script_references(user, text)):
             if ref in defined or ref in unknown:
                 continue
-            node = None
-            data = sources[0].read(ref) if sources else None
-            if data is not None:
-                node = make_rawfile(p, template, ref, data.rstrip(b"\0"))
-                origins[ref] = "map's files"
-            if node is None and console_library is not None:
-                found = console_library.find("RawFile", ref)
-                if found is not None:
-                    try:
-                        node = cloner.copy_asset(*found)
-                        origins[ref] = "Xbox 360 fastfiles"
-                    except LibraryError:
-                        node = None
-            if node is None:
-                # other PC files: the game folder, the mod tools' raw folder
-                for source in sources[1:]:
-                    data = source.read(ref) or source.read("raw/" + ref)
-                    if data is not None:
-                        node = make_rawfile(p, template, ref, data.rstrip(b"\0"))
-                        origins[ref] = "PC files"
-                        break
+            if console_library is not None and console_library.in_game_zones("RawFile", ref):
+                defined[ref] = None  # the game's own zones have it
+                continue
+            node, origin = finder.find(ref)
             if node is None:
                 unknown[ref] = user
                 continue
+            origins[ref] = origin
             defined[ref] = node
             added.append(("rawfile", asset_name(p, node), node))
             queue.append((ref, rawfile_text(node)))
@@ -217,4 +200,40 @@ def missing_scripts_zone(p: Platform, zone: Zone, sources: List, console_library
             f"scripts: {len(unknown)} scripts the map uses are left to the game's own zones (e.g. {', '.join(sorted(unknown)[:6])}). "
             "Should the console stop with \"Could not find script\", add the Xbox 360 fastfile that has it."
         )
-    return zone_of_assets(p, added) if added else None
+    return zone_of_assets(p, added, finder.strings) if added else None
+
+
+class RawfileFinder:
+    """Raw files (scripts, shellshock files, ...) a map lacks, from the map's own files
+    (``sources[0]``, images.IwdLibrary), the console library, then other PC files (``sources[1:]``:
+    the game folder, the mod tools' ``raw`` folder)."""
+
+    def __init__(self, p: Platform, template: Node, sources: List, console_library=None):
+        from .library import Cloner
+
+        self.p = p
+        self.template = template  # a RawFile of the zone, the layout of new ones
+        self.sources = sources
+        self.console_library = console_library
+        self.strings: List[Optional[str]] = [None]
+        self.cloner = Cloner(p, self.strings) if console_library is not None else None
+
+    def find(self, ref: str) -> Tuple[Optional[Node], str]:
+        """(a RawFile asset ``ref``, where it was found), (None, "") when nowhere."""
+        from .library import LibraryError
+
+        data = self.sources[0].read(ref) if self.sources else None
+        if data is not None:
+            return make_rawfile(self.p, self.template, ref, data.rstrip(b"\0")), "map's files"
+        if self.console_library is not None:
+            found = self.console_library.find("RawFile", ref)
+            if found is not None:
+                try:
+                    return self.cloner.copy_asset(*found), "Xbox 360 fastfiles"
+                except LibraryError:
+                    pass
+        for source in self.sources[1:]:
+            data = source.read(ref) or source.read("raw/" + ref)
+            if data is not None:
+                return make_rawfile(self.p, self.template, ref, data.rstrip(b"\0")), "PC files"
+        return None, ""
