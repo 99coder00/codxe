@@ -225,6 +225,7 @@ class Platform:
         self.u16 = struct.Struct(endian + "H")
         self.u32 = struct.Struct(endian + "I")
         self.asset_records = {rec for rec in commands.assets}
+        self._leaf_members: Dict[Tuple[str, str], bool] = {}  # member_is_leaf, asked millions of times
         self._leaf: Dict[str, bool] = {}
         self._dynamic: Dict[str, Optional[Field]] = {}
         self._ordered: Dict[str, List[Field]] = {}
@@ -257,6 +258,13 @@ class Platform:
         return any(i.condition is NEVER for i in infos.values())
 
     def member_is_leaf(self, rec: Record, f: Field) -> bool:
+        key = (rec.name, f.name)
+        leaf = self._leaf_members.get(key)
+        if leaf is None:
+            leaf = self._leaf_members[key] = self._member_is_leaf(rec, f)
+        return leaf
+
+    def _member_is_leaf(self, rec: Record, f: Field) -> bool:
         infos = self.member_infos(rec.name, f.name)
         if any(i.condition is NEVER for i in infos.values()):
             return True

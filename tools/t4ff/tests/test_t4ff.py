@@ -225,6 +225,24 @@ class ProgressTests(unittest.TestCase):
         self.assertEqual(out.getvalue().splitlines(), [f"  Encoding streamed sounds: {p}% ({n}/8)" for p, n in ((25, 2), (50, 4), (75, 6))])
 
 
+class FastfileTests(unittest.TestCase):
+    def test_parallel_compression_is_one_zlib_stream(self):
+        import zlib
+
+        from t4ff import fastfile
+
+        rng = np.random.default_rng(3)
+        # compressible data with matches across the 1 MiB chunk boundaries
+        words = rng.integers(0, 256, 4096, dtype=np.uint8).tobytes()
+        data = b"".join(words[i : i + 64] for i in rng.integers(0, 4000, 90000))
+        packed = fastfile.compress(data, 9, jobs=4)
+        stream = zlib.decompressobj()
+        self.assertEqual(stream.decompress(packed), data)
+        self.assertTrue(stream.eof)
+        self.assertEqual(stream.unused_data, b"")
+        self.assertLess(len(packed), len(zlib.compress(data, 9)) * 1.01)
+
+
 class UsermapTests(unittest.TestCase):
     def test_find_usermap(self):
         """The folder or any fastfile of the map finds the map, its _patch and _load, and mod.ff
@@ -399,6 +417,10 @@ class AudioTests(unittest.TestCase):
         # decoded samples before every packet (frames starting in the packets before it)
         packet_starts = [bit // (audio.XMA_PACKET_SIZE * 8) for bit, _ in expected]
         self.assertEqual(sound.seek_table, [512 * sum(p < k for p in packet_starts) for k in range(len(data) // audio.XMA_PACKET_SIZE)])
+
+    def test_ffmpeg_message_is_one_line(self):
+        report = "[wmav2 @ 0x1] next_block_len_bits 4 out of range\n[dec] Error submitting packet\n\n[dec] Task finished\n"
+        self.assertEqual(audio.ffmpeg_message(report), "[wmav2 @ 0x1] next_block_len_bits 4 out of range (and 2 more messages)")
 
     def test_sdns_roundtrip(self):
         stream = audio.XmaStream(44100, 1, 1024, bytes(range(256)) * 16)
@@ -575,6 +597,80 @@ class SampleZoneTests(unittest.TestCase):
         out_zone.extra_root = root
         out = Writer(x360()).write(out_zone)
         self.assertEqual(Writer(x360()).write(Reader(x360(), out).load()), out)
+
+    def test_loaded_sounds_encoded_in_parallel(self):
+        """The loaded sounds of a zone are encoded on several threads before the conversion; the
+        conversion then takes them from the cache."""
+        import threading
+        from unittest import mock
+
+        from t4ff.assets import _loaded_sound_data, console_sound_name, encode_loaded_sounds
+        from t4ff.convert import ConvertOptions, ZoneConverter
+        from t4ff.fastfile import read_fastfile
+        from t4ff.platforms import pc, x360
+        from t4ff.zone import Reader, asset_name
+
+        with open(sample("x360", "sounds", "para_egg.xma"), "rb") as f:
+            xma = audio.loaded_sound(audio.read_sdns(f.read()), 1000)
+        threads, calls = set(), []
+
+        def fake_encode(wav, encoder, max_rate=0, mono=False):
+            threads.add(threading.get_ident())
+            calls.append(len(wav))
+            if len(calls) == 3:
+                raise audio.AudioError("broken sound")
+            return xma
+
+        class Encoder:
+            available = True
+
+        _, _, data = read_fastfile(sample("pc", "nazi_zombie_aztec.ff"))
+        zone = Reader(pc(), data).load()
+        options = ConvertOptions(xma_encoder=Encoder(), jobs=4, log=lambda msg: None)
+        conv = ZoneConverter(zone, pc(), x360(), options)
+        with mock.patch.object(audio, "encode_loaded_sound", fake_encode):
+            encode_loaded_sounds(conv)
+            sounds = [n for n in zone.extra_root.walk() if (n.extra.get("origin") or ("",))[0] == "asset" and n.type.name == "LoadedSound" and not asset_name(pc(), n).startswith(",")]
+            self.assertEqual(len(calls), len(options.sound_cache))
+            self.assertGreater(len(threads), 1)
+            self.assertEqual(sum(isinstance(v, audio.AudioError) for v in options.sound_cache.values()), 1)
+            def key(node):
+                return (console_sound_name(asset_name(pc(), node)), len(_loaded_sound_data(node).data))
+
+            encoded = next(n for n in sounds if _loaded_sound_data(n) is not None and not isinstance(options.sound_cache[key(n)], Exception))
+            before = len(calls)
+            conv.convert_asset_node("loaded_sound", encoded)
+            self.assertEqual(len(calls), before)  # taken from the cache
+            self.assertEqual(conv.stats.sound_bytes, len(xma.data))
+
+    def test_xwma_loaded_sounds_decode(self):
+        """PC loaded sounds in xWMA whose header bit rate is not the real one decode completely
+        (32 kHz ones also need 3 block sizes); FFmpeg alone rejects them."""
+        import struct
+
+        from t4ff.fastfile import read_fastfile
+        from t4ff.platforms import pc
+        from t4ff.zone import Reader, asset_name
+
+        if audio.ffmpeg_exe() is None:
+            self.skipTest("FFmpeg not available")
+        _, _, data = read_fastfile(sample("pc", "nazi_zombie_aztec.ff"))
+        zone = Reader(pc(), data).load()
+        wanted = {"sfx/weapon/mg/30cal/foley/gr_30cal.wav": 32000, "sfx/destruction/explosion_debris/water/water_00.wav": 22050, "sfx/levels/zombie/tele/beam/beam_fx.wav": 44100}
+        found = {}
+        for node in zone.extra_root.walk():
+            if (node.extra.get("origin") or ("",))[0] == "asset" and node.type.name == "LoadedSound" and asset_name(pc(), node) in wanted:
+                wav = bytes(next(c for c in node.children if (c.extra.get("origin") or ("", "", ""))[1:] == ("snd_asset", "data")).data)
+                found[asset_name(pc(), node)] = wav
+        self.assertEqual(set(found), set(wanted))
+        for name, wav in found.items():
+            self.assertTrue(audio.is_xwma(wav))
+            chunks = dict(audio.riff_chunks(wav))
+            expected = struct.unpack_from("<I", chunks[b"dpds"], len(chunks[b"dpds"]) - 4)[0] // 2
+            pcm = audio.read_wav(wav)
+            self.assertEqual(pcm.rate, wanted[name])
+            self.assertLessEqual(abs(pcm.frames - expected), audio.XWMA_LENGTH_TOLERANCE, name)
+            self.assertGreater(int(np.abs(pcm.samples.astype(np.int32)).max()), 1000, name)
 
     def test_convert_map(self):
         """The whole usermap (map + mod, merged) converts to a zone the console loader reads."""

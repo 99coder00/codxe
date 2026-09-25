@@ -7,6 +7,7 @@ import struct
 from typing import Optional
 
 from . import images as img
+from . import progress
 from .commands import find_field
 from .layout import TypeRef
 from .zone import (
@@ -18,6 +19,7 @@ from .zone import (
     BLOCK_VIRTUAL,
     Node,
     Ptr,
+    asset_name,
 )
 
 # PC technique indices -> console technique indices. The console build has no instanced lit
@@ -669,31 +671,86 @@ def stream_name_hash(path: str) -> int:
     return h
 
 
+def _loaded_sound_data(node) -> Optional[Node]:
+    data = next((c for c in node.children if (c.extra.get("origin") or ("", "", ""))[1:] == ("snd_asset", "data")), None)
+    return data if data is not None and data.data else None
+
+
+def encode_loaded_sounds(conv):
+    """Encode the loaded sounds of the zone before converting it, several at a time.
+
+    Each one is an FFmpeg decode and an xma2encode run: separate processes, so threads keep every
+    processor busy. The results wait in ``conv.options.sound_cache`` for :func:`loaded_sound_hook`.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from . import audio
+
+    encoder = conv.options.xma_encoder
+    if encoder is None or not encoder.available:
+        return
+    cache = conv.options.sound_cache
+    jobs = {}
+    for node in conv.zone.extra_root.walk():
+        origin = node.extra.get("origin")
+        if not origin or origin[0] != "asset" or node.type.name != "LoadedSound":
+            continue
+        name = asset_name(conv.src, node)
+        data = _loaded_sound_data(node)
+        if not name or name.startswith(",") or data is None:
+            continue
+        key = (console_sound_name(name), len(data.data))
+        if key not in cache and key not in jobs:
+            jobs[key] = bytes(data.data)
+    if not jobs:
+        return
+
+    def encode(item):
+        key, wav = item
+        try:
+            return key, audio.encode_loaded_sound(wav, encoder, conv.options.sound_rate, conv.options.mono_sounds)
+        except audio.AudioError as e:
+            return key, e
+
+    label = "Encoding loaded sounds"
+    converting = getattr(conv, "progress_label", None) or ""
+    if converting.startswith("Converting "):
+        label += " of " + converting[len("Converting ") :]
+    workers = conv.options.jobs or os.cpu_count() or 1
+    progress.step(label, 0, len(jobs))
+    with ThreadPoolExecutor(workers) as pool:
+        for done, (key, result) in enumerate(pool.map(encode, jobs.items()), 1):
+            cache[key] = result
+            progress.step(label, done, len(jobs))
+
+
 def loaded_sound_hook(conv, asset_type, node, name):
     from . import audio
 
     console_name = console_sound_name(name)
     if name.startswith(","):
         return _reference(conv, asset_type, node, console_name)
-    cache = conv.__dict__.setdefault("_loaded_sounds", {})
     encoder = conv.options.xma_encoder
     if encoder is None or not encoder.available:
-        if not cache.get("_warned"):
-            cache["_warned"] = True
+        if not conv.__dict__.get("_warned_no_encoder"):
+            conv._warned_no_encoder = True
             conv.warn("loaded sounds need xma2encode.exe (Xbox 360 XDK, --xma-encoder): they are emitted as references to console sounds")
         return _reference(conv, asset_type, node, console_name)
-    data = next((c for c in node.children if (c.extra.get("origin") or ("", "", ""))[1:] == ("snd_asset", "data")), None)
-    if data is None or not data.data:
+    data = _loaded_sound_data(node)
+    if data is None:
         return _reference(conv, asset_type, node, console_name)
+    cache = conv.options.sound_cache
     key = (console_name, len(data.data))
     xma = cache.get(key)
     if xma is None:
         try:
             xma = audio.encode_loaded_sound(bytes(data.data), encoder, conv.options.sound_rate, conv.options.mono_sounds)
         except audio.AudioError as e:
-            conv.warn(f"loaded sound '{name}': {e}, emitting a reference")
-            return _reference(conv, asset_type, node, console_name)
+            xma = e
         cache[key] = xma
+    if isinstance(xma, Exception):
+        conv.warn(f"loaded sound '{name}': {xma}, emitting a reference")
+        return _reference(conv, asset_type, node, console_name)
     conv.stats.sound_bytes += len(xma.data)
     return build_loaded_sound(conv, console_name, xma)
 

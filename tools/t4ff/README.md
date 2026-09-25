@@ -112,6 +112,7 @@ Useful options:
 | `--no-mod`, `--no-patch` | Do not merge `mod.ff` / `<map>_patch.ff` into the map fastfile. |
 | `--load-zone` | Also write `<map>_load.ff`, the loading screen zone. Experimental: CoD Xenon's converted maps have none. |
 | `--allow-unverified` | Also convert asset types whose console layout was not verified. Expect crashes. |
+| `--jobs N` | Sounds encoded at a time and threads compressing the fastfile (default: one per processor). |
 
 Other commands:
 
@@ -222,7 +223,13 @@ CoD Xenon's conversion of it, asset by asset:
   padding `xma2encode` puts at the end of every 64 KiB block). The loop region
   starts at the first frame, skipping 3 subframes of 128 samples, and ends at
   the bit offset of the frame holding decoded sample `length + 383`, with the
-  subframe of that sample (all of CoD Xenon's 1489 loaded sounds follow this). Streamed sounds are XMA2 in an `SDNS` container
+  subframe of that sample (all of CoD Xenon's 1489 loaded sounds follow this).
+  Many PC loaded sounds are xWMA (WMA 2 with a `dpds` chunk) under a `WAVE`
+  header without the codec options WMA needs. FFmpeg's xWMA defaults decode the
+  44.1 kHz ones; the 22.05 and 32 kHz ones carry a fake 96 kbps bit rate and
+  decode with their real one (20 kbps), at 32 kHz with 3 block sizes instead of
+  4 (codec options 0x17). The decoded length is checked against the `dpds`
+  chunk. Streamed sounds are XMA2 in an `SDNS` container
   (sample count = XMA frames × 512); their names drop the extension and carry a
   hash (`h = h * 0x1003F + c` from 5381 over `dir\name` in lower case). Sounds
   of the map are served by CoD Xe from `sounds\`.

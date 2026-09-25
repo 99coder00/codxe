@@ -443,6 +443,10 @@ class ConvertOptions:
     # Xbox 360 fastfiles (stock or converted) that console only assets are copied from
     console_zones: List[str] = field(default_factory=list)
     log: Callable[[str], None] = print
+    # parallel jobs for sound encoding (0: one per processor)
+    jobs: int = 0
+    # encoded loaded sounds (or the error encoding them), shared by the zones converted together
+    sound_cache: Dict[Tuple[str, int], object] = field(default_factory=dict, repr=False, compare=False)
 
 
 @dataclass
@@ -804,6 +808,10 @@ class ZoneConverter:
             from .assets import plan_textures
 
             plan_textures(self, root)
+
+        from .assets import encode_loaded_sounds
+
+        encode_loaded_sounds(self)
 
         for child in root.children:
             if child is assets_node:

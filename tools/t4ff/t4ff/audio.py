@@ -107,6 +107,9 @@ def read_wav(data: bytes) -> Pcm:
     tag, channels, rate, _, block_align, bits = struct.unpack_from("<HHIIHH", fmt)
     if tag == 0xFFFE and len(fmt) >= 26:
         tag = struct.unpack_from("<H", fmt, 24)[0]
+    if tag not in (1, 3) or bits not in (8, 16, 24, 32):
+        # compressed (MS ADPCM, xWMA, ...): FFmpeg, told the rate and channels to save a run
+        return decode_with_ffmpeg(data, channels, rate)
     if tag == 1 and bits == 8:
         s = (np.frombuffer(pcm, dtype=np.uint8).astype(np.int16) - 128) << 8
     elif tag == 1 and bits == 16:
@@ -146,7 +149,17 @@ def ffmpeg_exe() -> Optional[str]:
         return None
 
 
-def decode_with_ffmpeg(data: bytes, channels: Optional[int] = None) -> Pcm:
+def ffmpeg_message(stderr: str) -> str:
+    """The first line FFmpeg printed (it can print one per damaged packet)."""
+    lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+    if not lines:
+        return "unknown error"
+    first = lines[0] if len(lines[0]) <= 200 else lines[0][:200] + "..."
+    return first + (f" (and {len(lines) - 1} more messages)" if len(lines) > 1 else "")
+
+
+def _ffmpeg_decode(data: bytes, channels: Optional[int] = None, rate: Optional[int] = None) -> Tuple[Pcm, str]:
+    """Decode with FFmpeg: the samples and what FFmpeg reported (empty when all went well)."""
     exe = ffmpeg_exe()
     if exe is None:
         raise AudioError("FFmpeg is required to decode this sound (pip install imageio-ffmpeg)")
@@ -154,28 +167,91 @@ def decode_with_ffmpeg(data: bytes, channels: Optional[int] = None) -> Pcm:
         src = os.path.join(tmp, "in.bin")
         with open(src, "wb") as f:
             f.write(data)
-        probe = subprocess.run([exe, "-hide_banner", "-i", src], capture_output=True, text=True, errors="replace", **NO_WINDOW)
-        rate, chans = 44100, 1
-        for line in probe.stderr.splitlines():
-            if "Audio:" in line:
-                parts = [p.strip() for p in line.split(",")]
-                for part in parts:
-                    if part.endswith(" Hz"):
-                        rate = int(part.split()[0])
-                    elif part in ("mono",):
-                        chans = 1
-                    elif part in ("stereo",):
-                        chans = 2
-                    elif part.endswith(" channels"):
-                        chans = int(part.split()[0])
-                break
-        chans = channels or chans
-        out = subprocess.run([exe, "-hide_banner", "-loglevel", "error", "-i", src, "-f", "s16le", "-ac", str(chans), "-"], capture_output=True, **NO_WINDOW)
+        if rate is None or channels is None:
+            probe = subprocess.run([exe, "-hide_banner", "-i", src], capture_output=True, text=True, errors="replace", **NO_WINDOW)
+            probed_rate, probed_channels = 44100, 1
+            for line in probe.stderr.splitlines():
+                if "Audio:" in line:
+                    for part in (p.strip() for p in line.split(",")):
+                        if part.endswith(" Hz"):
+                            probed_rate = int(part.split()[0])
+                        elif part == "mono":
+                            probed_channels = 1
+                        elif part == "stereo":
+                            probed_channels = 2
+                        elif part.endswith(" channels"):
+                            probed_channels = int(part.split()[0])
+                    break
+            rate = rate or probed_rate
+            channels = channels or probed_channels
+        out = subprocess.run([exe, "-hide_banner", "-loglevel", "error", "-i", src, "-f", "s16le", "-ac", str(channels), "-"], capture_output=True, **NO_WINDOW)
+        report = out.stderr.decode(errors="replace")
         if out.returncode != 0:
-            raise AudioError(f"FFmpeg failed: {out.stderr.decode(errors='replace').strip()}")
+            raise AudioError("FFmpeg failed: " + ffmpeg_message(report))
     s = np.frombuffer(out.stdout, dtype="<i2")
-    frames = len(s) // chans
-    return Pcm(rate, s[: frames * chans].reshape(frames, chans).copy())
+    frames = len(s) // channels
+    return Pcm(rate, s[: frames * channels].reshape(frames, channels).copy()), report.strip()
+
+
+def decode_with_ffmpeg(data: bytes, channels: Optional[int] = None, rate: Optional[int] = None) -> Pcm:
+    """Decode any sound FFmpeg knows (``channels`` and ``rate`` skip asking FFmpeg for them)."""
+    if is_xwma(data):
+        return decode_xwma(data)
+    return _ffmpeg_decode(data, channels, rate)[0]
+
+
+# PC loaded sounds are often xWMA: WMA 2 with a 'dpds' chunk (decoded bytes after each packet)
+# under a WAVE header, without the codec options WMA decoding needs. FFmpeg supplies those of
+# Microsoft's xWMA encoder and corrects some fake bit rates of the header, which suits the 44.1 kHz
+# sounds. The others need their real bit rate (the decoder derives its frame layout from it) and, at
+# 32 kHz, 3 block sizes instead of 4 (codec options 0x17 instead of 0x1F). These are tried in turn;
+# the right one decodes without errors to the length the dpds chunk gives.
+XWMA_RETRIES = [(20000, 0x17), (20000, None), (32000, 0x17), (32000, None), (48000, 0x17)]
+XWMA_LENGTH_TOLERANCE = 2048  # FFmpeg leaves out the last frame of some sounds
+
+
+def is_xwma(data: bytes) -> bool:
+    if data[:4] != b"RIFF":
+        return False
+    try:
+        chunks = dict(riff_chunks(data))
+    except AudioError:
+        return False
+    fmt = chunks.get(b"fmt ")
+    return fmt is not None and len(fmt) >= 16 and struct.unpack_from("<H", fmt)[0] == 0x161 and b"dpds" in chunks and b"data" in chunks
+
+
+def _xwma_file(fmt: bytes, dpds: bytes, body: bytes, bitrate: Optional[int], options: Optional[int]) -> bytes:
+    tag, channels, rate, avg_bytes, align, bits = struct.unpack_from("<HHIIHH", fmt)
+    extra = struct.pack("<IH", 0, options) if options is not None else b""
+    fmt = struct.pack("<HHIIHHH", tag, channels, rate, bitrate // 8 if bitrate else avg_bytes, align, bits, len(extra)) + extra
+    out = b""
+    for cid, chunk in ((b"fmt ", fmt), (b"dpds", dpds), (b"data", body)):
+        out += cid + struct.pack("<I", len(chunk)) + chunk + (b"\0" if len(chunk) & 1 else b"")
+    return b"RIFF" + struct.pack("<I", 4 + len(out)) + b"XWMA" + out
+
+
+def decode_xwma(data: bytes) -> Pcm:
+    chunks = dict(riff_chunks(data))
+    fmt, dpds, body = chunks[b"fmt "], chunks[b"dpds"], chunks[b"data"]
+    _, channels, rate = struct.unpack_from("<HHI", fmt)
+    expected = struct.unpack_from("<I", dpds, len(dpds) - 4)[0] // (2 * channels) if len(dpds) >= 4 else 0
+    decoded = []  # (pcm, clean) of every attempt that produced samples
+    first_error = None
+    for bitrate, options in [(None, None)] + XWMA_RETRIES:
+        try:
+            pcm, report = _ffmpeg_decode(_xwma_file(fmt, dpds, body, bitrate, options), channels, rate)
+        except AudioError as e:
+            first_error = first_error or e
+            continue
+        complete = not expected or abs(pcm.frames - expected) <= XWMA_LENGTH_TOLERANCE
+        if complete and not report:
+            return pcm
+        if complete:
+            decoded.append(pcm)
+    if decoded:
+        return decoded[0]  # complete, with some damaged packets
+    raise first_error or AudioError("xWMA sound could not be decoded")
 
 
 # ---------------------------------------------------------------------------
@@ -583,12 +659,52 @@ def streamed_sound_target(rel: str) -> str:
     return "sounds/" + stem + ".xma"
 
 
-def convert_streamed_sounds(library, out_dir: str, encoder: XmaEncoder, max_rate: int = 0, mono: bool = False, log=print) -> dict:
-    """Encode every sound/ file of the .iwd library to sounds/<path>.xma (SDNS) in ``out_dir``."""
+def convert_streamed_sounds(library, out_dir: str, encoder: XmaEncoder, max_rate: int = 0, mono: bool = False, log=print, jobs: int = 0) -> dict:
+    """Encode every sound/ file of the .iwd library to sounds/<path>.xma (SDNS) in ``out_dir``,
+    ``jobs`` at a time (0: one per processor; the encoders are separate processes)."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
     names = [n for n in library.names("sound/") if n.endswith(AUDIO_EXTENSIONS)]
     stats = {"sounds": len(names), "converted": 0, "failed": 0, "input_bytes": 0, "output_bytes": 0}
     if not names:
         return stats
+    if not encoder.available:
+        log(f"warning: {len(names)} streamed sounds need xma2encode.exe (Xbox 360 XDK), skipped. Use --xma-encoder.")
+        stats["failed"] = len(names)
+        return stats
+    reading = threading.Lock()  # one reader at a time for the .iwd archives
+
+    def convert(name):
+        with reading:
+            data = library.read(name)
+        try:
+            pcm = read_wav(data) if name.endswith(".wav") else decode_with_ffmpeg(data)
+            if mono:
+                pcm = downmix_mono(pcm)
+            if max_rate and pcm.rate > max_rate:
+                pcm = resample(pcm, max_rate)
+            out = write_sdns(encoder.encode(pcm))
+        except AudioError as e:
+            return name, len(data), None, e
+        target = os.path.join(out_dir, *streamed_sound_target(name).split("/"))
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "wb") as f:
+            f.write(out)
+        return name, len(data), len(out), None
+
+    progress.step("Encoding streamed sounds", 0, len(names))
+    with ThreadPoolExecutor(jobs or os.cpu_count() or 1) as pool:
+        for done, (name, size, out_size, error) in enumerate(pool.map(convert, names), 1):
+            stats["input_bytes"] += size
+            if error is not None:
+                log(f"warning: {name}: {error}")
+                stats["failed"] += 1
+            else:
+                stats["converted"] += 1
+                stats["output_bytes"] += out_size
+            progress.step("Encoding streamed sounds", done, len(names))
+    return stats
     if not encoder.available:
         log(f"warning: {len(names)} streamed sounds need xma2encode.exe (Xbox 360 XDK), skipped. Use --xma-encoder.")
         stats["failed"] = len(names)

@@ -133,10 +133,10 @@ def convert_fastfile(path: str, options):
     return run_converter(path, converters([path], options)[0])
 
 
-def write_zone(zone, target: str):
+def write_zone(zone, target: str, jobs: int = 0):
     progress.step(f"Writing {os.path.basename(target)}")
     out = Writer(x360()).write(zone)
-    write_fastfile(target, ">", out)
+    write_fastfile(target, ">", out, jobs=jobs)
     # reading the zone back checks it with the console loading rules
     progress.step(f"Checking {os.path.basename(target)}")
     sizes = Reader(x360(), out).load().block_sizes
@@ -178,7 +178,7 @@ def cmd_convert(args):
 
     if not args.no_sounds and encoder.available:
         library = IwdLibrary(iwds)
-        stats = convert_streamed_sounds(library, out_dir, encoder, args.stream_rate, args.mono_streams)
+        stats = convert_streamed_sounds(library, out_dir, encoder, args.stream_rate, args.mono_streams, jobs=args.jobs)
         if stats["sounds"]:
             print(
                 f"streamed sounds: {stats['converted']}/{stats['sounds']} converted, "
@@ -197,6 +197,7 @@ def cmd_convert(args):
         mono_sounds=args.mono_sounds,
         sounds_dir=out_dir,
         console_zones=args.console_zone,
+        jobs=args.jobs,
     )
 
     # One fastfile, as in CoD Xenon's converted maps: the console has no mod.ff, and <map>_patch.ff is
@@ -211,13 +212,13 @@ def cmd_convert(args):
         progress.step("Merging into one fastfile")
     main_zone = zones[0] if len(zones) == 1 else merge_zones(x360(), zones)
     prune_references(x360(), main_zone)
-    write_zone(main_zone, os.path.join(out_dir, f"{name}.ff"))
+    write_zone(main_zone, os.path.join(out_dir, f"{name}.ff"), args.jobs)
 
     if "load" in files and args.load_zone:
         # experimental: CoD Xe serves <map>_load.ff as the loading screen zone
         zone = convert_fastfile(files["load"], options)
         prune_references(x360(), zone)
-        write_zone(zone, os.path.join(out_dir, os.path.basename(files["load"])))
+        write_zone(zone, os.path.join(out_dir, os.path.basename(files["load"])), args.jobs)
     return 0
 
 
@@ -279,6 +280,7 @@ def main(argv=None):
     p.add_argument("--no-compress", action="store_true", help="keep uncompressed textures uncompressed (they are DXT compressed by default)")
     p.add_argument("--no-mips", action="store_true", help="drop all mip levels (saves ~25%% memory, textures shimmer at distance)")
     p.add_argument("--allow-unverified", action="store_true", help="also convert assets whose console layout is not verified (may crash the game)")
+    p.add_argument("--jobs", type=int, default=0, help="sounds encoded / compression threads at a time (default: one per processor)")
     p.set_defaults(func=cmd_convert)
 
     p = sub.add_parser("gui", help="open the converter window")
