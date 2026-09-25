@@ -189,6 +189,36 @@ class DepsTests(unittest.TestCase):
                 self.assertTrue(any("usage: xma2encode" in line for line in logged))
 
 
+class UsermapTests(unittest.TestCase):
+    def test_find_usermap(self):
+        """The folder or any fastfile of the map finds the map, its _patch and _load, and mod.ff
+        in the same folder or in mods/<map> next to usermaps/<map>."""
+        from t4ff.__main__ import find_usermap
+
+        with tempfile.TemporaryDirectory() as tmp:
+            maps = os.path.join(tmp, "usermaps", "nazi_zombie_aztec")
+            mods = os.path.join(tmp, "mods", "nazi_zombie_aztec")
+            os.makedirs(maps)
+            os.makedirs(mods)
+            for folder, names in ((maps, ["nazi_zombie_aztec.ff", "nazi_zombie_aztec_patch.ff", "nazi_zombie_aztec_load.ff", "nazi_zombie_aztec.iwd"]), (mods, ["mod.ff", "mod.iwd"])):
+                for n in names:
+                    open(os.path.join(folder, n), "wb").close()
+            expected = {
+                "map": os.path.join(maps, "nazi_zombie_aztec.ff"),
+                "patch": os.path.join(maps, "nazi_zombie_aztec_patch.ff"),
+                "load": os.path.join(maps, "nazi_zombie_aztec_load.ff"),
+                "mod": os.path.join(mods, "mod.ff"),
+            }
+            for choice in (maps, expected["map"], expected["patch"]):
+                name, files, iwds = find_usermap(choice)
+                self.assertEqual(name, "nazi_zombie_aztec")
+                self.assertEqual(files, expected)
+                self.assertEqual(iwds, [os.path.join(maps, "nazi_zombie_aztec.iwd"), os.path.join(mods, "mod.iwd")])
+            # everything in one folder
+            os.rename(os.path.join(mods, "mod.ff"), os.path.join(maps, "mod.ff"))
+            self.assertEqual(find_usermap(os.path.join(maps, "mod.ff"))[1]["mod"], os.path.join(maps, "mod.ff"))
+
+
 class GuiTests(unittest.TestCase):
     """The window's settings and the command line it runs (no display needed)."""
 

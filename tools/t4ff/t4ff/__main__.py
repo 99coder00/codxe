@@ -49,28 +49,45 @@ def cmd_roundtrip(args):
 
 
 def find_usermap(path: str):
-    """Locate the fastfiles of a PC usermap.
+    """Locate the fastfiles of a PC usermap from its folder or one of its fastfiles.
 
     Returns (map name, {role: path}, [iwd files]) where role is 'map', 'mod', 'patch' or 'load'.
+    ``mod.ff`` is taken from the same folder, or from ``mods/<map>`` when the map is in
+    ``usermaps/<map>`` (where the game keeps them).
     """
     if not os.path.exists(path):
         raise SystemExit(f"{path}: not found")
+    name = None
+    folder = path
     if os.path.isfile(path):
         folder = os.path.dirname(os.path.abspath(path))
-        name = os.path.splitext(os.path.basename(path))[0]
-        return name, {"map": path}, sorted(os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(".iwd"))
+        stem = os.path.splitext(os.path.basename(path))[0]
+        if stem.lower() != "mod":
+            for suffix in ("_load", "_patch"):
+                if stem.lower().endswith(suffix):
+                    stem = stem[: -len(suffix)]
+            name = stem
 
-    folder = path
     ffs = {f.lower(): os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(".ff")}
-    base = [f for f in ffs if not f.endswith(("_load.ff", "_patch.ff")) and f != "mod.ff"]
-    if len(base) != 1:
-        raise SystemExit(f"{folder}: expected exactly one map fastfile, found {sorted(base)}")
-    name = os.path.splitext(os.path.basename(ffs[base[0]]))[0]
-    files = {"map": ffs[base[0]]}
+    if name is None:
+        base = [f for f in ffs if not f.endswith(("_load.ff", "_patch.ff")) and f != "mod.ff"]
+        if len(base) != 1:
+            raise SystemExit(f"{folder}: expected exactly one map fastfile, found {sorted(base)}")
+        name = os.path.splitext(os.path.basename(ffs[base[0]]))[0]
+    if f"{name.lower()}.ff" not in ffs:
+        raise SystemExit(f"{folder}: {name}.ff not found")
+    files = {"map": ffs[f"{name.lower()}.ff"]}
     for role, fname in (("mod", "mod.ff"), ("patch", f"{name.lower()}_patch.ff"), ("load", f"{name.lower()}_load.ff")):
         if fname in ffs:
             files[role] = ffs[fname]
     iwds = sorted(os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(".iwd"))
+
+    parent = os.path.dirname(os.path.abspath(folder))
+    if "mod" not in files and os.path.basename(parent).lower() == "usermaps":
+        mod_dir = os.path.join(os.path.dirname(parent), "mods", name)
+        if os.path.isfile(os.path.join(mod_dir, "mod.ff")):
+            files["mod"] = os.path.join(mod_dir, "mod.ff")
+            iwds += sorted(os.path.join(mod_dir, f) for f in os.listdir(mod_dir) if f.lower().endswith(".iwd"))
     return name, files, iwds
 
 
@@ -126,6 +143,11 @@ def cmd_convert(args):
     from .merge import merge_zones, prune_references
 
     name, files, iwds = find_usermap(args.input)
+    print(f"usermap {name}:")
+    for role in ("map", "patch", "mod", "load"):
+        print(f"  {role + ':':6} {files.get(role, 'not found')}")
+    for iwd in iwds:
+        print(f"  iwd:   {iwd}")
     out_dir = os.path.join(args.output, "_codxe", "usermaps", name)
     os.makedirs(out_dir, exist_ok=True)
 
