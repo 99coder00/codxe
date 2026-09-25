@@ -199,6 +199,7 @@ def cmd_convert(args):
         mono_sounds=args.mono_sounds,
         sounds_dir=out_dir,
         console_zones=args.console_zone,
+        map_name=name,
         jobs=args.jobs,
     )
 

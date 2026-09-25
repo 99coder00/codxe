@@ -442,6 +442,8 @@ class ConvertOptions:
     sounds_dir: Optional[str] = None
     # Xbox 360 fastfiles (stock or converted) that console only assets are copied from
     console_zones: List[str] = field(default_factory=list)
+    # the map being converted: a console fastfile of the same name among them is read first
+    map_name: str = ""
     log: Callable[[str], None] = print
     # parallel jobs for sound encoding (0: one per processor)
     jobs: int = 0
@@ -502,7 +504,7 @@ class ZoneConverter:
         if self.options.console_zones:
             from .library import Cloner, ConsoleLibrary
 
-            self.console_library = _shared_library(dst, tuple(self.options.console_zones), self.options.log)
+            self.console_library = _shared_library(dst, tuple(self.options.console_zones), self.options.log, self.options.map_name)
             self.cloner = Cloner(dst, self.script_strings, self._replace_library_asset)
         from . import assets
 
@@ -914,12 +916,12 @@ class _ArrayMap:
 _LIBRARIES: Dict[tuple, object] = {}
 
 
-def _shared_library(platform: Platform, paths: tuple, log):
+def _shared_library(platform: Platform, paths: tuple, log, first: str = ""):
     from .library import ConsoleLibrary
 
-    key = (platform.name, paths)
+    key = (platform.name, paths, first)
     if key not in _LIBRARIES:
-        _LIBRARIES[key] = ConsoleLibrary(platform, list(paths), log)
+        _LIBRARIES[key] = ConsoleLibrary(platform, list(paths), log, first)
     return _LIBRARIES[key]
 
 

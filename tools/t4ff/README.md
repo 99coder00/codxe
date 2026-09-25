@@ -92,7 +92,6 @@ cd tools/t4ff
 # Convert a PC usermap folder (containing <map>.ff, mod.ff, *.iwd, ...)
 python -m t4ff convert "C:/.../mods/nazi_zombie_aztec" -o out \
     --xma-encoder "C:/Program Files (x86)/Microsoft Xbox 360 SDK/bin/win32/xma2encode.exe" \
-    --console-zone "D:/codxe-t4-fastfiles-v0.2.0/_codxe/t4/usermaps/nazi_zombie_aztec/nazi_zombie_aztec.ff" \
     --console-zone "D:/codxe-t4-fastfiles-v0.2.0/_codxe/t4" \
     --iwd "C:/Program Files (x86)/Activision/Call of Duty - World at War/main" \
     --texture-budget 64 --sound-rate 32000
@@ -180,11 +179,13 @@ game's own zones, and the log lists them.
 The Xbox 360 fastfiles given with `--console-zone` (the window's "Xbox 360
 fastfiles" list) are where technique sets and other console only assets come
 from, so the more a map shares with them, the more of it converts. The best set
-is CoD Xenon's whole 0.2.0 package: give the map's own conversion by CoD Xenon
-first when there is one (it has what they already fixed for that map), then the
-package's `_codxe/t4` folder (all its maps and its `zone` folder). Use the
-extracted download, not the folder the game reads, which your own conversions
-go into. Reading all of it takes a few minutes and about 4.5 GiB of memory.
+is CoD Xenon's whole 0.2.0 package: add the `_codxe/t4` folder of the extracted
+download (all its maps and its `zone` folder), not the folder the game reads,
+which your own conversions go into. The fastfiles of a folder are read in name
+order and the first one that has an asset gives it, except that CoD Xenon's
+conversion of the map being converted (same name) is read first: its versions
+of what other maps also have (scripts, sounds...) win. Reading all of it takes a
+few minutes and about 4.5 GiB of memory.
 
 `common.ff`, `code_post_gfx.ff` and `patch.ff` among them are recognized as the
 game's own zones, loaded before any map, which makes the conversion better:

@@ -41,13 +41,32 @@ def is_game_zone(path: str) -> bool:
     return stem in GAME_ZONES or (stem.startswith("localized_") and stem[len("localized_") :] in GAME_ZONES)
 
 
+def library_files(paths: List[str], first: str = "") -> List[str]:
+    """The fastfiles of ``paths`` (files, or folders searched in name order), each once, in the
+    order they are read: the first that has an asset gives it. The fastfile named ``first`` (the
+    map being converted: CoD Xenon's conversion of the same map, in a folder of their maps) comes
+    first, so its own versions of assets other maps also have win."""
+    files, seen = [], set()
+    for path in paths:
+        found = sorted(os.path.join(root, f) for root, _, fs in os.walk(path) for f in fs if f.lower().endswith(".ff")) if os.path.isdir(path) else [path]
+        for f in found:
+            key = os.path.normcase(os.path.realpath(f))
+            if key not in seen:
+                seen.add(key)
+                files.append(f)
+    if first:
+        files.sort(key=lambda f: os.path.splitext(os.path.basename(f))[0].lower() != first.lower())
+    return files
+
+
 class ConsoleLibrary:
     """Assets of Xbox 360 fastfiles, looked up by type and name (loaded on first use)."""
 
-    def __init__(self, platform: Platform, paths: List[str], log=print):
+    def __init__(self, platform: Platform, paths: List[str], log=print, first: str = ""):
         self.p = platform
         self.paths = [p for p in paths if p]
         self.log = log
+        self.first = first  # the name of the map being converted (see library_files)
         self._zones: Optional[List[Zone]] = None
         self._index: Dict[Tuple[str, str], Tuple[Zone, Node]] = {}
         self._game: Dict[Tuple[str, str], Tuple[Zone, Node]] = {}  # assets of the game's own zones among them
@@ -56,12 +75,7 @@ class ConsoleLibrary:
         if self._zones is not None:
             return
         self._zones = []
-        files = []
-        for path in self.paths:
-            if os.path.isdir(path):
-                files += sorted(os.path.join(root, f) for root, _, fs in os.walk(path) for f in fs if f.lower().endswith(".ff"))
-            else:
-                files.append(path)
+        files = library_files(self.paths, self.first)
         for index, f in enumerate(files):
             progress.step("Reading Xbox 360 fastfiles", index, len(files))
             try:

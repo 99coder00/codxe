@@ -343,6 +343,29 @@ class UsermapTests(unittest.TestCase):
             self.assertEqual(find_usermap(os.path.join(maps, "mod.ff"))[1]["mod"], os.path.join(maps, "mod.ff"))
 
 
+class LibraryTests(unittest.TestCase):
+    def test_library_files(self):
+        """A folder of CoD Xenon's maps is enough: the map being converted is read first (its own
+        versions win), and a fastfile given twice is read once."""
+        from t4ff.library import library_files
+
+        with tempfile.TemporaryDirectory() as tmp:
+            t4 = os.path.join(tmp, "_codxe", "t4")
+            names = ["usermaps/mario/mario.ff", "usermaps/mario/mario_load.ff", "usermaps/nazi_zombie_aztec/nazi_zombie_aztec.ff",
+                     "usermaps/nazi_zombie_aztec/nazi_zombie_aztec_load.ff", "usermaps/nazi_zombie_aztec/readme.txt", "zone/common.ff"]
+            for n in names:
+                path = os.path.join(t4, *n.split("/"))
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                open(path, "wb").close()
+            short = lambda files: [os.path.relpath(f, t4).replace(os.sep, "/") for f in files]  # noqa: E731
+            everything = [n for n in names if n.endswith(".ff")]
+            self.assertEqual(short(library_files([t4])), everything)
+            self.assertEqual(short(library_files([t4], "NAZI_ZOMBIE_AZTEC")), [everything[2]] + everything[:2] + everything[3:])
+            aztec = os.path.join(t4, "usermaps", "nazi_zombie_aztec", "nazi_zombie_aztec.ff")
+            self.assertEqual(short(library_files([aztec, t4])), [everything[2]] + everything[:2] + everything[3:])
+            self.assertEqual(short(library_files([t4], "zm_unknown")), everything)
+
+
 class GuiTests(unittest.TestCase):
     def test_cli_runs_in_a_separate_process(self):
         """The window runs the converter as a child process (it keeps the window responsive)."""
