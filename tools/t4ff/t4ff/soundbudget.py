@@ -61,6 +61,39 @@ def _pointer(kind: str, owner: Node, offset: int, node: Optional[Node] = None) -
     return ptr
 
 
+ALIAS_TYPE_SHIFT = 13  # snd_alias_t.flags bits 13-14: the type of the alias' sound file
+ALIAS_TYPE_MASK = 3 << ALIAS_TYPE_SHIFT
+
+
+def sync_alias_types(p: Platform, zone: Zone) -> int:
+    """Set the sound type in the flags of every alias to the type of its sound file.
+
+    The engine takes the type from the flags (bits 13-14; in every alias of PC Aztec and of CoD
+    Xenon's 13 maps they equal SoundFile.type): an alias still flagged loaded whose sound file is
+    streamed has its stream file name read as a loaded sound pointer when it plays. Returns the
+    number of aliases changed.
+    """
+    rec = p.record("snd_alias_t")
+    flags_off = find_field(rec, "flags").offset
+    file_off = find_field(rec, "soundFile").offset
+    changed = 0
+    for node in zone.extra_root.walk():
+        if node.type.name != "snd_alias_t":
+            continue
+        for i in range(node.count):
+            base = i * rec.size
+            ptr = node.relocs.get(base + file_off)
+            sound_file = ptr.target() if ptr is not None and ptr.kind != "null" else None
+            if sound_file is None or not sound_file.data or sound_file.data[0] not in (1, 2, 3):
+                continue
+            flags = p.u32.unpack_from(node.data, base + flags_off)[0]
+            wanted = (flags & ~ALIAS_TYPE_MASK) | (sound_file.data[0] << ALIAS_TYPE_SHIFT)
+            if wanted != flags:
+                p.u32.pack_into(node.data, base + flags_off, wanted)
+                changed += 1
+    return changed
+
+
 def limit_loaded_sounds(p: Platform, zone: Zone, limit: int, streams: Dict[str, object], sounds_dir: str, log=print) -> dict:
     """Bring the loaded sounds of ``zone`` down to ``limit``. ``streams`` gives the XMA2 stream
     (audio.XmaStream) of each converted loaded sound by name, for the ones to stream."""
@@ -158,6 +191,8 @@ def limit_loaded_sounds(p: Platform, zone: Zone, limit: int, streams: Dict[str, 
         count -= 1
         stats["streamed"] += 1
         stats["stream_bytes"] += len(data)
+    # the aliases carry the type of their sound file too
+    sync_alias_types(p, zone)
     stats["count"] = count
     log(
         f"loaded sounds: {stats['streamed']} of the longest are streamed from the map's sounds folder "

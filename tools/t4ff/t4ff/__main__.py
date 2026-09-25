@@ -231,6 +231,11 @@ def cmd_convert(args):
         progress.step("Checking the loaded sound limit")
         streams = {key[0].lower(): xma.stream for key, xma in options.sound_cache.items() if isinstance(xma, LoadedXma) and xma.stream is not None}
         limit_loaded_sounds(x360(), main_zone, args.max_loaded_sounds, streams, out_dir)
+    from .soundbudget import sync_alias_types
+
+    fixed = sync_alias_types(x360(), main_zone)
+    if fixed:
+        print(f"sound aliases: the type in the flags of {fixed} aliases set to their sound file's")
     write_zone(main_zone, os.path.join(out_dir, f"{name}.ff"), args.jobs)
 
     if "load" in files and args.load_zone:
