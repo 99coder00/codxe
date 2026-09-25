@@ -569,6 +569,7 @@ class LoadedXma:
     data: bytes  # XMA1 packets
     seek_table: List[int]
     format: List[int]  # the 36 dwords of the console snd_asset format block
+    stream: Optional[XmaStream] = None  # the xma2encode stream, should the sound be streamed instead
 
 
 def loaded_sound(stream: XmaStream, duration_ms: int) -> LoadedXma:
@@ -600,7 +601,7 @@ def loaded_sound(stream: XmaStream, duration_ms: int) -> LoadedXma:
     fmt[33] = duration_ms
     fmt[34] = len(seek) + 2  # size of the seek table in dwords
     fmt[35] = 0xFFFFFFFF
-    return LoadedXma(stream.rate, stream.channels, data, seek, fmt)
+    return LoadedXma(stream.rate, stream.channels, data, seek, fmt, stream)
 
 
 def xma1_wav(sound: LoadedXma) -> bytes:

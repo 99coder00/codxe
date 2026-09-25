@@ -295,10 +295,19 @@ def _is_reference(p: Platform, node: Node) -> bool:
 _NORMAL_BLOCKS = (4, 5, 6)  # virtual, large, physical: blocks whose pointer slots can be aliased
 
 
-def dedupe_nested_assets(p: Platform, zone: Zone, log=print) -> int:
+def dedupe_nested_assets(p: Platform, zone: Zone, log=print, key_of=None, what: str = "nested assets loaded by an earlier asset") -> int:
     """Load every named asset once: later nested copies (e.g. the images of mod materials that the
-    map already has) point to the first one instead."""
+    map already has) point to the first one instead.
+
+    ``key_of(record, name, node)`` says which assets are the same (default: same type and name);
+    None leaves an asset alone.
+    """
     from .zone import asset_name
+
+    if key_of is None:
+
+        def key_of(record, name, node):
+            return (record, name.lower())
 
     incoming: Dict[int, List[int]] = {}
     alias_by_slot: Dict[int, List[Ptr]] = {}
@@ -323,8 +332,8 @@ def dedupe_nested_assets(p: Platform, zone: Zone, log=print) -> int:
                 name = asset_name(p, node)
             except Exception:
                 name = ""
-            if name and not name.startswith(","):
-                key = (origin[1], name.lower())
+            key = key_of(origin[1], name, node) if name and not name.startswith(",") else None
+            if key is not None:
                 kept = first.get(key)
                 if kept is None:
                     if ptr.kind == "insert" or (parent is not None and parent.block in _NORMAL_BLOCKS):
@@ -344,5 +353,5 @@ def dedupe_nested_assets(p: Platform, zone: Zone, log=print) -> int:
         for child in reversed(node.children):
             stack.append((child, loaders.get(id(child)), node))
     if removed:
-        log(f"merge: {removed} nested assets loaded by an earlier asset are shared")
+        log(f"merge: {removed} {what} are shared")
     return removed

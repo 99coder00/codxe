@@ -18,6 +18,7 @@ import zipfile
 
 from . import progress
 from .fastfile import read_fastfile, write_fastfile
+from .soundbudget import DEFAULT_MAX_LOADED_SOUNDS
 from .platforms import for_endian, pc, x360
 from .zone import BLOCK_NAMES, Reader, Writer
 
@@ -212,6 +213,13 @@ def cmd_convert(args):
         progress.step("Merging into one fastfile")
     main_zone = zones[0] if len(zones) == 1 else merge_zones(x360(), zones)
     prune_references(x360(), main_zone)
+    if args.max_loaded_sounds:
+        from .audio import LoadedXma
+        from .soundbudget import limit_loaded_sounds
+
+        progress.step("Checking the loaded sound limit")
+        streams = {key[0].lower(): xma.stream for key, xma in options.sound_cache.items() if isinstance(xma, LoadedXma) and xma.stream is not None}
+        limit_loaded_sounds(x360(), main_zone, args.max_loaded_sounds, streams, out_dir)
     write_zone(main_zone, os.path.join(out_dir, f"{name}.ff"), args.jobs)
 
     if "load" in files and args.load_zone:
@@ -280,6 +288,7 @@ def main(argv=None):
     p.add_argument("--no-compress", action="store_true", help="keep uncompressed textures uncompressed (they are DXT compressed by default)")
     p.add_argument("--no-mips", action="store_true", help="drop all mip levels (saves ~25%% memory, textures shimmer at distance)")
     p.add_argument("--allow-unverified", action="store_true", help="also convert assets whose console layout is not verified (may crash the game)")
+    p.add_argument("--max-loaded-sounds", type=int, default=DEFAULT_MAX_LOADED_SOUNDS, help=f"loaded sounds the map may have: identical ones are shared, then the longest are streamed (default {DEFAULT_MAX_LOADED_SOUNDS}; the console holds 1600 with the game's own; 0: no limit)")
     p.add_argument("--jobs", type=int, default=0, help="sounds encoded / compression threads at a time (default: one per processor)")
     p.set_defaults(func=cmd_convert)
 

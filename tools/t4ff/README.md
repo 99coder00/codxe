@@ -112,6 +112,7 @@ Useful options:
 | `--no-mod`, `--no-patch` | Do not merge `mod.ff` / `<map>_patch.ff` into the map fastfile. |
 | `--load-zone` | Also write `<map>_load.ff`, the loading screen zone. Experimental: CoD Xenon's converted maps have none. |
 | `--allow-unverified` | Also convert asset types whose console layout was not verified. Expect crashes. |
+| `--max-loaded-sounds N` | Loaded (in memory) sounds the map may have, default 1500. The console holds 1600, the game's own included; a map with more stops with "Exceeded limit of 1600 'loaded_sound' assets". Identical sounds are shared, then the longest ones become streamed sounds played from the map's `sounds` folder. 0: no limit. |
 | `--jobs N` | Sounds encoded at a time and threads compressing the fastfile (default: one per processor). |
 
 Other commands:
@@ -162,6 +163,14 @@ conversion of `nazi_zombie_aztec` needs about 157 MiB (64 MiB of textures, 35 Mi
 of in-memory sounds). Textures and loaded sounds are the parts you can shrink:
 `--texture-budget`, `--max-texture-size`, `--sound-rate 32000` and
 `--mono-sounds` trade quality for memory.
+
+Besides memory, the console has a fixed number of slots per asset type, the
+game's own assets included. Loaded sounds are the tight one: 1600 slots, which
+the PC Aztec (1576 loaded sounds) overflows once the game's own are loaded.
+`--max-loaded-sounds` (default 1500, under the 1532 of CoD Xenon's Aztec, which
+loads) shares identical sounds and streams the longest ones from the map's
+`sounds` folder to stay within it. CoD Xe enlarges the menu and effect pools;
+the other types of a converted map stay close to CoD Xenon's counts.
 
 ## How it works
 

@@ -23,6 +23,7 @@ from dataclasses import asdict, dataclass, field
 from typing import List
 
 from .progress import parse as parse_progress
+from .soundbudget import DEFAULT_MAX_LOADED_SOUNDS
 
 SOUND_RATES = ("keep", "48000", "44100", "32000", "24000")
 STREAM_RATES = ("keep", "44100", "32000", "24000", "22050")
@@ -41,6 +42,7 @@ class Settings:
     sound_rate: int = 0
     stream_rate: int = 0
     xma_quality: int = 60
+    max_loaded_sounds: int = DEFAULT_MAX_LOADED_SOUNDS
     mono_sounds: bool = False
     mono_streams: bool = False
     no_mips: bool = False
@@ -96,6 +98,8 @@ def convert_args(s: Settings) -> List[str]:
         args += ["--stream-rate", str(s.stream_rate)]
     if s.xma_quality != 60:
         args += ["--xma-quality", str(s.xma_quality)]
+    if s.max_loaded_sounds != DEFAULT_MAX_LOADED_SOUNDS:
+        args += ["--max-loaded-sounds", str(s.max_loaded_sounds)]
     for flag in ("mono_sounds", "mono_streams", "no_mips", "no_compress", "no_mod", "no_patch", "load_zone", "no_sounds"):
         if getattr(s, flag):
             args.append("--" + flag.replace("_", "-"))
@@ -253,6 +257,7 @@ def main():
         "sound_rate": tk.StringVar(value=str(settings.sound_rate or SOUND_RATES[0])),
         "stream_rate": tk.StringVar(value=str(settings.stream_rate or STREAM_RATES[0])),
         "xma_quality": tk.StringVar(value=str(settings.xma_quality)),
+        "max_loaded_sounds": tk.StringVar(value=str(settings.max_loaded_sounds)),
     }
     flags = {
         name: tk.BooleanVar(value=getattr(settings, name))
@@ -362,6 +367,7 @@ def main():
     option(1, 0, "Loaded sound rate (Hz)", ttk.Combobox(options, values=SOUND_RATES, width=10, state="readonly", textvariable=var["sound_rate"]))
     option(1, 2, "Streamed sound rate (Hz)", ttk.Combobox(options, values=STREAM_RATES, width=10, state="readonly", textvariable=var["stream_rate"]))
     option(2, 0, "XMA quality (1-100)", ttk.Spinbox(options, from_=1, to=100, width=8, textvariable=var["xma_quality"]))
+    option(2, 2, "Max loaded sounds (0 = no limit)", ttk.Spinbox(options, from_=0, to=5000, increment=50, width=8, textvariable=var["max_loaded_sounds"]))
 
     checks = ttk.Frame(options)
     checks.grid(row=3, column=0, columnspan=4, sticky="w", **pad)
@@ -434,6 +440,7 @@ def main():
             sound_rate=number("sound_rate", int, 0),
             stream_rate=number("stream_rate", int, 0),
             xma_quality=max(1, min(100, number("xma_quality", int, 60))),
+            max_loaded_sounds=max(0, number("max_loaded_sounds", int, DEFAULT_MAX_LOADED_SOUNDS)),
             **{name: flag.get() for name, flag in flags.items()},
         )
 

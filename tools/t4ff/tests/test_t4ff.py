@@ -643,6 +643,55 @@ class SampleZoneTests(unittest.TestCase):
             self.assertEqual(len(calls), before)  # taken from the cache
             self.assertEqual(conv.stats.sound_bytes, len(xma.data))
 
+    def test_loaded_sound_limit(self):
+        """Identical loaded sounds are shared, then the longest become streamed sounds (files in
+        the map's sounds folder) until the zone is within the limit; the zone still loads."""
+        import struct
+        import zlib
+        from unittest import mock
+
+        from t4ff.convert import ConvertOptions, ZoneConverter
+        from t4ff.fastfile import read_fastfile
+        from t4ff.platforms import pc, x360
+        from t4ff.soundbudget import limit_loaded_sounds
+        from t4ff.zone import Reader, Writer
+
+        with open(sample("x360", "sounds", "para_egg.xma"), "rb") as f:
+            packets = audio.read_sdns(f.read()).data[: 2 * audio.XMA_PACKET_SIZE]
+
+        def fake_encode(wav, encoder, max_rate=0, mono=False):
+            # the same sound for the same PC data, a length growing with it
+            stream = audio.XmaStream(48000, 1, 1024, packets, 1 + len(wav) % 1000)
+            return audio.loaded_sound(stream, zlib.crc32(wav))
+
+        class Encoder:
+            available = True
+
+        _, _, data = read_fastfile(sample("pc", "nazi_zombie_aztec.ff"))
+        options = ConvertOptions(xma_encoder=Encoder(), log=lambda msg: None)
+        with mock.patch.object(audio, "encode_loaded_sound", fake_encode):
+            zone = ZoneConverter(Reader(pc(), data).load(), pc(), x360(), options).convert()
+        streams = {key[0].lower(): xma.stream for key, xma in options.sound_cache.items()}
+        with tempfile.TemporaryDirectory() as tmp:
+            stats = limit_loaded_sounds(x360(), zone, 1500, streams, tmp, log=lambda msg: None)
+            self.assertEqual((stats["shared"], stats["count"]), (18, 1500))
+            out = Writer(x360()).write(zone)
+            again = Reader(x360(), out).load()
+            self.assertEqual(Writer(x360()).write(again), out)
+            loaded = [n for n in again.extra_root.walk() if (n.extra.get("origin") or ("",))[0] == "asset" and n.type.name == "LoadedSound"]
+            self.assertEqual(len(loaded), 1500)
+            custom = [n for n in again.extra_root.walk() if n.type.name == "SoundFile" and n.data[0] == 2 and struct.unpack_from(">I", n.data, 4)[0] == 0]
+            self.assertGreaterEqual(len(custom), stats["streamed"])
+            files = set()
+            for n in custom:
+                directory, name = (bytes(c.data).rstrip(b"\0").decode() for c in n.children)
+                self.assertTrue(directory.startswith("sounds\\"))
+                files.add(os.path.join(tmp, *directory.split("\\"), name + ".xma"))
+            self.assertEqual(len(files), stats["streamed"])
+            self.assertTrue(all(os.path.exists(f) for f in files))
+            with open(next(iter(files)), "rb") as f:
+                self.assertEqual(audio.read_sdns(f.read()).data, packets)
+
     def test_xwma_loaded_sounds_decode(self):
         """PC loaded sounds in xWMA whose header bit rate is not the real one decode completely
         (32 kHz ones also need 3 block sizes); FFmpeg alone rejects them."""
