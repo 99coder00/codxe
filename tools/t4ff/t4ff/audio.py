@@ -37,6 +37,8 @@ SDNS_MAGIC = b"SDNS"
 SDNS_HEADER_SIZE = 0x1000
 XMA_PACKET_SIZE = 2048
 XMA_FRAME_SAMPLES = 512
+XMA_SUBFRAME_SAMPLES = 128
+WAVE_FORMAT_XMA1 = 0x165
 WAVE_FORMAT_XMA2 = 0x166
 
 
@@ -295,10 +297,27 @@ class XmaEncoder:
             # tools/t4ff/bin (python -m t4ff setup), the Xbox developer kits, Downloads, ...
             self.path = find_xma2encode()
         self.quality = quality
+        self._variant: Optional[int] = None  # the command line form that worked
 
     @property
     def available(self) -> bool:
         return self.path is not None and os.path.exists(self.path)
+
+    def _run(self, args: List[str], timeout: Optional[float] = None) -> subprocess.CompletedProcess:
+        cmd = [self.path] + args
+        if os.name != "nt" and self.path.lower().endswith(".exe"):
+            from .deps import wine_advice, wine_path
+
+            wine = wine_path()
+            if wine is None:
+                raise AudioError("xma2encode.exe needs wine on this platform: " + wine_advice())
+            cmd = [wine] + cmd
+        try:
+            return subprocess.run(cmd, capture_output=True, text=True, errors="replace", stdin=subprocess.DEVNULL, timeout=timeout)
+        except OSError as e:
+            raise AudioError(f"cannot run {self.path}: {e}") from e
+        except subprocess.TimeoutExpired as e:
+            raise AudioError(f"{self.path} did not finish in {timeout:.0f} s") from e
 
     def encode(self, pcm: Pcm) -> XmaStream:
         if not self.available:
@@ -310,24 +329,38 @@ class XmaEncoder:
             dst = os.path.join(tmp, "out.xma")
             with open(src, "wb") as f:
                 f.write(write_wav(pcm))
-            cmd = [self.path, src, "/TargetFile", dst, "/Quality", str(self.quality)]
-            if os.name != "nt" and self.path.lower().endswith(".exe"):
-                from .deps import wine_advice, wine_path
-
-                wine = wine_path()
-                if wine is None:
-                    raise AudioError("xma2encode.exe needs wine on this platform: " + wine_advice())
-                cmd = [wine] + cmd
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            if result.returncode != 0 or not os.path.exists(dst):
-                raise AudioError(f"xma2encode failed: {result.stdout.strip()} {result.stderr.strip()}")
+            # the documented options first, then without the quality option in case this build
+            # of the encoder does not know it
+            variants = [[src, "/TargetFile", dst, "/Quality", str(self.quality)], [src, "/TargetFile", dst]]
+            if self._variant is not None:
+                variants = [variants[self._variant]]
+            failures = []
+            for index, args in enumerate(variants):
+                result = self._run(args, timeout=1800)
+                if result.returncode == 0 and os.path.exists(dst):
+                    self._variant = self._variant if self._variant is not None else index
+                    break
+                failures.append(" ".join(os.path.basename(a) if a in (src, dst) else a for a in args) + ": " + (result.stdout + result.stderr).strip()[-600:])
+            else:
+                raise AudioError("xma2encode failed:\n  " + "\n  ".join(failures))
             with open(dst, "rb") as f:
                 stream = read_xma2_wav(f.read())
         # The SDNS sample count is the number of XMA frames in the packets times 512.
-        if not stream.valid_samples:
-            stream.valid_samples = stream.samples
+        stream.valid_samples = pcm.frames
         stream.samples = xma_frame_count(stream.data) * XMA_FRAME_SAMPLES
         return stream
+
+    def usage(self) -> str:
+        """What the encoder prints about its options (empty if it prints nothing)."""
+        for args in (["/?"], []):
+            try:
+                result = self._run(args, timeout=30)
+            except AudioError:
+                continue
+            text = (result.stdout + result.stderr).strip()
+            if text:
+                return text
+        return ""
 
 
 def xma_frame_count(data: bytes) -> int:
@@ -370,7 +403,7 @@ def correlation(a: Pcm, b: Pcm) -> float:
 # Sample rates the XMA1 hardware decoder supports.
 XMA1_RATES = (24000, 32000, 44100, 48000)
 XAUDIO_SAMPLE_TYPE_XMA = 3
-LOOP_SUBFRAME_SKIP = 3  # as in every loaded sound of CoD Xenon's converted maps
+LOOP_SUBFRAME_SKIP = 3  # decoded subframes before the sound, as in every loaded sound of CoD Xenon's maps
 
 
 def xma1_rate(rate: int) -> int:
@@ -391,7 +424,14 @@ def xma2_to_xma1(data: bytes) -> bytes:
 
 
 def xma_frames(data: bytes) -> List[Tuple[int, int]]:
-    """(absolute bit offset, bit length) of every XMA frame (XMA1 or XMA2 packets)."""
+    """(absolute bit offset, bit length) of every XMA frame in decoding order (XMA1 or XMA2).
+
+    A frame can continue in the next packet. Its last bit is 0 when no other frame starts in
+    its packet: decoding then goes on at the first frame of the next packet that has one (the
+    frame offset of the packet header), and the rest of the packet is padding. xma2encode pads
+    the last packet of every 64 KiB block that way, CoD Xenon's XMA1 sounds mark the last frame
+    starting in every packet the same way.
+    """
     packets = len(data) // XMA_PACKET_SIZE
     if not packets:
         return []
@@ -399,18 +439,34 @@ def xma_frames(data: bytes) -> List[Tuple[int, int]]:
     payload = b"".join(data[i * XMA_PACKET_SIZE + 4 : (i + 1) * XMA_PACKET_SIZE] for i in range(packets))
     value = int.from_bytes(payload, "big")
     total = len(payload) * 8
+    offsets = [(struct.unpack_from(">I", data, i * XMA_PACKET_SIZE)[0] >> 11) & 0x7FFF for i in range(packets)]
 
-    def absolute(pos):
-        return (pos // payload_bits) * XMA_PACKET_SIZE * 8 + 32 + pos % payload_bits
+    def bits(pos, count):
+        return (value >> (total - pos - count)) & ((1 << count) - 1)
+
+    def first_frame(packet):
+        """Payload bit position of the first frame starting in ``packet`` or a later one."""
+        for k in range(packet, packets):
+            if offsets[k] < payload_bits:
+                return k * payload_bits + offsets[k]
+        return None
 
     frames = []
-    pos = (struct.unpack_from(">I", data, 0)[0] >> 11) & 0x7FFF
-    while pos + 15 <= total:
-        length = (value >> (total - pos - 15)) & 0x7FFF
-        if length == 0x7FFF or length < 15 or pos + length > total:
-            break
-        frames.append((absolute(pos), length))
-        pos += length
+    pos = first_frame(0)
+    while pos is not None and pos + 15 <= total:
+        length = bits(pos, 15)
+        end = pos + length
+        if length == 0x7FFF or length <= 15 or end > total:
+            # padding, or a damaged packet: go on with the next one
+            pos = first_frame(pos // payload_bits + 1)
+            continue
+        frames.append(((pos // payload_bits) * XMA_PACKET_SIZE * 8 + 32 + pos % payload_bits, length))
+        if bits(end - 1, 1):
+            pos = end
+        else:
+            pos = first_frame(pos // payload_bits + 1)
+            if pos is not None and pos < end:
+                break
     return frames
 
 
@@ -437,19 +493,25 @@ class LoadedXma:
 
 
 def loaded_sound(stream: XmaStream, duration_ms: int) -> LoadedXma:
-    """Console loaded sound data from an xma2encode stream."""
+    """Console loaded sound data from an xma2encode stream.
+
+    ``stream.valid_samples`` is the length of the sound. The loop region is given as in CoD
+    Xenon's loaded sounds: it starts at the first frame, skipping its first 3 subframes (sample
+    ``i`` of the sound is decoded sample ``i + 384``), and ends in the subframe holding the last
+    sample of the sound (decoded sample ``length + 383``) of the frame at the loop end offset.
+    """
     data = xma2_to_xma1(stream.data)
     frames = xma_frames(data)
     if not frames:
         raise AudioError("XMA stream without frames")
     seek = xma_seek_table(data, frames)
-    valid = max(1, min(stream.valid_samples or stream.samples, len(frames) * XMA_FRAME_SAMPLES))
-    last = (valid - 1) // XMA_FRAME_SAMPLES
-    subframe_end = ((valid - 1) % XMA_FRAME_SAMPLES) // 128
-    loop_end = frames[last][0] + frames[last][1]
+    valid = max(1, stream.valid_samples or stream.samples)
+    last_sample = min(valid + LOOP_SUBFRAME_SKIP * XMA_SUBFRAME_SAMPLES, len(frames) * XMA_FRAME_SAMPLES) - 1
+    last = last_sample // XMA_FRAME_SAMPLES
+    subframe_end = (last_sample % XMA_FRAME_SAMPLES) // XMA_SUBFRAME_SAMPLES
     fmt = [0] * 36
-    fmt[0] = frames[0][0]  # loop start (bits)
-    fmt[1] = loop_end  # loop end (bits)
+    fmt[0] = frames[0][0]  # loop start: bit offset of the first frame
+    fmt[1] = frames[last][0]  # loop end: bit offset of the frame holding the last sample
     fmt[2] = (subframe_end << 24) | (LOOP_SUBFRAME_SKIP << 16)
     # XAUDIOSOURCEFORMAT: sample type, stream count, then per stream sample rate and channel count
     fmt[19] = XAUDIO_SAMPLE_TYPE_XMA << 24
@@ -460,6 +522,34 @@ def loaded_sound(stream: XmaStream, duration_ms: int) -> LoadedXma:
     fmt[34] = len(seek) + 2  # size of the seek table in dwords
     fmt[35] = 0xFFFFFFFF
     return LoadedXma(stream.rate, stream.channels, data, seek, fmt)
+
+
+def xma1_wav(sound: LoadedXma) -> bytes:
+    """RIFF XMA1 file of a loaded sound, e.g. for decoding with FFmpeg."""
+    mask = 0x4 if sound.channels == 1 else 0x3
+    fmt = struct.pack(
+        "<HHHHHBBIIIIBBH",
+        WAVE_FORMAT_XMA1,
+        16,  # bits per sample
+        0x10D6,  # encode options
+        0,
+        1,  # stream count
+        0,
+        3,  # version
+        sound.rate * sound.channels * 2,
+        sound.rate,
+        0,  # loop start
+        0,  # loop end
+        0,  # subframe data
+        sound.channels,
+        mask,
+    )
+    body = b"fmt " + struct.pack("<I", len(fmt)) + fmt + b"data" + struct.pack("<I", len(sound.data)) + sound.data
+    return b"RIFF" + struct.pack("<I", 4 + len(body)) + b"WAVE" + body
+
+
+def decode_loaded_sound(sound: LoadedXma) -> Pcm:
+    return decode_with_ffmpeg(xma1_wav(sound), channels=sound.channels)
 
 
 def encode_loaded_sound(wav: bytes, encoder: "XmaEncoder", max_rate: int = 0, mono: bool = False) -> LoadedXma:

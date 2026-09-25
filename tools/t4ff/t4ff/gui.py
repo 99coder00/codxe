@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import traceback
+import zipfile
 from dataclasses import asdict, dataclass, field
 from typing import List
 
@@ -164,16 +165,18 @@ def run_cli(args: List[str], q: "queue.Queue[str]") -> bool:
 
 
 def find_and_install_encoder():
-    """Worker: the encoder found on this computer, installed into tools/t4ff/bin (None if absent)."""
+    """Worker: the encoder found on this computer (extracted into tools/t4ff/bin when it is inside
+    a .zip), None if there is none."""
     from . import deps
 
-    found = deps.find_xma2encode(search_zips=True)
+    try:
+        found = deps.ensure_xma2encode()
+    except (OSError, zipfile.BadZipFile) as e:
+        print(f"note: cannot use the xma2encode.exe found: {e}")
+        return None
     if not found:
         print("note: xma2encode.exe was not found on this computer. " + deps.ENCODER_HELP)
         return None
-    installed = os.path.join(deps.BIN_DIR, deps.ENCODER_NAME)
-    if "::" in found or os.path.abspath(found) != os.path.abspath(installed):
-        found = deps.install_xma2encode(found)
     print(f"note: using {found}")
     return found
 

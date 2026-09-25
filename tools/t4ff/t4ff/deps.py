@@ -5,9 +5,10 @@
 - ``xma2encode.exe``, the XMA encoder, is part of Microsoft's licensed Xbox
   developer kits (Xbox 360 XDK, Xbox One XDK, Microsoft GDK with Xbox
   extensions) and cannot be downloaded automatically. It is looked up where
-  those kits install it, in the Downloads folder (also inside .zip files) and in
-  ``tools/t4ff/bin``. "Installing" copies it (with the DLLs next to it) into
-  ``tools/t4ff/bin`` where every run finds it, and checks that it encodes.
+  those kits install it (and used from there), in the Downloads folder (also
+  inside .zip files) and in ``tools/t4ff/bin``. One found inside a .zip is
+  extracted (with the DLLs next to it) into ``tools/t4ff/bin`` where every run
+  finds it. Setup checks that it encodes.
 - On Linux and macOS the encoder runs through wine, which has to be installed
   with the system's package manager.
 
@@ -122,10 +123,18 @@ def _program_files() -> List[str]:
     return [r for r in dict.fromkeys(roots) if r and os.path.isdir(r)]
 
 
+# where the developer kits keep it, looked at before searching the whole kit
+KNOWN_SUBFOLDERS = [os.path.join("bin", "win32"), os.path.join("bin", "x64"), os.path.join("bin", "x86"), "bin", ""]
+
+
 def _search(root: str, depth: int) -> Optional[str]:
     """``xma2encode.exe`` under ``root`` (at most ``depth`` folders deep)."""
     if not root or not os.path.isdir(root):
         return None
+    for sub in KNOWN_SUBFOLDERS:
+        path = os.path.join(root, sub, ENCODER_NAME)
+        if os.path.isfile(path):
+            return path
     base = root.rstrip("\\/").count(os.sep)
     for folder, dirs, files in os.walk(root):
         for f in files:
@@ -188,6 +197,13 @@ def find_xma2encode(search_zips: bool = False) -> Optional[str]:
     return None
 
 
+def _common_folder(folder: str) -> bool:
+    """A folder holding unrelated files (Downloads, Desktop, the home folder)."""
+    home = os.path.expanduser("~")
+    folder = os.path.normcase(os.path.abspath(folder))
+    return folder in {os.path.normcase(os.path.abspath(os.path.join(home, f))) for f in ("", "Downloads", "Desktop")}
+
+
 def install_xma2encode(source: str, log: Log = print) -> str:
     """Copy the encoder from ``source`` (the .exe, a folder or a .zip containing it, or a path
     returned by :func:`find_xma2encode`) and the DLLs next to it into ``tools/t4ff/bin``."""
@@ -226,11 +242,31 @@ def install_xma2encode(source: str, log: Log = print) -> str:
     if os.path.abspath(source) != os.path.abspath(target):
         shutil.copy2(source, target)
         folder = os.path.dirname(os.path.abspath(source))
-        for f in os.listdir(folder):
-            if f.lower().endswith(".dll"):
-                shutil.copy2(os.path.join(folder, f), os.path.join(BIN_DIR, f))
+        if not _common_folder(folder):
+            for f in os.listdir(folder):
+                if f.lower().endswith(".dll"):
+                    shutil.copy2(os.path.join(folder, f), os.path.join(BIN_DIR, f))
         log(f"installed {ENCODER_NAME} from {folder} into {BIN_DIR}")
     return target
+
+
+def ensure_xma2encode(source: Optional[str] = None, log: Log = print) -> Optional[str]:
+    """Path of a usable encoder (``source``, or the one found on this computer), None if there is
+    none. An installed encoder is used where it is; one inside a .zip is extracted into
+    ``tools/t4ff/bin``."""
+    found = source or find_xma2encode(search_zips=True)
+    if not found:
+        return None
+    if os.path.isdir(found):
+        hit = _search(found, 6)
+        if not hit:
+            raise FileNotFoundError(f"no {ENCODER_NAME} in {found}")
+        return hit
+    if "::" in found or found.lower().endswith(".zip"):
+        return install_xma2encode(found, log)
+    if not os.path.isfile(found):
+        raise FileNotFoundError(found)
+    return found
 
 
 def wine_path() -> Optional[str]:
@@ -252,10 +288,17 @@ def test_xma2encode(path: str, log: Log = print) -> bool:
     rate = 44100
     t = np.arange(rate // 4) / rate
     tone = (np.sin(2 * np.pi * 440 * t) * 8000).astype(np.int16).reshape(-1, 1)
+    encoder = audio.XmaEncoder(path)
     try:
-        stream = audio.XmaEncoder(path).encode(audio.Pcm(rate, tone))
+        stream = encoder.encode(audio.Pcm(rate, tone))
     except audio.AudioError as e:
         log(f"{ENCODER_NAME} test failed: {e}")
+        if os.path.exists(path):
+            usage = encoder.usage()
+            if usage:
+                log(f"{ENCODER_NAME} prints (include this when reporting the problem):")
+                for line in usage.splitlines()[:40]:
+                    log("    " + line)
         return False
     if not stream.packets:
         log(f"{ENCODER_NAME} test failed: no XMA data")
@@ -292,15 +335,15 @@ def setup(encoder_source: Optional[str] = None, test: bool = True, log: Log = pr
     log("OpenAssetTools: " + ("found" if state["openassettools"] else f"MISSING ({oat}): use the full repository"))
 
     encoder = None
-    source = encoder_source or find_xma2encode(search_zips=True)
-    if source:
-        try:
-            encoder = install_xma2encode(source, log)
-        except (OSError, zipfile.BadZipFile) as e:
-            log(f"{ENCODER_NAME}: cannot install from {source}: {e}")
+    try:
+        encoder = ensure_xma2encode(encoder_source, log)
+    except (OSError, zipfile.BadZipFile) as e:
+        log(f"{ENCODER_NAME}: cannot use {encoder_source or 'the one found'}: {e}")
     state["xma2encode"] = encoder
     if encoder is None:
         log(f"{ENCODER_NAME}: NOT FOUND. {ENCODER_HELP}")
+    else:
+        log(f"{ENCODER_NAME}: {encoder}")
 
     needs_wine = not sys.platform.startswith("win")
     state["wine"] = (wine_path() or None) if needs_wine else "not needed"

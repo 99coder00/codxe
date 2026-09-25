@@ -14,6 +14,7 @@ import collections
 import os
 import sys
 import time
+import zipfile
 
 from .fastfile import read_fastfile, write_fastfile
 from .platforms import for_endian, pc, x360
@@ -133,12 +134,14 @@ def cmd_convert(args):
         # e.g. a download of it (or a .zip with it) sitting in the Downloads folder
         from . import deps
 
-        found = deps.find_xma2encode(search_zips=True)
+        try:
+            found = deps.ensure_xma2encode()
+        except (OSError, zipfile.BadZipFile) as e:
+            found = None
+            print(f"warning: cannot use the xma2encode.exe found: {e}")
         if found:
-            try:
-                encoder = XmaEncoder(deps.install_xma2encode(found), args.xma_quality)
-            except OSError as e:
-                print(f"warning: cannot install xma2encode.exe from {found}: {e}")
+            print(f"using {found}")
+            encoder = XmaEncoder(found, args.xma_quality)
     if not encoder.available and not args.no_sounds:
         print("warning: xma2encode.exe not found: sounds are not converted, the map will reference console sounds (run python -m t4ff setup)")
 

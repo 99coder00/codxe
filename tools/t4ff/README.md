@@ -56,9 +56,12 @@ missing Python packages before running (`--no-install` turns this off).
 `xma2encode.exe` is looked up in `tools/t4ff/bin`, the `XMA2ENCODE` variable,
 the folders the Xbox developer kits install to (`XEDK`, `DurangoXDK`,
 `GXDKLatest`/`GameDK`, `Program Files (x86)\Microsoft Xbox 360 SDK`, ...), your
-Downloads and Desktop folders, and `.zip` files in Downloads. It is then copied
-(with the DLLs next to it) into `tools/t4ff/bin`, where every later run finds
-it, and tested by encoding a short tone.
+Downloads and Desktop folders, and `.zip` files in Downloads. An installed kit's
+encoder (for example `C:\Program Files (x86)\Microsoft Xbox 360 SDK\bin\win32\xma2encode.exe`)
+is used where it is; one inside a `.zip` is extracted (with the DLLs next to it)
+into `tools/t4ff/bin`, where every later run finds it. Setup tests it by
+encoding a short tone. If that fails, it prints what the encoder says about its
+options: please include that output when reporting the problem.
 
 ## Usage
 
@@ -209,8 +212,14 @@ CoD Xenon's conversion of it, asset by asset:
 - **Effects** store colors as 32-bit values.
 - **Sounds**: loaded sounds are XMA1 (the XMA2 frames of `xma2encode` with
   XMA1 packet headers) with a seek table (decoded samples at the start of every
-  packet) and an XAudio format block (loop region in bits, source format,
-  duration in milliseconds). Streamed sounds are XMA2 in an `SDNS` container
+  packet) and an XAudio format block (loop region, source format, duration in
+  milliseconds). Both formats end the frames of a packet the same way: the last
+  bit of a frame is 0 when no other frame starts in its packet, and decoding
+  goes on at the frame offset of the next packet's header (this skips the
+  padding `xma2encode` puts at the end of every 64 KiB block). The loop region
+  starts at the first frame, skipping 3 subframes of 128 samples, and ends at
+  the bit offset of the frame holding decoded sample `length + 383`, with the
+  subframe of that sample (all of CoD Xenon's 1489 loaded sounds follow this). Streamed sounds are XMA2 in an `SDNS` container
   (sample count = XMA frames × 512); their names drop the extension and carry a
   hash (`h = h * 0x1003F + c` from 5381 over `dir\name` in lower case). Sounds
   of the map are served by CoD Xe from `sounds\`.

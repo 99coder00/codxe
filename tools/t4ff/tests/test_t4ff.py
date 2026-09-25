@@ -119,6 +119,31 @@ class DepsTests(unittest.TestCase):
                 self.assertEqual(sorted(os.listdir(bin_dir)), ["xma2encode.exe", "xmaencoder.dll"])
                 self.assertEqual(deps.find_xma2encode(), path)  # found there from now on
 
+    def test_encoder_of_developer_kit_used_in_place(self):
+        from unittest import mock
+
+        from t4ff import deps
+
+        with tempfile.TemporaryDirectory() as tmp:
+            program_files = os.path.join(tmp, "Program Files (x86)")
+            kit = os.path.join(program_files, "Microsoft Xbox 360 SDK")
+            os.makedirs(os.path.join(kit, "bin", "win32"))
+            exe = os.path.join(kit, "bin", "win32", "xma2encode.exe")
+            for name in ("xma2encode.exe", "other.dll"):
+                with open(os.path.join(kit, "bin", "win32", name), "wb") as f:
+                    f.write(b"x")
+            home, tool_dir, bin_dir = (os.path.join(tmp, d) for d in ("home", "tool", "bin"))
+            os.makedirs(home)
+            os.makedirs(tool_dir)
+            env = {"HOME": home, "USERPROFILE": home, "XMA2ENCODE": "", "XEDK": "", "PATH": tool_dir, "ProgramFiles(x86)": program_files, "ProgramFiles": "", "ProgramW6432": ""}
+            with mock.patch.dict(os.environ, env), mock.patch.object(deps, "BIN_DIR", bin_dir), mock.patch.object(deps, "TOOL_DIR", tool_dir), mock.patch.object(sys, "platform", "linux"):
+                self.assertEqual(deps.find_xma2encode(), exe)
+                self.assertEqual(deps.ensure_xma2encode(log=lambda msg: None), exe)
+                self.assertFalse(os.path.exists(bin_dir))  # nothing copied
+                # the XEDK variable the kit's installer sets
+                with mock.patch.dict(os.environ, {"ProgramFiles(x86)": "", "XEDK": kit + os.sep}):
+                    self.assertEqual(deps.find_xma2encode(), exe)
+
     @unittest.skipIf(sys.platform.startswith("win"), "uses a stand-in for wine")
     def test_encoder_self_test(self):
         from unittest import mock
@@ -127,26 +152,41 @@ class DepsTests(unittest.TestCase):
 
         tool_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
         with tempfile.TemporaryDirectory() as tmp:
-            # a stand-in encoder (a Python script) writing a one packet XMA2 file, run by a stand-in wine
-            exe = os.path.join(tmp, "xma2encode.exe")
-            with open(exe, "w") as f:
-                f.write(textwrap.dedent(f"""
-                    import sys
-                    sys.path.insert(0, {tool_dir!r})
-                    from t4ff import audio
-                    pcm = audio.read_wav(open(sys.argv[1], "rb").read())
-                    packet = bytearray(audio.XMA_PACKET_SIZE)
-                    packet[0:4] = ((1 << 26) | (1 << 8)).to_bytes(4, "big")
-                    stream = audio.XmaStream(pcm.rate, pcm.channels, 512, bytes(packet))
-                    open(sys.argv[sys.argv.index("/TargetFile") + 1], "wb").write(audio.xma2_wav(stream))
-                """))
+
+            def stand_in(name, rejects):
+                # a stand-in encoder (a Python script) writing a one packet XMA2 file, run by a
+                # stand-in wine; it fails with a usage text when it sees one of ``rejects``
+                exe = os.path.join(tmp, name)
+                with open(exe, "w") as f:
+                    f.write(textwrap.dedent(f"""
+                        import sys
+                        if any(arg in sys.argv for arg in {rejects!r}):
+                            print("usage: xma2encode <input.wav> /TargetFile <output.xma>")
+                            sys.exit(1)
+                        sys.path.insert(0, {tool_dir!r})
+                        from t4ff import audio
+                        pcm = audio.read_wav(open(sys.argv[1], "rb").read())
+                        packet = bytearray(audio.XMA_PACKET_SIZE)
+                        packet[0:4] = ((1 << 26) | (1 << 8)).to_bytes(4, "big")
+                        stream = audio.XmaStream(pcm.rate, pcm.channels, 512, bytes(packet))
+                        open(sys.argv[sys.argv.index("/TargetFile") + 1], "wb").write(audio.xma2_wav(stream))
+                    """))
+                return exe
+
             wine = os.path.join(tmp, "wine")
             with open(wine, "w") as f:
                 f.write(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
             os.chmod(wine, os.stat(wine).st_mode | stat.S_IEXEC)
+            logged = []
             with mock.patch.dict(os.environ, {"PATH": tmp + os.pathsep + os.environ.get("PATH", "")}):
-                self.assertTrue(deps.test_xma2encode(exe, log=lambda msg: None))
-                self.assertFalse(deps.test_xma2encode(os.path.join(tmp, "missing.exe"), log=lambda msg: None))
+                self.assertTrue(deps.test_xma2encode(stand_in("xma2encode.exe", []), log=logged.append))
+                # an encoder without the quality option still encodes
+                self.assertTrue(deps.test_xma2encode(stand_in("noquality.exe", ["/Quality"]), log=logged.append))
+                self.assertFalse(deps.test_xma2encode(os.path.join(tmp, "missing.exe"), log=logged.append))
+                # a failing encoder: what it prints is shown, for the report
+                del logged[:]
+                self.assertFalse(deps.test_xma2encode(stand_in("broken.exe", ["/TargetFile", "/?"]), log=logged.append))
+                self.assertTrue(any("usage: xma2encode" in line for line in logged))
 
 
 class GuiTests(unittest.TestCase):
@@ -202,7 +242,64 @@ class XenosTests(unittest.TestCase):
         self.assertEqual(xenos.untile_mip_chain(tiled, w, h, fmt, len(levels)), levels)
 
 
+def xma2_packets(lengths, block_packets=2, seed=1):
+    """XMA2 packets holding frames of the given bit lengths laid out as xma2encode does: frames do
+    not cross block boundaries (the rest of a block is padded with ones), the last bit of a frame is
+    0 when no other frame starts in its packet, packet headers give the frame count and the offset
+    of the first frame starting in the packet."""
+    rng = np.random.default_rng(seed)
+    payload_bits = (audio.XMA_PACKET_SIZE - 4) * 8
+    block_bits = block_packets * payload_bits
+    starts, pos = [], 0
+    for length in lengths:
+        if pos % block_bits + length > block_bits:
+            pos += block_bits - pos % block_bits
+        starts.append(pos)
+        pos += length
+    total = -(-pos // block_bits) * block_bits
+    bits = np.ones(total, dtype=np.uint8)
+    for start, length in zip(starts, lengths):
+        bits[start : start + length] = rng.integers(0, 2, length)
+        bits[start : start + 15] = [(length >> (14 - i)) & 1 for i in range(15)]
+    packet_of = [start // payload_bits for start in starts]
+    for i, (start, length) in enumerate(zip(starts, lengths)):
+        bits[start + length - 1] = 0 if i + 1 == len(starts) or packet_of[i + 1] != packet_of[i] else 1
+    data = bytearray()
+    for k in range(total // payload_bits):
+        mine = [start for start, packet in zip(starts, packet_of) if packet == k]
+        offset = mine[0] - k * payload_bits if mine else 0x7FFF
+        data += ((len(mine) << 26) | (offset << 11)).to_bytes(4, "big")
+        data += np.packbits(bits[k * payload_bits : (k + 1) * payload_bits]).tobytes()
+    return bytes(data), [((start // payload_bits) * audio.XMA_PACKET_SIZE * 8 + 32 + start % payload_bits, length) for start, length in zip(starts, lengths)]
+
+
 class AudioTests(unittest.TestCase):
+    def test_xma_frames_across_blocks(self):
+        """Frames are found past the padding at the end of every block and across packets."""
+        lengths = [3000 + 97 * i % 2000 for i in range(40)]
+        lengths[7] = 30000  # fills most of a block: a packet without a frame start
+        data, expected = xma2_packets(lengths)
+        self.assertGreater(len(data) // audio.XMA_PACKET_SIZE, 8)
+        self.assertEqual(audio.xma_frames(data), expected)
+        self.assertEqual(audio.xma_frames(audio.xma2_to_xma1(data)), expected)
+        self.assertEqual(audio.xma_frame_count(data), len(lengths))
+
+    def test_loaded_sound_loop_region(self):
+        """The loop region is laid out as in CoD Xenon's loaded sounds: from 3 subframes into the
+        first frame to the subframe of decoded sample length + 383."""
+        lengths = [3000 + 97 * i % 2000 for i in range(40)]
+        data, expected = xma2_packets(lengths)
+        for valid, frame, subframe in ((40 * 512 - 384, 39, 3), (40 * 512, 39, 3), (1000, 2, 2), (20 * 512 - 380, 20, 0)):
+            stream = audio.XmaStream(48000, 1, 40 * 512, data, valid)
+            sound = audio.loaded_sound(stream, 1234)
+            self.assertEqual(sound.format[0], expected[0][0])
+            self.assertEqual(sound.format[1], expected[frame][0])
+            self.assertEqual(sound.format[2], (subframe << 24) | (3 << 16))
+            self.assertEqual((sound.format[33], sound.format[34]), (1234, len(sound.seek_table) + 2))
+        # decoded samples before every packet (frames starting in the packets before it)
+        packet_starts = [bit // (audio.XMA_PACKET_SIZE * 8) for bit, _ in expected]
+        self.assertEqual(sound.seek_table, [512 * sum(p < k for p in packet_starts) for k in range(len(data) // audio.XMA_PACKET_SIZE)])
+
     def test_sdns_roundtrip(self):
         stream = audio.XmaStream(44100, 1, 1024, bytes(range(256)) * 16)
         self.assertEqual(audio.read_sdns(audio.write_sdns(stream)).data, stream.data)
@@ -235,6 +332,27 @@ class AudioTests(unittest.TestCase):
             encoder = audio.XmaEncoder(fake)
             pcm = audio.Pcm(44100, np.zeros((1000, 1), dtype=np.int16))
             self.assertEqual(audio.write_sdns(encoder.encode(pcm)), reference)
+
+    def test_long_loaded_sound_decodes(self):
+        """xma2encode data longer than one 64 KiB block (CoD Xenon's para_egg stream) makes a whole
+        XMA1 loaded sound, which decodes to the PC sound."""
+        if audio.ffmpeg_exe() is None:
+            self.skipTest("FFmpeg not available")
+        with open(sample("x360", "sounds", "para_egg.xma"), "rb") as f:
+            stream = audio.read_sdns(f.read())
+        source = audio.read_wav(zipfile.ZipFile(sample("pc", "nazi_zombie_aztec.iwd")).read("sound/eggs/para_egg.wav"))
+        stream.valid_samples = source.frames
+        sound = audio.loaded_sound(stream, source.frames * 1000 // source.rate)
+        frames = audio.xma_frames(sound.data)
+        self.assertEqual(len(frames), audio.xma_frame_count(stream.data))  # 11130 frames in 25 blocks
+        self.assertEqual(sound.format[1], frames[-1][0])
+        self.assertEqual(sound.seek_table[-1] + 512 * sum(1 for bit, _ in frames if bit // (audio.XMA_PACKET_SIZE * 8) == len(sound.seek_table) - 1), len(frames) * 512)
+        decoded = audio.decode_loaded_sound(sound)
+        self.assertEqual(decoded.frames, source.frames)
+        tail = slice(source.frames - 200000, source.frames - 1000)
+        a = source.samples[tail, 0].astype(np.float64)
+        b = decoded.samples[tail, 0].astype(np.float64)
+        self.assertGreater(float(a @ b / np.sqrt((a @ a) * (b @ b))), 0.99)
 
 
 class SampleZoneTests(unittest.TestCase):
@@ -319,7 +437,9 @@ class SampleZoneTests(unittest.TestCase):
         self.assertEqual(int.from_bytes(data_node.data[:4], "big") >> 28, 0)  # XMA1 sequence numbers
         self.assertEqual(int.from_bytes(data_node.data[audio.XMA_PACKET_SIZE : audio.XMA_PACKET_SIZE + 4], "big") >> 28, 1)
         frames = audio.xma_frames(bytes(data_node.data))
-        self.assertTrue(any(bit + length == fmt[1] for bit, length in frames))  # loop end on a frame end
+        self.assertEqual(len(frames), audio.xma_frame_count(stream.data))
+        self.assertEqual(fmt[1], frames[-1][0])  # loop end: the last frame, holding the last sample
+        self.assertEqual(fmt[2] >> 24, 3)
         # a zone with the sound reads back with the console rules
         from t4ff.zone import BLOCK_VIRTUAL, Node, Ptr, Zone, ZoneAsset
         from t4ff.layout import TypeRef
