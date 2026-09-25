@@ -665,6 +665,43 @@ class SampleZoneTests(unittest.TestCase):
             self.assertEqual(len(calls), before)  # taken from the cache
             self.assertEqual(conv.stats.sound_bytes, len(xma.data))
 
+    def test_shared_string_edit(self):
+        """The PC linker stores equal strings once: all the empty strings of Aztec are the stream
+        directory of one sound alias. Renaming that directory (a stream of the map is served from
+        its sounds folder) must leave the others alone (kar98k's alternate weapon became 'sounds')."""
+        from t4ff.assets import apply_string_edits
+        from t4ff.commands import find_field
+        from t4ff.convert import ConvertOptions, ZoneConverter
+        from t4ff.fastfile import read_fastfile
+        from t4ff.platforms import pc, x360
+        from t4ff.zone import Reader, Writer, asset_name
+
+        _, _, data = read_fastfile(sample("pc", "nazi_zombie_aztec.ff"))
+        conv = ZoneConverter(Reader(pc(), data).load(), pc(), x360(), ConvertOptions(log=lambda msg: None))
+        zone = conv.convert()
+        alt = find_field(x360().record("WeaponDef"), "szAltWeaponName").offset
+
+        def kar98k(z):
+            return next(n for n in z.extra_root.walk() if (n.extra.get("origin") or ("",))[0] == "asset" and n.type.name == "WeaponDef" and asset_name(x360(), n) == "kar98k")
+
+        empty = kar98k(zone).relocs[alt].node
+        users = sum(1 for n in zone.extra_root.walk() for q in n.relocs.values() if q.kind == "ref" and q.node is empty)
+        self.assertGreater(users, 1000)
+        owner, offset = next((n, off) for n in zone.extra_root.walk() for off, q in n.relocs.items() if q.kind == "follow" and q.node is empty)
+        self.assertEqual(owner.type.name, "SoundFile")
+        conv._string_edits = [(owner, offset, "sounds")]
+        apply_string_edits(conv, zone.extra_root)
+
+        out = Writer(x360()).write(zone)
+        again = Reader(x360(), out).load()
+        self.assertEqual(Writer(x360()).write(again), out)
+        target = kar98k(again).relocs[alt].target()
+        self.assertEqual(bytes(target.data), b"\0")
+        dirs = [bytes(q.target().data) for n in again.extra_root.walk() if n.type.name == "SoundFile" for off, q in n.relocs.items() if off == offset and q.kind != "null"]
+        self.assertEqual(dirs.count(b"sounds\0"), 1)
+        still_empty = sum(1 for n in again.extra_root.walk() for q in n.relocs.values() if q.kind == "ref" and q.node is not None and bytes(q.node.data) == b"\0")
+        self.assertGreaterEqual(still_empty, users - 1)
+
     def test_loaded_sound_limit(self):
         """Identical loaded sounds are shared, then the longest become streamed sounds (files in
         the map's sounds folder) until the zone is within the limit; the zone still loads."""

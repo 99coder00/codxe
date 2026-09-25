@@ -820,6 +820,9 @@ class ZoneConverter:
                 new_root.children.append(self.convert_node(child))
 
         self.fix_pointers()
+        from .assets import apply_string_edits
+
+        apply_string_edits(self, new_root)
 
         new_zone = Zone(
             self.dst.name,

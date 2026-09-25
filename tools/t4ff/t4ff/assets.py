@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import struct
-from typing import Optional
+from typing import Dict, List, Optional, Tuple
 
 from . import images as img
 from . import progress
@@ -814,6 +814,7 @@ def sound_hook(conv, asset_type, node, name):
     name_off = fn + find_field(sfn, "name").offset
     prime_off = u + find_field(ss, "primeSnd").offset
     done = conv.__dict__.setdefault("_sound_files_done", set())
+    from .audio import streamed_sound_target
 
     def string_of(sf, off):
         ptr = sf.relocs.get(off)
@@ -835,7 +836,9 @@ def sound_hook(conv, asset_type, node, name):
         directory = (directory or "").replace("/", "\\")
         stem = console_sound_name(file_name)
         rel = (directory + "\\" if directory else "") + file_name
-        custom = conv.library is not None and conv.library.read("sound/" + rel.replace("\\", "/")) is not None
+        # a sound of the map: its console stream was written next to the fastfile
+        target = streamed_sound_target("sound/" + rel.replace("\\", "/"))
+        custom = bool(conv.options.sounds_dir) and os.path.exists(os.path.join(conv.options.sounds_dir, *target.split("/")))
         if custom:
             new_dir = "sounds\\" + directory if directory else "sounds"
             value = 0
@@ -844,18 +847,77 @@ def sound_hook(conv, asset_type, node, name):
             stem = stem.lower()
             value = stream_name_hash((new_dir + "\\" if new_dir else "") + stem)
         struct.pack_into(E + "I", sf.data, hash_off, value)
-        if dir_node is not None and id(dir_node) not in done:
-            done.add(id(dir_node))
-            dir_node.data = bytearray(new_dir.encode("latin-1") + b"\0")
-            dir_node.count = len(dir_node.data)
-            dir_node.segments = [(dir_node.segments[0][0], dir_node.count, dir_node.count, False)] if dir_node.segments else []
-        if name_node is not None and id(name_node) not in done:
-            done.add(id(name_node))
-            name_node.data = bytearray(stem.encode("latin-1") + b"\0")
-            name_node.count = len(name_node.data)
-            name_node.segments = [(name_node.segments[0][0], name_node.count, name_node.count, False)] if name_node.segments else []
+        # The PC linker stores equal strings once (every empty string of a zone can be the one of a
+        # stream directory): the new names are separate strings, set once the zone is converted.
+        edits = conv.__dict__.setdefault("_string_edits", [])
+        if directory != new_dir or dir_node is None:
+            edits.append((sf, dir_off, new_dir))
+        if file_name != stem:
+            edits.append((sf, name_off, stem))
         _fix_primed_sound(conv, sf, prime_off, rel if custom else None)
     return new
+
+
+def _rebuild_children(node: Node):
+    """Children of a node are the nodes its following pointers load, in pointer order."""
+    node.children = [p.node for p in node.relocs.values() if p.kind in ("follow", "insert") and p.node is not None]
+
+
+def apply_string_edits(conv, root: Node):
+    """Point the pointers recorded in ``conv._string_edits`` ((node, offset, text)) to new strings.
+
+    A string the PC linker shares (other pointers refer to it, all later in the stream) stays in the
+    zone: the first of those pointers now loads it, the others keep referring to it.
+    """
+    edits = conv.__dict__.pop("_string_edits", [])
+    if not edits:
+        return
+    order: Dict[int, int] = {}
+    where: Dict[int, Tuple[Node, int]] = {}  # id(pointer) -> (node holding it, offset)
+    users: Dict[int, List[Ptr]] = {}  # id(string node) -> pointers referring into it
+    slot_aliases: Dict[int, List[Ptr]] = {}  # id(pointer) -> pointers aliasing that slot
+    for position, n in enumerate(root.walk()):
+        order[id(n)] = position
+        for offset, ptr in n.relocs.items():
+            where[id(ptr)] = (n, offset)
+            if ptr.kind == "ref" and ptr.node is not None:
+                users.setdefault(id(ptr.node), []).append(ptr)
+            elif ptr.kind == "alias" and ptr.slot is not None:
+                slot_aliases.setdefault(id(ptr.slot), []).append(ptr)
+
+    def set_string(owner: Node, offset: int, text: str):
+        old = owner.relocs.get(offset)
+        new = string_node(text)
+        ptr = Ptr("follow", new)
+        ptr.owner, ptr.offset = owner, offset
+        owner.relocs[offset] = ptr
+        where[id(ptr)] = (owner, offset)
+        _rebuild_children(owner)
+        if old is None or old.kind != "follow" or old.node is None:
+            return
+        shared = old.node
+        # pointers that relied on the old one: aliases of its slot and references into its string
+        for alias in slot_aliases.pop(id(old), []):
+            alias.kind, alias.node, alias.slot, alias.index, alias.inner = "ref", shared, None, 0, 0
+            users.setdefault(id(shared), []).append(alias)
+        refs = sorted(
+            (r for r in users.get(id(shared), []) if r.kind == "ref" and r.node is shared and id(r) in where),
+            key=lambda r: (order.get(id(where[id(r)][0]), 0), where[id(r)][1]),
+        )
+        for r in refs:
+            holder = where[id(r)][0]
+            if r.index == 0 and r.inner == 0:
+                # the first one loads the string now; the others come after it
+                r.kind = "follow"
+                _rebuild_children(holder)
+                return
+            # a reference into the middle of the string, before any other: its own copy
+            text_from = bytes(shared.data)[r.index * shared.elem_size + r.inner :].rstrip(b"\0").decode("latin-1")
+            r.kind, r.node, r.index, r.inner = "follow", string_node(text_from), 0, 0
+            _rebuild_children(holder)
+
+    for owner, offset, text in edits:
+        set_string(owner, offset, text)
 
 
 PRIMED_SOUND_SIZE = 0x8000
