@@ -705,22 +705,33 @@ def gfxworld_hook(conv, asset_type, node, name):
             data[o + 8 : o + 12] = data[o + 8 : o + 12][::-1]
         grid_rows.data = data
 
-    # Vertex layer data: (u, v, RGBA color) records; the console color is ARGB.
+    # Vertex layer data: per vertex of a layered surface, the texture coordinates (u, v floats) of
+    # its other layers, some with a packed 4 byte value (RGBA, ARGB on the console): 8, 12 or 16
+    # bytes a vertex (The Simpsons has all three).
     for layer in _member_nodes(new, "GfxWorldVertexLayerData", "data"):
-        if len(layer.data) < 12:
+        if len(layer.data) < 8:
             continue  # a map without layered vertices has a 4 byte stub (CoD Xenon's hijacked and mcdonalds too), kept as is
         src_layer = next((n for n in _member_nodes(node, "GfxWorldVertexLayerData", "data") if len(n.data) == len(layer.data)), None)
-        if src_layer is None or len(layer.data) % 12:
+        if src_layer is None or len(layer.data) % 4:
             conv.warn(f"gfxworld '{name}': unexpected vertex layer data size {len(layer.data)}")
             continue
-        import numpy as np
-
-        rows = np.frombuffer(bytes(src_layer.data), dtype=np.uint8).reshape(-1, 12)
-        out = np.empty_like(rows)
-        out[:, 0:8] = np.ascontiguousarray(rows[:, 0:8]).view("<f4").astype(">f4").view(np.uint8).reshape(-1, 8)
-        out[:, 8:12] = rows[:, [11, 8, 9, 10]]
-        layer.data = bytearray(out.tobytes())
+        layer.data = bytearray(console_vertex_layer_data(bytes(src_layer.data)))
     return new
+
+
+def console_vertex_layer_data(data: bytes) -> bytes:
+    """PC vertex layer data for the console, one 4 byte word at a time: texture coordinates are
+    floats (byte swapped), packed values are not floats (their last byte, the alpha, makes them
+    NaN, huge or tiny) and go from RGBA to ARGB."""
+    import numpy as np
+
+    words = np.frombuffer(data, dtype=np.uint8).reshape(-1, 4)
+    values = np.abs(words.view("<f4").reshape(-1))
+    with np.errstate(invalid="ignore"):
+        floats = np.isfinite(values) & ((values == 0) | ((values > 1e-8) & (values < 1e6)))
+    out = words[:, [3, 0, 1, 2]].copy()
+    out[floats] = words[floats][:, ::-1]
+    return out.tobytes()
 
 
 # ---------------------------------------------------------------------------

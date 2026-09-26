@@ -38,6 +38,9 @@ from .zone import (
 
 DEFS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "defs")
 
+# Asset types a map uses by name reference when the game's own zones have them.
+GAME_REFERENCE_TYPES = ("lightdef",)
+
 
 class ConvertError(Exception):
     pass
@@ -715,6 +718,11 @@ class ZoneConverter:
                 self.node_map[id(node)] = copy
                 self.offset_maps[id(node)] = lambda off: off
                 return copy
+        if asset_type in GAME_REFERENCE_TYPES and not name.startswith(",") and self.console_library is not None:
+            if self.console_library.in_game_zones(ASSET_RECORDS[asset_type], name):
+                # the game's own version, as CoD Xenon's DerBerg does: the PC map's copy of a stock
+                # light definition has the PC linker's lookup index, not the console's
+                return self.reference_asset(asset_type, node, name)
         hook = self.hooks.get(asset_type)
         if hook is not None:
             result = hook(self, asset_type, node, name)

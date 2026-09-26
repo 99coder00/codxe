@@ -266,6 +266,10 @@ the same one, with a 1280x720 picture) with, in this order:
 4. a title card with the map's name (from its `.arena` file), for maps without
    one: Zombie Woods (2008) has none.
 
+Its picture is named `loadscreen_<map>_codxe`: the map's own zone often has a
+`loadscreen_<map>` image too (The Simpsons does), which would replace the
+picture once it loads.
+
 Without any of CoD Xenon's load zones among the console fastfiles, the map's PC
 `_load.ff` is converted when it has one.
 
@@ -339,8 +343,11 @@ CoD Xenon's conversion of it, asset by asset:
   normalized (renormalized from the PC's byte packing), static model rotations
   too. Models get per-surface high mip bounds, lose their collision triangles
   and keep D3D buffer headers zeroed. World surfaces keep a copy of their
-  bounds; light grid row headers and vertex layer colors are swapped as the
-  console reads them.
+  bounds; light grid row headers and vertex layer data (per layered vertex, the
+  u, v floats of its other layers, some with a packed RGBA value: 8, 12 or 16
+  bytes) are swapped as the console reads them. A light definition the game's
+  own zones have (`light_point_linear`) becomes a reference to the console's, as
+  in CoD Xenon's DerBerg: the PC map's copy has the PC linker's lookup index.
 - **Effects** store colors as 32-bit values.
 - **Sounds**: loaded sounds are XMA1 (the XMA2 frames of `xma2encode` with
   XMA1 packet headers) with a seek table (decoded samples at the start of every

@@ -19,6 +19,7 @@ static int historyLine = 0;
 static int nextHistoryLine = 0;
 static field_t historyEditLines[console_history_count];
 Detour CL_WritePacket_Detour;
+Detour Com_PrintMessage_Detour;
 
 bool is_keyup(const XINPUT_KEYSTROKE &keystroke)
 {
@@ -455,16 +456,32 @@ void CL_WritePacket_Hook(int localClientNum)
     console::frame();
     CL_WritePacket_Detour.GetOriginal<decltype(CL_WritePacket)>()(localClientNum);
 }
+
+// log_console: the game's console output also goes to the debug output (xenia.log), where the last
+// lines before a crash can still be read.
+void Com_PrintMessage_Hook(int channel, const char *msg, int error)
+{
+    if (msg && *msg)
+        DbgPrint("%s", msg);
+    Com_PrintMessage_Detour.GetOriginal<decltype(Com_PrintMessage)>()(channel, msg, error);
+}
 } // namespace
 
 console::console()
 {
     CL_WritePacket_Detour = Detour(CL_WritePacket, CL_WritePacket_Hook);
     CL_WritePacket_Detour.Install();
+
+    if (Config::log_console)
+    {
+        Com_PrintMessage_Detour = Detour(Com_PrintMessage, Com_PrintMessage_Hook);
+        Com_PrintMessage_Detour.Install();
+    }
 }
 
 console::~console()
 {
+    Com_PrintMessage_Detour.Remove();
     CL_WritePacket_Detour.Remove();
 }
 

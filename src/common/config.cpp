@@ -17,6 +17,7 @@ const char *DUMP_DIR = "game:\\_codxe\\dump";
 char Config::active_mod[MAX_PATH] = {};
 bool Config::dump_rawfile = false;
 bool Config::dump_map_ents = false;
+bool Config::log_console = false;
 char Config::mod_base_path[MAX_PATH] = {};
 std::string Config::data_root;
 bool Config::shared_layout_enabled = false;
@@ -278,6 +279,7 @@ Config::~Config()
     mod_base_path[0] = '\0';
     dump_rawfile = false;
     dump_map_ents = false;
+    log_console = false;
     data_root.clear();
     shared_layout_enabled = false;
     for (size_t i = 0; i < mounted_links.size(); ++i)
@@ -327,6 +329,10 @@ bool Config::LoadFromJson(const char *jsonBuffer, DWORD bufferSize)
             {
                 dump_map_ents = (jsonTokenType == Json_True);
             }
+            else if (wcscmp(propertyName, L"log_console") == 0)
+            {
+                log_console = (jsonTokenType == Json_True);
+            }
             else
             {
                 DbgPrint("[codxe][Config] WARNING: Ignoring unknown property: %ls\n", propertyName);
@@ -340,6 +346,7 @@ bool Config::LoadFromJson(const char *jsonBuffer, DWORD bufferSize)
     DbgPrint("  Active Mod: %s\n", active_mod);
     DbgPrint("  Dump Raw Scripts: %s\n", dump_rawfile ? "true" : "false");
     DbgPrint("  Dump Map Entities: %s\n", dump_map_ents ? "true" : "false");
+    DbgPrint("  Log Console: %s\n", log_console ? "true" : "false");
 
     if (active_mod[0] != '\0')
     {

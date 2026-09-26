@@ -367,6 +367,22 @@ class LibraryTests(unittest.TestCase):
             self.assertEqual(short(library_files([t4], "zm_unknown")), everything)
 
 
+class WorldTests(unittest.TestCase):
+    def test_vertex_layer_data(self):
+        """Layered vertices: (u, v) floats per layer, some with a packed RGBA value (ARGB on the
+        console); 8 and 12 byte records mixed, as in The Simpsons."""
+        import struct
+
+        from t4ff.assets import console_vertex_layer_data
+
+        pc = struct.pack("<2f", 1.101, 0.065) + struct.pack("<2f", 0.625, 0.514) + bytes.fromhex("ff8080ff") + struct.pack("<2f", 0.0, 3.5)
+        console = console_vertex_layer_data(pc)
+        self.assertEqual(console[:8], struct.pack(">2f", 1.101, 0.065))
+        self.assertEqual(console[8:16], struct.pack(">2f", 0.625, 0.514))
+        self.assertEqual(console[16:20], bytes.fromhex("ffff8080"))
+        self.assertEqual(console[20:], struct.pack(">2f", 0.0, 3.5))
+
+
 class MemoryTests(unittest.TestCase):
     def test_automatic_texture_budget(self):
         """Textures get what the memory target leaves: a map that fits is converted once, one over
@@ -466,12 +482,12 @@ class LoadScreenTests(unittest.TestCase):
         zone = Reader(p, out).load()
         self.assertEqual(
             [a.name for a in zone.assets],
-            [",2d", ",$victorybackdrop", "defeat", "$defeatbackdrop", "loadscreen_nazi_zombie_wh", "$levelbriefing", "nazi_zombie_wh_load"],
+            [",2d", ",$victorybackdrop", "defeat", "$defeatbackdrop", "loadscreen_nazi_zombie_wh_codxe", "$levelbriefing", "nazi_zombie_wh_load"],
         )
         _, _, original = read_fastfile(path)
         sizes = Reader(p, original).load().block_sizes
         self.assertEqual(sizes[2], zone.block_sizes[2])  # the pictures: same size and format
-        longer = 2 * (len("nazi_zombie_wh") - len("mario"))  # the image and raw file names
+        longer = 2 * (len("nazi_zombie_wh") - len("mario")) + len("_codxe")  # the image and raw file names
         self.assertTrue(longer - 4 <= zone.block_sizes[4] - sizes[4] <= longer + 4)
         image = _decode_console_image(p, _picture_image(p, zone), "loadscreen")
         rgba = dxt.decode(image.levels[0], image.width, image.height, image.format)

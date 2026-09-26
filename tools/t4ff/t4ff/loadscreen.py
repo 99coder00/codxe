@@ -5,7 +5,9 @@ one it shows the default material, a checkerboard. CoD Xenon's 0.2.0 maps all ha
 zone: ``$levelbriefing`` with a 1280x720 image ``loadscreen_<map>``, ``$defeatbackdrop`` with its
 image ``defeat``, references to the game's ``,2d`` technique set and ``,$victorybackdrop``, and an
 empty raw file ``<map>_load``. A map's load zone is made from one of theirs (among the console
-fastfiles given) with the map's own picture, the first of:
+fastfiles given), its image named ``loadscreen_<map>_codxe`` (the map's zone can have its own
+``loadscreen_<map>``, which would replace it when it loads), with the map's own picture, the
+first of:
 
 1. a picture given for it (``--loading-image``: .png, .jpg, .bmp, .tga, .dds or .iwi);
 2. CoD Xenon's own loading screen when they converted the same map (their ``<map>_load.ff``);
@@ -197,7 +199,9 @@ def build_load_zone(p: Platform, template: Zone, map_name: str, rgba: Optional[n
     image = _picture_image(p, template)
     if rgba is not None:
         set_picture(p, template, rgba)
-    _rename(_string(p, image, "GfxImage", "name"), f"loadscreen_{map_name}")
+    # not loadscreen_<map>: the map's own zone often has an image of that name (its PC loading
+    # screen), which would replace this one once it loads
+    _rename(_string(p, image, "GfxImage", "name"), f"loadscreen_{map_name}_codxe")
     for _, raw in _assets(p, template, "RawFile"):
         _rename(_string(p, raw, "RawFile", "name"), f"{map_name}_load")
     return Writer(p).write(template)
