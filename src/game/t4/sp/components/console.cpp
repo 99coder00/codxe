@@ -20,6 +20,7 @@ static int nextHistoryLine = 0;
 static field_t historyEditLines[console_history_count];
 Detour CL_WritePacket_Detour;
 Detour Com_PrintMessage_Detour;
+Detour Scr_Error_Detour;
 
 bool is_keyup(const XINPUT_KEYSTROKE &keystroke)
 {
@@ -486,6 +487,26 @@ void *FindComPrintMessage()
     return found;
 }
 
+// A function starts right after the end of the one before it: a blr, a tail branch or padding.
+// (An address in the middle of a function follows another instruction, e.g. a call.)
+bool LooksLikeFunctionStart(const void *address)
+{
+    const UINT32 before = static_cast<const UINT32 *>(address)[-1];
+    return before == 0x4E800020 || before == 0 || (before & 0xFC000003) == 0x48000000;
+}
+
+// Script runtime errors (the retail game does not print them): Scr_ParamError and Scr_ObjectError
+// end up here too. The original does not return (it goes back to the script VM). Its arguments are
+// passed on as they came: symbols.h has (error, inst), later games have (inst, error, terminal).
+typedef void (*Scr_Error_Raw_t)(UINT32 a, UINT32 b, UINT32 c, UINT32 d);
+
+void Scr_Error_Hook(UINT32 a, UINT32 b, UINT32 c, UINT32 d)
+{
+    const UINT32 text = a >= 0x10000 ? a : b;
+    DbgPrint("[codxe][T4 SP] script error: %s\n", text >= 0x10000 ? reinterpret_cast<const char *>(text) : "");
+    Scr_Error_Detour.GetOriginal<Scr_Error_Raw_t>()(a, b, c, d);
+}
+
 void Com_PrintMessage_Hook(int channel, const char *msg, int error)
 {
     if (msg && *msg)
@@ -510,18 +531,34 @@ console::console()
         else
         {
             const UINT32 *code = static_cast<const UINT32 *>(printMessage);
-            DbgPrint("[codxe][T4 SP] log_console: Com_PrintMessage at %08X (symbols.h: %08X): %08X %08X %08X %08X "
-                     "%08X %08X\n",
-                     address, reinterpret_cast<UINT32>(Com_PrintMessage), code[0], code[1], code[2], code[3], code[4],
-                     code[5]);
+            DbgPrint("[codxe][T4 SP] log_console: Com_PrintMessage at %08X (symbols.h: %08X, %s): %08X %08X %08X "
+                     "%08X %08X %08X\n",
+                     address, reinterpret_cast<UINT32>(Com_PrintMessage),
+                     LooksLikeFunctionStart(reinterpret_cast<const void *>(Com_PrintMessage)) ? "a function start" : "not a function start", code[0],
+                     code[1], code[2], code[3], code[4], code[5]);
             Com_PrintMessage_Detour = Detour(printMessage, Com_PrintMessage_Hook);
             Com_PrintMessage_Detour.Install();
+        }
+
+        if (LooksLikeFunctionStart(reinterpret_cast<const void *>(Scr_Error)))
+        {
+            Scr_Error_Detour = Detour(Scr_Error, Scr_Error_Hook);
+            Scr_Error_Detour.Install();
+            DbgPrint("[codxe][T4 SP] log_console: script errors logged (Scr_Error at %08X)\n",
+                     reinterpret_cast<UINT32>(Scr_Error));
+        }
+        else
+        {
+            DbgPrint("[codxe][T4 SP] log_console: %08X does not look like the start of Scr_Error, script errors "
+                     "are not logged\n",
+                     reinterpret_cast<UINT32>(Scr_Error));
         }
     }
 }
 
 console::~console()
 {
+    Scr_Error_Detour.Remove();
     Com_PrintMessage_Detour.Remove();
     CL_WritePacket_Detour.Remove();
 }
