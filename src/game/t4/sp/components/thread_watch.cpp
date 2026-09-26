@@ -27,9 +27,10 @@ static const UINT32 PPC_BLRL = 0x4E800021;
 
 static const int MAX_STALL_REPORTS = 3;
 static const int MAX_STACK_CALLS = 1024; // return addresses read from a stack
-static const int MAX_OUTER_CALLS = 48;   // printed from the top of the stack
-static const int MAX_CHANGED_CALLS = 48; // and further down, the ones that changed
-static const int MAX_FUNCTIONS = 24;
+static const int MAX_CHAIN = 96;         // calls printed per thread
+static const int MAX_OTHER_CHANGED = 16; // and changed return addresses that are not among them
+static const int MAX_FUNCTIONS = 48;
+static const int MAX_THREADS = 16;
 
 struct WatchedThread
 {
@@ -51,6 +52,19 @@ WatchedThread g_server = {"Server", "linked an entity", 150, 5, 0, 0, 0, 0, 0};
 // one) and then runs the client frames. Loading also waits a while for the fastfile and stream threads.
 WatchedThread g_main = {"main", "printed or run a client frame", 3000, 1, 0, 0, 0, 0, 0};
 volatile LONG g_mainFound = 0;
+
+// Every game thread's stack, written out with a stall's report: a thread that waits usually waits for another.
+struct ThreadStack
+{
+    const char *name;
+    UINT32 context;
+    volatile LONG id;
+    UINT32 stackLow;
+    UINT32 stackHigh;
+};
+
+ThreadStack g_threads[MAX_THREADS];
+volatile LONG g_threadSlots = 0;
 
 volatile LONG g_longjmps = 0;
 
@@ -207,6 +221,27 @@ void StartWatching(WatchedThread &thread)
              thread.stackHigh);
 }
 
+const char *ContextName(UINT32 context)
+{
+    static const char *const names[] = {"main",      "Backend",   "Worker0",  "Worker1", "Server",
+                                        "occlusion", "Cinematic", "Database", "Stream"};
+    return context < sizeof(names) / sizeof(names[0]) ? names[context] : "game";
+}
+
+// On the thread itself, once.
+void RegisterThread(UINT32 context, UINT32 stackLow, UINT32 stackHigh)
+{
+    const LONG slot = InterlockedIncrement(&g_threadSlots) - 1;
+    if (slot >= MAX_THREADS)
+        return;
+    ThreadStack &thread = g_threads[slot];
+    thread.name = ContextName(context);
+    thread.context = context;
+    thread.stackLow = stackLow;
+    thread.stackHigh = stackHigh;
+    InterlockedExchange(&thread.id, static_cast<LONG>(GetCurrentThreadId()));
+}
+
 void Beat(WatchedThread &thread)
 {
     thread.lastBeat = GetTickCount();
@@ -224,12 +259,15 @@ struct StackCall
 StackCall g_before[MAX_STACK_CALLS];
 StackCall g_after[MAX_STACK_CALLS];
 bool g_changed[MAX_STACK_CALLS];
+bool g_inChain[MAX_STACK_CALLS];
+int g_chain[MAX_CHAIN];
+int g_walk[MAX_CHAIN];
 
-// Read from the thread's live stack, outermost first.
-int ReadCalls(const WatchedThread &thread, StackCall *calls)
+// Read from a thread's live stack, outermost first.
+int ReadCalls(UINT32 stackLow, UINT32 stackHigh, StackCall *calls)
 {
     int count = 0;
-    for (UINT32 at = thread.stackHigh; at > thread.stackLow && count < MAX_STACK_CALLS;)
+    for (UINT32 at = stackHigh; at > stackLow && count < MAX_STACK_CALLS;)
     {
         at -= 4;
         const UINT32 value = Read(at);
@@ -243,12 +281,75 @@ int ReadCalls(const WatchedThread &thread, StackCall *calls)
     return count;
 }
 
-void ReportStall(const WatchedThread &thread, DWORD idle)
+// A function saves the return address into its caller 8 bytes below the caller's stack pointer, and its own
+// frame starts with the caller's stack pointer (the back chain). So the return address at lower was saved by a
+// function called from the one whose return address is at upper when the back chain from lower + 8 leads to
+// upper + 8 (a hop or two: CoD Xe's hooks have frames with no return address into the game).
+bool IsCalledFrom(UINT32 lower, UINT32 upper, UINT32 stackLow, UINT32 stackHigh)
+{
+    UINT32 stackPointer = lower + 8;
+    for (int hop = 0; hop < 4; ++hop)
+    {
+        if (stackPointer < stackLow || stackPointer >= stackHigh || (stackPointer & 3) != 0)
+            return false;
+        const UINT32 backChain = Read(stackPointer);
+        if (backChain == upper + 8)
+            return true;
+        if (backChain <= stackPointer)
+            return false;
+        stackPointer = backChain;
+    }
+    return false;
+}
+
+// The calls the thread is in, outermost first, from the return addresses on its stack (g_after).
+int WalkCalls(int count, UINT32 stackLow, UINT32 stackHigh)
+{
+    int best = 0;
+    for (int start = 0; start < count && start < 8; ++start)
+    {
+        int length = 0;
+        g_walk[length++] = start;
+        for (int next = start + 1; next < count && length < MAX_CHAIN; ++next)
+        {
+            if (IsCalledFrom(g_after[next].at, g_after[g_walk[length - 1]].at, stackLow, stackHigh))
+                g_walk[length++] = next;
+        }
+        if (length > best)
+        {
+            best = length;
+            for (int i = 0; i < length; ++i)
+                g_chain[i] = g_walk[i];
+        }
+    }
+    return best;
+}
+
+void AddFunction(UINT32 function, UINT32 *functions, int &functionCount)
+{
+    bool seen = function == 0;
+    for (int f = 0; f < functionCount && !seen; ++f)
+        seen = functions[f] == function;
+    if (!seen && functionCount < MAX_FUNCTIONS)
+        functions[functionCount++] = function;
+}
+
+void PrintCall(int index)
+{
+    const UINT32 value = g_after[index].value;
+    const UINT32 call = Read(value - 4);
+    const UINT32 callee = IsBranchAndLink(call) ? BranchTarget(value - 4, call) : 0;
+    DbgPrint("[codxe][T4 SP]   %s %08X: returns to %08X in %08X, calls %08X\n", g_changed[index] ? "*" : " ",
+             g_after[index].at, value, FunctionStart(value), callee);
+}
+
+void ReportThread(const char *name, UINT32 context, LONG id, UINT32 stackLow, UINT32 stackHigh, UINT32 *functions,
+                  int &functionCount)
 {
     // Twice: what changed in between is where the thread is busy. Nothing changed: it waits.
-    const int beforeCount = ReadCalls(thread, g_before);
+    const int beforeCount = ReadCalls(stackLow, stackHigh, g_before);
     Sleep(10);
-    const int afterCount = ReadCalls(thread, g_after);
+    const int afterCount = ReadCalls(stackLow, stackHigh, g_after);
 
     int changedCount = 0;
     for (int a = 0, b = 0; a < afterCount; ++a)
@@ -256,45 +357,49 @@ void ReportStall(const WatchedThread &thread, DWORD idle)
         while (b < beforeCount && g_before[b].at > g_after[a].at)
             ++b;
         g_changed[a] = !(b < beforeCount && g_before[b].at == g_after[a].at && g_before[b].value == g_after[a].value);
+        g_inChain[a] = false;
         changedCount += g_changed[a] ? 1 : 0;
     }
 
-    DbgPrint("[codxe][T4 SP] thread watch: the %s thread has not %s for %u ms, %d of the %d calls on its stack "
-             "(%08X-%08X) changed within 10 ms. Outermost first, * = changed:\n",
-             thread.name, thread.progress, idle, changedCount, afterCount, thread.stackLow, thread.stackHigh);
+    const int chainLength = WalkCalls(afterCount, stackLow, stackHigh);
+    DbgPrint("[codxe][T4 SP] thread watch: %s thread (context %u, %08X, stack %08X-%08X), %d of its %d return "
+             "addresses changed within 10 ms (%s). The calls it is in, outermost first (* = changed; the last ones "
+             "can be left from earlier calls):\n",
+             name, context, id, stackLow, stackHigh, changedCount, afterCount, changedCount ? "busy" : "waiting");
+    for (int i = 0; i < chainLength; ++i)
+    {
+        g_inChain[g_chain[i]] = true;
+        PrintCall(g_chain[i]);
+        AddFunction(FunctionStart(g_after[g_chain[i]].value), functions, functionCount);
+    }
+
+    int othersPrinted = 0;
+    for (int a = 0; a < afterCount && othersPrinted < MAX_OTHER_CHANGED; ++a)
+    {
+        if (!g_changed[a] || g_inChain[a])
+            continue;
+        if (othersPrinted++ == 0)
+            DbgPrint("[codxe][T4 SP]   changed, not among those:\n");
+        PrintCall(a);
+    }
+}
+
+void ReportStall(const WatchedThread &thread, DWORD idle)
+{
+    DbgPrint("[codxe][T4 SP] thread watch: the %s thread has not %s for %u ms. Where the game's threads are:\n",
+             thread.name, thread.progress, idle);
 
     UINT32 functions[MAX_FUNCTIONS];
     int functionCount = 0;
-    int changedPrinted = 0;
-    bool skipped = false;
-    for (int a = 0; a < afterCount; ++a)
+    ReportThread(thread.name, &thread == &g_server ? THREAD_CONTEXT_SERVER : 0, thread.id, thread.stackLow,
+                 thread.stackHigh, functions, functionCount);
+    for (int t = 0; t < MAX_THREADS; ++t)
     {
-        if (a >= MAX_OUTER_CALLS && !(g_changed[a] && changedPrinted < MAX_CHANGED_CALLS))
-        {
-            skipped = true;
-            continue;
-        }
-        if (skipped)
-            DbgPrint("[codxe][T4 SP]   ...\n");
-        skipped = false;
-        if (a >= MAX_OUTER_CALLS)
-            ++changedPrinted;
-
-        const UINT32 value = g_after[a].value;
-        const UINT32 call = Read(value - 4);
-        const UINT32 function = FunctionStart(value);
-        const UINT32 callee = IsBranchAndLink(call) ? BranchTarget(value - 4, call) : 0;
-        DbgPrint("[codxe][T4 SP]   %s %08X: returns to %08X in %08X, calls %08X\n", g_changed[a] ? "*" : " ",
-                 g_after[a].at, value, function, callee);
-
-        bool seen = function == 0;
-        for (int f = 0; f < functionCount && !seen; ++f)
-            seen = functions[f] == function;
-        if (!seen && functionCount < MAX_FUNCTIONS)
-            functions[functionCount++] = function;
+        const ThreadStack &other = g_threads[t];
+        if (other.id && other.id != thread.id)
+            ReportThread(other.name, other.context, other.id, other.stackLow, other.stackHigh, functions,
+                         functionCount);
     }
-    if (skipped)
-        DbgPrint("[codxe][T4 SP]   ...\n");
 
     DbgPrint("[codxe][T4 SP] thread watch: text those functions use:\n");
     for (int f = 0; f < functionCount; ++f)
@@ -340,6 +445,12 @@ DWORD WINAPI WatchThread(void *)
 
 DWORD Sys_ThreadMain_Hook(UINT32 threadContext)
 {
+    volatile UINT32 marker = 0;
+    UINT32 stackLow = 0;
+    UINT32 stackHigh = 0;
+    FindStack(reinterpret_cast<UINT32>(&marker), stackLow, stackHigh);
+    RegisterThread(threadContext, stackLow, stackHigh);
+
     if (threadContext == THREAD_CONTEXT_SERVER && !g_server.id)
     {
         StartWatching(g_server);
@@ -361,7 +472,10 @@ void SV_LinkEntity_Hook(gentity_s *gEnt)
     else if (thread == g_main.id)
         Beat(g_main);
     else if (g_server.id && InterlockedCompareExchange(&g_mainFound, 1, 0) == 0)
+    {
         StartWatching(g_main);
+        RegisterThread(0, g_main.stackLow, g_main.stackHigh);
+    }
     SV_LinkEntity_Detour.GetOriginal<decltype(SV_LinkEntity)>()(gEnt);
 }
 
