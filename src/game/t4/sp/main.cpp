@@ -5,7 +5,7 @@
 #include "components/gsc_fields.h"
 #include "components/gsc.h"
 #include "components/scr_parser.h"
-#include "components/server_watch.h"
+#include "components/thread_watch.h"
 #include "components/ui.h"
 #include "components/usermaps.h"
 #include "main.h"
@@ -25,7 +25,7 @@ T4_SP_Plugin::T4_SP_Plugin()
 
     RegisterModule(new Config(Config::GAME_T4));
     // First: its hooks must be in place before the game starts its threads.
-    RegisterModule(new server_watch());
+    RegisterModule(new thread_watch());
     RegisterModule(new FastFiles());
     RegisterModule(new clipmap());
     RegisterModule(new console());

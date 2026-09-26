@@ -197,7 +197,7 @@
       <ClCompile Include="src\game\t4\sp\components\gsc_fields.cpp" />
       <ClCompile Include="src\game\t4\sp\components\gsc.cpp" />
       <ClCompile Include="src\game\t4\sp\components\scr_parser.cpp" />
-      <ClCompile Include="src\game\t4\sp\components\server_watch.cpp" />
+      <ClCompile Include="src\game\t4\sp\components\thread_watch.cpp" />
       <ClCompile Include="src\game\t4\sp\components\ui.cpp" />
       <ClCompile Include="src\game\t4\sp\components\usermaps.cpp" />
       <ClCompile Include="src\game\t4\sp\main.cpp" />
@@ -346,7 +346,7 @@
       <ClInclude Include="src\game\t4\sp\components\gsc_fields.h" />
       <ClInclude Include="src\game\t4\sp\components\gsc.h" />
       <ClInclude Include="src\game\t4\sp\components\scr_parser.h" />
-      <ClInclude Include="src\game\t4\sp\components\server_watch.h" />
+      <ClInclude Include="src\game\t4\sp\components\thread_watch.h" />
       <ClInclude Include="src\game\t4\sp\components\ui.h" />
       <ClInclude Include="src\game\t4\sp\components\usermaps.h" />
       <ClInclude Include="src\game\t4\sp\main.h" />

@@ -1,5 +1,5 @@
 #include "pch.h"
-#include "server_watch.h"
+#include "thread_watch.h"
 
 namespace t4
 {
@@ -8,7 +8,7 @@ namespace sp
 namespace
 {
 // The game starts its threads in Sys_ThreadMain(threadContext), the start address of their ExCreateThread
-// calls in xenia.log. The Server thread, which runs the level (scripts, AI, entities), has context 4.
+// calls in xenia.log. The Server thread, which runs the level's frames (scripts, AI, entities), has context 4.
 typedef DWORD (*Sys_ThreadMain_t)(UINT32 threadContext);
 static const Sys_ThreadMain_t Sys_ThreadMain = reinterpret_cast<Sys_ThreadMain_t>(0x82255CD8);
 static const UINT32 THREAD_CONTEXT_SERVER = 4;
@@ -25,24 +25,38 @@ static const UINT32 PPC_BLR = 0x4E800020;
 static const UINT32 PPC_BCTRL = 0x4E800421;
 static const UINT32 PPC_BLRL = 0x4E800021;
 
-// The Server thread links the players every frame (20 a second): this long without is a stall. Short, because a
-// runaway loop there takes Xenia down within a second.
-static const DWORD STALL_MS = 150;
 static const int MAX_STALL_REPORTS = 3;
-static const int MAX_RETURN_ADDRESSES = 80;
+static const int MAX_STACK_CALLS = 1024; // return addresses read from a stack
+static const int MAX_OUTER_CALLS = 48;   // printed from the top of the stack
+static const int MAX_CHANGED_CALLS = 48; // and further down, the ones that changed
 static const int MAX_FUNCTIONS = 24;
+
+struct WatchedThread
+{
+    const char *name;
+    const char *progress; // what it does when it makes progress
+    DWORD stallMs;        // this long without progress is a stall
+    LONG minBeats;        // progress made before stalls count
+    volatile LONG id;
+    UINT32 stackLow;
+    UINT32 stackHigh;
+    volatile DWORD lastBeat;
+    volatile LONG beats;
+};
+
+// The Server thread links the players every frame (20 a second). Short, because a runaway loop there takes
+// Xenia down within a second.
+WatchedThread g_server = {"Server", "linked an entity", 150, 5, 0, 0, 0, 0, 0};
+// The main thread loads the level (it spawns its entities: the first thread besides the Server thread to link
+// one) and then runs the client frames. Loading also waits a while for the fastfile and stream threads.
+WatchedThread g_main = {"main", "printed or run a client frame", 3000, 1, 0, 0, 0, 0, 0};
+volatile LONG g_mainFound = 0;
+
+volatile LONG g_longjmps = 0;
 
 Detour Sys_ThreadMain_Detour;
 Detour SV_LinkEntity_Detour;
 Detour longjmp_Detour;
-
-volatile DWORD g_serverThreadId = 0;
-volatile DWORD g_lastBeat = 0;
-volatile LONG g_beats = 0;
-volatile LONG g_longjmps = 0;
-UINT32 g_stackLow = 0;
-UINT32 g_stackHigh = 0;
-UINT32 *g_snapshot[2] = {nullptr, nullptr};
 
 UINT32 Read(UINT32 address)
 {
@@ -170,47 +184,108 @@ bool IsReadable(UINT32 address)
     return info.State == MEM_COMMIT && info.Protect != 0 && !(info.Protect & PAGE_NOACCESS);
 }
 
-// Its top from the stack pointer at its start; its bottom where the pages stop being readable (Xenia puts
-// no-access pages on both sides of a thread's stack).
-void FindStack(UINT32 stackPointer)
+// The pages around the stack pointer that can be read: Xenia puts no-access pages on both sides of a thread's
+// stack.
+void FindStack(UINT32 stackPointer, UINT32 &low, UINT32 &high)
 {
-    g_stackHigh = (stackPointer + 0xFFF) & ~0xFFFu;
-    UINT32 low = g_stackHigh;
-    while (g_stackHigh - low < 0x100000 && IsReadable(low - 0x1000))
+    high = (stackPointer + 0x1000) & ~0xFFFu;
+    while (high - stackPointer < 0x100000 && IsReadable(high))
+        high += 0x1000;
+    low = stackPointer & ~0xFFFu;
+    while (high - low < 0x100000 && IsReadable(low - 0x1000))
         low -= 0x1000;
-    g_stackLow = low < stackPointer ? low : stackPointer & ~0xFFFu;
 }
 
-void ReportStall(DWORD idle)
+// On the thread itself, once.
+void StartWatching(WatchedThread &thread)
 {
-    const UINT32 words = (g_stackHigh - g_stackLow) / 4;
-    if (!g_snapshot[0] || !g_snapshot[1])
-        return;
+    volatile UINT32 marker = 0;
+    FindStack(reinterpret_cast<UINT32>(&marker), thread.stackLow, thread.stackHigh);
+    thread.lastBeat = GetTickCount();
+    InterlockedExchange(&thread.id, static_cast<LONG>(GetCurrentThreadId()));
+    DbgPrint("[codxe][T4 SP] thread watch: %s thread %08X, stack %08X-%08X\n", thread.name, thread.id, thread.stackLow,
+             thread.stackHigh);
+}
 
-    // Twice: what changed in between is where the thread is busy.
-    memcpy(g_snapshot[0], reinterpret_cast<const void *>(g_stackLow), words * 4);
+void Beat(WatchedThread &thread)
+{
+    thread.lastBeat = GetTickCount();
+    InterlockedIncrement(&thread.beats);
+}
+
+// A return address on a stack, and where.
+struct StackCall
+{
+    UINT32 at;
+    UINT32 value;
+};
+
+// Used by the watch thread only.
+StackCall g_before[MAX_STACK_CALLS];
+StackCall g_after[MAX_STACK_CALLS];
+bool g_changed[MAX_STACK_CALLS];
+
+// Read from the thread's live stack, outermost first.
+int ReadCalls(const WatchedThread &thread, StackCall *calls)
+{
+    int count = 0;
+    for (UINT32 at = thread.stackHigh; at > thread.stackLow && count < MAX_STACK_CALLS;)
+    {
+        at -= 4;
+        const UINT32 value = Read(at);
+        if (IsReturnAddress(value))
+        {
+            calls[count].at = at;
+            calls[count].value = value;
+            ++count;
+        }
+    }
+    return count;
+}
+
+void ReportStall(const WatchedThread &thread, DWORD idle)
+{
+    // Twice: what changed in between is where the thread is busy. Nothing changed: it waits.
+    const int beforeCount = ReadCalls(thread, g_before);
     Sleep(10);
-    memcpy(g_snapshot[1], reinterpret_cast<const void *>(g_stackLow), words * 4);
+    const int afterCount = ReadCalls(thread, g_after);
 
-    DbgPrint(
-        "[codxe][T4 SP] server watch: the Server thread has not linked an entity for %u ms. The calls on its stack "
-        "(%08X-%08X), outermost first, * = changed within 10 ms:\n",
-        idle, g_stackLow, g_stackHigh);
+    int changedCount = 0;
+    for (int a = 0, b = 0; a < afterCount; ++a)
+    {
+        while (b < beforeCount && g_before[b].at > g_after[a].at)
+            ++b;
+        g_changed[a] = !(b < beforeCount && g_before[b].at == g_after[a].at && g_before[b].value == g_after[a].value);
+        changedCount += g_changed[a] ? 1 : 0;
+    }
+
+    DbgPrint("[codxe][T4 SP] thread watch: the %s thread has not %s for %u ms, %d of the %d calls on its stack "
+             "(%08X-%08X) changed within 10 ms. Outermost first, * = changed:\n",
+             thread.name, thread.progress, idle, changedCount, afterCount, thread.stackLow, thread.stackHigh);
 
     UINT32 functions[MAX_FUNCTIONS];
     int functionCount = 0;
-    int printed = 0;
-    for (UINT32 i = words; i-- > 0 && printed < MAX_RETURN_ADDRESSES;)
+    int changedPrinted = 0;
+    bool skipped = false;
+    for (int a = 0; a < afterCount; ++a)
     {
-        const UINT32 value = g_snapshot[1][i];
-        if (!IsReturnAddress(value))
+        if (a >= MAX_OUTER_CALLS && !(g_changed[a] && changedPrinted < MAX_CHANGED_CALLS))
+        {
+            skipped = true;
             continue;
+        }
+        if (skipped)
+            DbgPrint("[codxe][T4 SP]   ...\n");
+        skipped = false;
+        if (a >= MAX_OUTER_CALLS)
+            ++changedPrinted;
+
+        const UINT32 value = g_after[a].value;
         const UINT32 call = Read(value - 4);
         const UINT32 function = FunctionStart(value);
         const UINT32 callee = IsBranchAndLink(call) ? BranchTarget(value - 4, call) : 0;
-        DbgPrint("[codxe][T4 SP]   %s %08X: returns to %08X in %08X, calls %08X\n",
-                 g_snapshot[0][i] != value ? "*" : " ", g_stackLow + i * 4, value, function, callee);
-        ++printed;
+        DbgPrint("[codxe][T4 SP]   %s %08X: returns to %08X in %08X, calls %08X\n", g_changed[a] ? "*" : " ",
+                 g_after[a].at, value, function, callee);
 
         bool seen = function == 0;
         for (int f = 0; f < functionCount && !seen; ++f)
@@ -218,67 +293,75 @@ void ReportStall(DWORD idle)
         if (!seen && functionCount < MAX_FUNCTIONS)
             functions[functionCount++] = function;
     }
+    if (skipped)
+        DbgPrint("[codxe][T4 SP]   ...\n");
 
-    DbgPrint("[codxe][T4 SP] server watch: text those functions use:\n");
+    DbgPrint("[codxe][T4 SP] thread watch: text those functions use:\n");
     for (int f = 0; f < functionCount; ++f)
     {
         DbgPrint("[codxe][T4 SP]     %08X\n", functions[f]);
         LogFunctionStrings(functions[f]);
     }
-    DbgPrint("[codxe][T4 SP] server watch: end of report\n");
+    DbgPrint("[codxe][T4 SP] thread watch: end of report\n");
 }
 
 DWORD WINAPI WatchThread(void *)
 {
-    LONG reportedAt = -1;
-    for (int reports = 0; reports < MAX_STALL_REPORTS;)
+    const int threadCount = 2;
+    WatchedThread *const threads[threadCount] = {&g_server, &g_main};
+    LONG reportedAt[threadCount] = {-1, -1};
+    int reports[threadCount] = {0, 0};
+    for (int done = 0; done < threadCount;)
     {
         Sleep(10);
-        const LONG beats = g_beats;
-        if (beats < 5 || beats == reportedAt)
-            continue; // the level is not running yet, or this stall was reported
-        const DWORD idle = GetTickCount() - g_lastBeat;
-        if (idle < STALL_MS)
-            continue;
-        reportedAt = beats;
-        ++reports;
-        ReportStall(idle);
+        done = 0;
+        for (int i = 0; i < threadCount; ++i)
+        {
+            WatchedThread &thread = *threads[i];
+            if (reports[i] == MAX_STALL_REPORTS)
+            {
+                ++done;
+                continue;
+            }
+            const LONG beats = thread.beats;
+            if (!thread.id || beats < thread.minBeats || beats == reportedAt[i])
+                continue;                           // not started yet, or this stall was reported
+            const DWORD lastBeat = thread.lastBeat; // before the time: a later beat must not make it negative
+            const DWORD idle = GetTickCount() - lastBeat;
+            if (idle < thread.stallMs)
+                continue;
+            reportedAt[i] = beats;
+            ++reports[i];
+            ReportStall(thread, idle);
+        }
     }
     return 0;
 }
 
-void WatchServerThread()
-{
-    volatile UINT32 marker = 0;
-    FindStack(reinterpret_cast<UINT32>(&marker));
-    const UINT32 bytes = g_stackHigh - g_stackLow;
-    g_snapshot[0] = static_cast<UINT32 *>(malloc(bytes));
-    g_snapshot[1] = static_cast<UINT32 *>(malloc(bytes));
-    g_serverThreadId = GetCurrentThreadId();
-    DbgPrint("[codxe][T4 SP] server watch: Server thread %08X, stack %08X-%08X\n", g_serverThreadId, g_stackLow,
-             g_stackHigh);
-
-    HANDLE thread = nullptr;
-    if (NT_SUCCESS(ExCreateThread(&thread, 0, nullptr, nullptr, WatchThread, nullptr, EX_CREATE_FLAG_TITLE_EXEC)))
-        CloseHandle(thread);
-    else
-        DbgPrint("[codxe][T4 SP] server watch: could not start the watch thread\n");
-}
-
 DWORD Sys_ThreadMain_Hook(UINT32 threadContext)
 {
-    if (threadContext == THREAD_CONTEXT_SERVER && !g_serverThreadId)
-        WatchServerThread();
+    if (threadContext == THREAD_CONTEXT_SERVER && !g_server.id)
+    {
+        StartWatching(g_server);
+
+        HANDLE thread = nullptr;
+        if (NT_SUCCESS(ExCreateThread(&thread, 0, nullptr, nullptr, WatchThread, nullptr, EX_CREATE_FLAG_TITLE_EXEC)))
+            CloseHandle(thread);
+        else
+            DbgPrint("[codxe][T4 SP] thread watch: could not start the watch thread\n");
+    }
     return Sys_ThreadMain_Detour.GetOriginal<Sys_ThreadMain_t>()(threadContext);
 }
 
 void SV_LinkEntity_Hook(gentity_s *gEnt)
 {
-    if (GetCurrentThreadId() == g_serverThreadId)
-    {
-        g_lastBeat = GetTickCount();
-        InterlockedIncrement(&g_beats);
-    }
+    const LONG thread = static_cast<LONG>(GetCurrentThreadId());
+    if (thread == g_server.id)
+        Beat(g_server);
+    else if (thread == g_main.id)
+        Beat(g_main);
+    else if (g_server.id && InterlockedCompareExchange(&g_mainFound, 1, 0) == 0)
+        StartWatching(g_main);
     SV_LinkEntity_Detour.GetOriginal<decltype(SV_LinkEntity)>()(gEnt);
 }
 
@@ -290,13 +373,17 @@ void longjmp_Hook(UINT32 *env, int value)
     {
         const UINT32 from = reinterpret_cast<UINT32>(_ReturnAddress());
         UINT32 to = 0;
-        for (int i = 0; i < 64 && !to; ++i)
+        if (IsReadable(reinterpret_cast<UINT32>(env)) && IsReadable(reinterpret_cast<UINT32>(env + 63)))
         {
-            if (IsReturnAddress(env[i]))
-                to = env[i];
+            for (int i = 0; i < 64 && !to; ++i)
+            {
+                if (IsReturnAddress(env[i]))
+                    to = env[i];
+            }
         }
-        DbgPrint("[codxe][T4 SP] longjmp %d on thread %08X: from %08X (in %08X) to %08X (in %08X)\n", count,
-                 GetCurrentThreadId(), from, FunctionStart(from), to, FunctionStart(to));
+        DbgPrint("[codxe][T4 SP] longjmp %d on thread %08X: from %08X (in %08X) to %08X (in %08X), jump buffer "
+                 "%08X\n",
+                 count, GetCurrentThreadId(), from, FunctionStart(from), to, FunctionStart(to), env);
     }
     longjmp_Detour.GetOriginal<longjmp_t>()(env, value);
 }
@@ -345,7 +432,7 @@ UINT32 FindLongjmp(UINT32 function, int depth, UINT32 *visited, int &visitedCoun
 }
 } // namespace
 
-server_watch::server_watch()
+thread_watch::thread_watch()
 {
     if (!Config::log_console)
         return;
@@ -358,13 +445,14 @@ server_watch::server_watch()
         Sys_ThreadMain_Detour.Install();
         SV_LinkEntity_Detour = Detour(SV_LinkEntity, SV_LinkEntity_Hook);
         SV_LinkEntity_Detour.Install();
-        DbgPrint("[codxe][T4 SP] log_console: Server thread watched (Sys_ThreadMain at %08X, SV_LinkEntity at %08X)\n",
+        DbgPrint("[codxe][T4 SP] log_console: Server and main threads watched (Sys_ThreadMain at %08X, "
+                 "SV_LinkEntity at %08X)\n",
                  threadMain, linkEntity);
     }
     else
     {
         DbgPrint("[codxe][T4 SP] log_console: %08X or %08X does not look like the start of Sys_ThreadMain or "
-                 "SV_LinkEntity, the Server thread is not watched\n",
+                 "SV_LinkEntity, the threads are not watched\n",
                  threadMain, linkEntity);
     }
 
@@ -373,9 +461,13 @@ server_watch::server_watch()
     const UINT32 longjmpAddress = FindLongjmp(reinterpret_cast<UINT32>(Scr_Error), 4, visited, visitedCount);
     if (longjmpAddress && LooksLikeFunctionStart(longjmpAddress))
     {
+        // Its code, to check that it is longjmp.
+        const UINT32 *code = reinterpret_cast<const UINT32 *>(longjmpAddress);
+        DbgPrint("[codxe][T4 SP] log_console: longjmps logged (longjmp at %08X: %08X %08X %08X %08X %08X %08X %08X "
+                 "%08X)\n",
+                 longjmpAddress, code[0], code[1], code[2], code[3], code[4], code[5], code[6], code[7]);
         longjmp_Detour = Detour(reinterpret_cast<void *>(longjmpAddress), longjmp_Hook);
         longjmp_Detour.Install();
-        DbgPrint("[codxe][T4 SP] log_console: longjmps logged (longjmp at %08X)\n", longjmpAddress);
     }
     else
     {
@@ -384,11 +476,17 @@ server_watch::server_watch()
     }
 }
 
-server_watch::~server_watch()
+thread_watch::~thread_watch()
 {
     longjmp_Detour.Remove();
     SV_LinkEntity_Detour.Remove();
     Sys_ThreadMain_Detour.Remove();
+}
+
+void thread_watch::OnProgress()
+{
+    if (static_cast<LONG>(GetCurrentThreadId()) == g_main.id)
+        Beat(g_main);
 }
 } // namespace sp
 } // namespace t4

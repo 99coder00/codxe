@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "console.h"
+#include "thread_watch.h"
 
 namespace t4
 {
@@ -482,6 +483,7 @@ void Scr_Error_Hook(UINT32 a, UINT32 b, UINT32 c, UINT32 d)
 // lines before a crash can still be read.
 void Com_PrintMessage_Hook(int channel, const char *msg, int error)
 {
+    thread_watch::OnProgress();
     if (msg && *msg)
         DbgPrint("%s", msg);
     Com_PrintMessage_Detour.GetOriginal<decltype(Com_PrintMessage)>()(channel, msg, error);
@@ -540,6 +542,8 @@ void console::OnUIRefresh()
 
 void console::frame()
 {
+    thread_watch::OnProgress();
+
     const connstate_t connectionState = clientConnectionStates[0];
 
     if (connectionState == CA_LOADING)
