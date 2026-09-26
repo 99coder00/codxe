@@ -80,7 +80,7 @@ static auto ClientScr_GetHeadIcon =
 
 static auto Com_Printf = reinterpret_cast<void (*)(int channel, const char *fmt, ...)>(0x8224F7A0);
 static auto Com_PrintError = reinterpret_cast<void (*)(int channel, const char *fmt, ...)>(0x8224F8C0);
-static auto Com_PrintMessage = reinterpret_cast<void (*)(int channel, const char *msg, int error)>(0x8224F804);
+static auto Com_PrintMessage = reinterpret_cast<void (*)(int channel, const char *msg, int error)>(0x8224F6A8);
 static auto CL_ConsolePrint = reinterpret_cast<void (*)(int localClientNum, int channel, const char *txt, int duration,
                                                         int pixelWidth, int flags)>(0x8214EA60);
 
