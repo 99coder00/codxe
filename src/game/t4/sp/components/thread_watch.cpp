@@ -332,50 +332,75 @@ int ReadCalls(UINT32 stackLow, UINT32 stackHigh, StackCall *calls)
 // A function saves the return address into its caller 8 bytes below the caller's stack pointer, and its own
 // frame starts with the caller's stack pointer (the back chain). So the return address at lower was saved by a
 // function called from the one whose return address is at upper when the back chain from lower + 8 leads to
-// upper + 8 (a hop or two: CoD Xe's hooks have frames with no return address into the game).
-bool IsCalledFrom(UINT32 lower, UINT32 upper, UINT32 stackLow, UINT32 stackHigh)
+// upper + 8: the stack links followed (more than one: CoD Xe's hooks have frames with no return address into the
+// game), 0 when it does not.
+int LinkHops(UINT32 lower, UINT32 upper, UINT32 stackLow, UINT32 stackHigh)
 {
     UINT32 stackPointer = lower + 8;
-    for (int hop = 0; hop < 4; ++hop)
+    for (int hop = 1; hop <= 4; ++hop)
     {
         if (stackPointer < stackLow || stackPointer >= stackHigh || (stackPointer & 3) != 0)
-            return false;
+            return 0;
         const UINT32 backChain = Read(stackPointer);
         if (backChain == upper + 8)
-            return true;
+            return hop;
         if (backChain <= stackPointer)
-            return false;
+            return 0;
         stackPointer = backChain;
     }
-    return false;
+    return 0;
 }
 
-// The next call below the one at index upper: it links back to it and returns into the function it called (or
-// one that function tail-calls), -1 when none does. linked: the first that only links back.
-int NextCall(int upper, int count, UINT32 stackLow, UINT32 stackHigh, int &linked)
+int CheckedDepth(int index, int count, UINT32 stackLow, UINT32 stackHigh);
+
+// The next call below the one at index upper, -1 when there is none. It links back to it and returns into the
+// function that call went to (or one that function tail-calls): an earlier call can leave a return address that
+// links back too in the space a function has not used yet, but it returns into another function. When the
+// function a direct call went to has no call of its own on the stack, the thread is in it. guessed, when the call
+// went through a pointer: of those that link back, the one linked most directly, then the one with the most
+// checked calls below it.
+int NextCall(int upper, int count, UINT32 stackLow, UINT32 stackHigh, bool guess, bool &guessed)
 {
     const UINT32 callee = Callee(g_after[upper].value);
-    linked = -1;
+    int best = -1;
+    int bestHops = 5;
+    int bestChecked = -1;
     for (int next = upper + 1; next < count; ++next)
     {
-        if (!IsCalledFrom(g_after[next].at, g_after[upper].at, stackLow, stackHigh))
+        const int hops = LinkHops(g_after[next].at, g_after[upper].at, stackLow, stackHigh);
+        if (hops == 0)
             continue;
-        if (linked < 0)
-            linked = next;
-        if (callee && RunsIn(g_after[next].value, callee, 2))
-            return next;
+        if (callee)
+        {
+            if (RunsIn(g_after[next].value, callee, 2))
+            {
+                guessed = false;
+                return next;
+            }
+            continue;
+        }
+        if (!guess || hops > bestHops)
+            continue;
+        const int checked = CheckedDepth(next, count, stackLow, stackHigh);
+        if (hops < bestHops || checked > bestChecked)
+        {
+            best = next;
+            bestHops = hops;
+            bestChecked = checked;
+        }
     }
-    return -1;
+    guessed = best >= 0;
+    return best;
 }
 
 // How many calls below the one at index each return into the function the one above them called.
 int CheckedDepth(int index, int count, UINT32 stackLow, UINT32 stackHigh)
 {
     int depth = 0;
-    int linked = -1;
+    bool guessed = false;
     while (depth < MAX_CHAIN)
     {
-        index = NextCall(index, count, stackLow, stackHigh, linked);
+        index = NextCall(index, count, stackLow, stackHigh, false, guessed);
         if (index < 0)
             break;
         ++depth;
@@ -384,10 +409,7 @@ int CheckedDepth(int index, int count, UINT32 stackLow, UINT32 stackHigh)
 }
 
 // The calls the thread is in, outermost first, from the return addresses on its stack (g_after), starting at the
-// outermost (its thread's start). Below a call, the next one links back to it and returns into the function it
-// called. An earlier call can leave a return address that links back too in the space a function has not used
-// yet, but it returns into another function. Guessed, when the call went through a pointer or none returns into
-// its function: of those that link back, the one with the most checked calls below it.
+// outermost (its thread's start).
 int WalkCalls(int count, UINT32 stackLow, UINT32 stackHigh)
 {
     if (count == 0)
@@ -397,25 +419,8 @@ int WalkCalls(int count, UINT32 stackLow, UINT32 stackHigh)
     g_chainGuessed[length++] = false;
     while (length < MAX_CHAIN)
     {
-        const int upper = g_chain[length - 1];
-        int linked = -1;
-        int next = NextCall(upper, count, stackLow, stackHigh, linked);
-        const bool guessed = next < 0;
-        if (guessed)
-        {
-            int mostChecked = -1;
-            for (int candidate = linked; candidate >= 0 && candidate < count; ++candidate)
-            {
-                if (!IsCalledFrom(g_after[candidate].at, g_after[upper].at, stackLow, stackHigh))
-                    continue;
-                const int checked = CheckedDepth(candidate, count, stackLow, stackHigh);
-                if (checked > mostChecked)
-                {
-                    mostChecked = checked;
-                    next = candidate;
-                }
-            }
-        }
+        bool guessed = false;
+        const int next = NextCall(g_chain[length - 1], count, stackLow, stackHigh, true, guessed);
         if (next < 0)
             break;
         g_chain[length] = next;
@@ -480,6 +485,30 @@ void LogCode(UINT32 function, int depth)
     }
 }
 
+// The start of each function the code of function calls (bl), to tell which they are.
+void LogCallees(UINT32 function)
+{
+    UINT32 end = function + 4;
+    while (end < function + 0x800 && end < CODE_END && Read(end) != PPC_MFLR_R12)
+        end += 4;
+    UINT32 logged[16];
+    int loggedCount = 0;
+    for (UINT32 at = function; at < end && loggedCount < 16; at += 4)
+    {
+        const UINT32 instruction = Read(at);
+        if (!IsBranchAndLink(instruction))
+            continue;
+        const UINT32 target = BranchTarget(at, instruction);
+        bool seen = !InCode(target);
+        for (int i = 0; i < loggedCount && !seen; ++i)
+            seen = logged[i] == target;
+        if (seen)
+            continue;
+        logged[loggedCount++] = target;
+        LogWords("the start of a function it calls", target, target + 0x30);
+    }
+}
+
 void PrintCall(int index, bool guessed)
 {
     const UINT32 value = g_after[index].value;
@@ -487,8 +516,8 @@ void PrintCall(int index, bool guessed)
              guessed ? "?" : " ", g_after[index].at, value, FunctionStart(value), Callee(value));
 }
 
-// everything: also the code of the innermost call, the stack around it and every return address on the stack
-// with the stack link above it, to work out by hand.
+// everything: also the code of the function it is in, the stack around the call to it and every return address on
+// the stack with the stack link above it, to work out by hand.
 void ReportThread(const char *name, UINT32 context, LONG id, UINT32 stackLow, UINT32 stackHigh, bool everything,
                   UINT32 *functions, int &functionCount)
 {
@@ -524,17 +553,14 @@ void ReportThread(const char *name, UINT32 context, LONG id, UINT32 stackLow, UI
     DbgPrint("[codxe][T4 SP] thread watch: %s thread (context %u, %08X, stack %08X-%08X): %s\n", name, context, id,
              stackLow, stackHigh, changedBlocks ? "runs" : "waits");
     DbgPrint("[codxe][T4 SP]   within 100 ms, %d of its %d return addresses and %d of its %d 256-byte stack blocks "
-             "changed, the lowest at %08X. The calls it is in, outermost first (* = changed, ? = guessed; the last "
-             "ones can be left from earlier calls):\n",
+             "changed, the lowest at %08X. The calls it is in, outermost first, the last one to the function it is "
+             "in (* = changed, ? = guessed: a call through a pointer):\n",
              changedCount, afterCount, changedBlocks, blocks, lowestChange);
-    int lastChecked = -1;
     for (int i = 0; i < chainLength; ++i)
     {
         g_inChain[g_chain[i]] = true;
         PrintCall(g_chain[i], g_chainGuessed[i]);
         AddFunction(FunctionStart(g_after[g_chain[i]].value), functions, functionCount);
-        if (!g_chainGuessed[i])
-            lastChecked = g_chain[i];
     }
 
     int othersPrinted = 0;
@@ -547,14 +573,17 @@ void ReportThread(const char *name, UINT32 context, LONG id, UINT32 stackLow, UI
         PrintCall(a, false);
     }
 
-    if (!everything || lastChecked < 0)
+    if (!everything || chainLength == 0)
         return;
 
-    // The innermost call that is sure: the function it went to, the call and the stack below it.
-    const StackCall &innermost = g_after[lastChecked];
-    DbgPrint("[codxe][T4 SP]   the innermost sure call, from %08X to %08X:\n", innermost.value - 4,
-             Callee(innermost.value));
-    LogCode(Callee(innermost.value), 2);
+    // The innermost call: the function it went to (the one the thread is in) and the starts of those it calls,
+    // the call and the stack around it.
+    const StackCall &innermost = g_after[g_chain[chainLength - 1]];
+    const UINT32 function = Callee(innermost.value);
+    DbgPrint("[codxe][T4 SP]   the innermost call, from %08X to %08X (0: through a pointer):\n", innermost.value - 4,
+             function);
+    LogCode(function, 2);
+    LogCallees(function);
     LogWords("the code around the call", innermost.value - 0x60, innermost.value + 0x18);
     const UINT32 stackPointer = innermost.at + 8; // of the function called
     LogWords("the stack below and above the stack pointer it was called with",
