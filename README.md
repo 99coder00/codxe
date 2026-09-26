@@ -88,6 +88,8 @@ Game-specific Xenia plugin configs and patches live under [`resources/xenia`](re
 
 Open `codxe.sln` in Visual Studio 2010 Ultimate Edition and build the `Release|Xbox 360` configuration.
 
+Or run `tools\build-codxe.bat`, which checks Visual Studio 2010, the Xbox 360 SDK and MSBuild, then builds the same configuration. On Windows 10 and 11, Visual Studio 2010 can refuse to open the project ("Project Target Framework Not Installed", `.NETFramework,Version=v4.0`) although Windows has .NET 4.8: the script registers .NET Framework 4 for Visual Studio 2010 (asking for administrator rights) before building. `tools\build-codxe.bat /fixonly` only does that, for building from Visual Studio.
+
 If you have `make` available, you can build the same configuration from the repository root:
 
 ```powershell
