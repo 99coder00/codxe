@@ -459,6 +459,33 @@ void CL_WritePacket_Hook(int localClientNum)
 
 // log_console: the game's console output also goes to the debug output (xenia.log), where the last
 // lines before a crash can still be read.
+//
+// Com_PrintMessage is taken from the code of Com_Printf (which CoD Xe calls already): it ends by
+// calling it with the formatted text. Its last call to a function near it, as vsnprintf and the
+// register save helpers are far away.
+void *FindComPrintMessage()
+{
+    const UINT32 *code = reinterpret_cast<const UINT32 *>(Com_Printf);
+    const UINT32 start = reinterpret_cast<UINT32>(code);
+    void *found = nullptr;
+    for (int i = 0; i < 128; ++i)
+    {
+        const UINT32 instruction = code[i];
+        if (instruction == 0x4E800020 || (instruction & 0xFC000003) == 0x48000000) // blr, b: the end
+            break;
+        if ((instruction & 0xFC000003) != 0x48000001) // bl
+            continue;
+        INT32 offset = static_cast<INT32>(instruction & 0x03FFFFFC);
+        if (offset & 0x02000000)
+            offset -= 0x04000000;
+        const UINT32 target = reinterpret_cast<UINT32>(&code[i]) + offset;
+        DbgPrint("[codxe][T4 SP] log_console: Com_Printf+0x%X calls %08X\n", i * 4, target);
+        if (target + 0x10000 > start && target < start + 0x10000)
+            found = reinterpret_cast<void *>(target);
+    }
+    return found;
+}
+
 void Com_PrintMessage_Hook(int channel, const char *msg, int error)
 {
     if (msg && *msg)
@@ -474,8 +501,22 @@ console::console()
 
     if (Config::log_console)
     {
-        Com_PrintMessage_Detour = Detour(Com_PrintMessage, Com_PrintMessage_Hook);
-        Com_PrintMessage_Detour.Install();
+        void *printMessage = FindComPrintMessage();
+        const UINT32 address = reinterpret_cast<UINT32>(printMessage);
+        if (address < 0x82000000 || address >= 0x83000000)
+        {
+            DbgPrint("[codxe][T4 SP] log_console: Com_PrintMessage not found, the console is not logged\n");
+        }
+        else
+        {
+            const UINT32 *code = static_cast<const UINT32 *>(printMessage);
+            DbgPrint("[codxe][T4 SP] log_console: Com_PrintMessage at %08X (symbols.h: %08X): %08X %08X %08X %08X "
+                     "%08X %08X\n",
+                     address, reinterpret_cast<UINT32>(Com_PrintMessage), code[0], code[1], code[2], code[3], code[4],
+                     code[5]);
+            Com_PrintMessage_Detour = Detour(printMessage, Com_PrintMessage_Hook);
+            Com_PrintMessage_Detour.Install();
+        }
     }
 }
 
