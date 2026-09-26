@@ -346,15 +346,19 @@ def _glyph(c: str) -> np.ndarray:
 
 
 def map_title(map_files, map_name: str) -> str:
-    """The map's name for its title card: the longname of its .arena file, else from ``map_name``."""
+    """The map's name for its title card: the longname of its entry in its .arena file (which can
+    list other maps too, with localization keys such as MENU_LEVEL_MAK), else from ``map_name``."""
     import re
 
     for rel in [n for n in (map_files.names("") if map_files is not None else []) if n.endswith(".arena")]:
         text = (map_files.read(rel) or b"").decode("latin-1", "replace")
-        found = re.search(r'longname\s+"([^"]+)"', text, re.I)
-        if found:
+        for block in re.findall(r"\{([^}]*)\}", text) or [text]:
+            entry_map = re.search(r'\bmap\s+"([^"]+)"', block, re.I)
+            found = re.search(r'longname\s+"([^"]+)"', block, re.I)
+            if not found or (entry_map and entry_map.group(1).lower() != map_name.lower()):
+                continue
             title = re.sub(r"\^.", "", found.group(1)).strip()
-            if title:
+            if title and not re.fullmatch(r"[A-Z0-9_]+", title):
                 return title
     return " ".join(word[:1].upper() + word[1:] for word in map_name.replace("_", " ").split())
 

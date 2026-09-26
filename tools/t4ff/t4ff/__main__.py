@@ -319,6 +319,10 @@ def _convert_map(args, paths, options, map_files, out_dir):
     extra = named_assets_zone(x360(), main_zone, [map_files, IwdLibrary(args.iwd)], convs[0].console_library)
     if extra is not None:
         main_zone = merge_zones(x360(), [main_zone, extra], log=lambda msg: None)
+    if convs[0].console_library is not None:
+        from .merge import drop_frontend_menus
+
+        drop_frontend_menus(x360(), main_zone, convs[0].console_library.is_stock_menu)
     prune_references(x360(), main_zone)
     if args.max_loaded_sounds or args.loaded_sound_memory:
         from .audio import LoadedXma

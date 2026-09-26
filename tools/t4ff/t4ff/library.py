@@ -20,7 +20,7 @@ following pointer of its parent, in the order the reader met those pointers
 from __future__ import annotations
 
 import os
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from . import progress
 from .fastfile import read_fastfile
@@ -34,6 +34,10 @@ class LibraryError(Exception):
 
 # Zones the game loads itself, before the map: what they have need not be in the map's fastfile.
 GAME_ZONES = ("code_pre_gfx", "code_post_gfx", "common", "patch")
+
+
+# Zones of the console's menus (the front end): their menus are the console's own too.
+UI_ZONES = ("ui", "patch_ui")
 
 
 def is_game_zone(path: str) -> bool:
@@ -70,6 +74,7 @@ class ConsoleLibrary:
         self._zones: Optional[List[Zone]] = None
         self._index: Dict[Tuple[str, str], Tuple[Zone, Node]] = {}
         self._game: Dict[Tuple[str, str], Tuple[Zone, Node]] = {}  # assets of the game's own zones among them
+        self._ui_menus: Set[str] = set()  # menus of the console's menu zones among them
 
     def _load(self):
         if self._zones is not None:
@@ -89,6 +94,7 @@ class ConsoleLibrary:
                 continue
             self._zones.append(zone)
             game = is_game_zone(f)
+            ui = os.path.splitext(os.path.basename(f))[0].lower() in UI_ZONES
             count = 0
             for node in zone.extra_root.walk():
                 origin = node.extra.get("origin")
@@ -99,6 +105,9 @@ class ConsoleLibrary:
                     count += self._index.setdefault((origin[1], name.lower()), (zone, node)) == (zone, node)
                     if game:
                         self._game.setdefault((origin[1], name.lower()), (zone, node))
+                if ui and name and origin[1] == "menuDef_t":
+                    # a reference too: the console's ui.ff has that menu
+                    self._ui_menus.add(name.lstrip(",").lower())
             self.log(f"console library: {os.path.basename(f)}: {count} assets")
         progress.step("Reading Xbox 360 fastfiles", len(files), len(files))
 
@@ -115,6 +124,14 @@ class ConsoleLibrary:
             return False
         self._load()
         return (rec_name, name.lstrip(",").lower()) in self._game
+
+    def is_stock_menu(self, name: str) -> bool:
+        """Whether the console's own zones (the game's or its menu zones) have a menu ``name``."""
+        if not self.paths:
+            return False
+        self._load()
+        name = name.lstrip(",").lower()
+        return name in self._ui_menus or ("menuDef_t", name) in self._game
 
     def find_in_game_zones(self, rec_name: str, name: str) -> Optional[Tuple[Zone, Node]]:
         """The asset as the game's own zones among the library have it (maps may carry changed

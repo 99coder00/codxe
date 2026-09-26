@@ -274,6 +274,14 @@ def prune_references(p: Platform, zone: Zone, types=("techset",), log=print) -> 
         keep.append((asset, ptr, target))
     if not removed:
         return 0
+    _set_asset_list(zone, keep)
+    log(f"removed {removed} unused technique set references")
+    return removed
+
+
+def _set_asset_list(zone: Zone, keep: List[Tuple[ZoneAsset, Optional[Ptr], Optional[Node]]]):
+    """Make the zone's asset list ``keep`` ((asset, its pointer, the node it loads)), a subset of it."""
+    node = zone.assets_node
     data = bytearray(8 * len(keep))
     relocs = {}
     children = []
@@ -294,8 +302,69 @@ def prune_references(p: Platform, zone: Zone, types=("techset",), log=print) -> 
     node.count = 2 * len(keep)
     node.segments = [(node.type, node.count, len(data), False)]
     zone.assets = assets
-    log(f"removed {removed} unused technique set references")
-    return removed
+
+
+def drop_frontend_menus(p: Platform, zone: Zone, is_stock_menu, log=print) -> List[str]:
+    """Remove the menu lists made of the mod's versions of the console's own menus.
+
+    PC mods restyle the main menu and the lobbies with their own versions of the stock menus
+    (``ui/main.menu``, ``ui/xboxlive_lobby.menu``), loaded with the mod. On the console the map's
+    zone is loaded in game, where they would only take memory and replace the console's menus
+    of the same names. A list goes when most of its menus are the console's and the map's scripts
+    open or precache none of them: script menus (a music box...) stay.
+    """
+    import re
+
+    from .scripts import _rawfiles, rawfile_text
+    from .zone import asset_name
+
+    node = zone.assets_node
+    if node is None:
+        return []
+    scripted = set()
+    for name, raw in _rawfiles(p, zone):
+        if name.lower().endswith((".gsc", ".csc")):
+            text = rawfile_text(raw).decode("latin-1")
+            scripted.update(m.lower() for m in re.findall(r'(?i)(?:openmenu|precachemenu|closemenu)\s*\(\s*"([^"]+)"', text))
+    candidates = {}
+    for i, asset in enumerate(zone.assets):
+        ptr = node.relocs.get(8 * i + 4)
+        target = ptr.node if ptr is not None and ptr.kind in ("follow", "insert") else None
+        if asset.type != "menulist" or target is None:
+            continue
+        menus = [(asset_name(p, n) or "").lstrip(",").lower() for n in target.walk() if n.type.name == "menuDef_t"]
+        stock = sum(1 for m in menus if is_stock_menu(m))
+        if menus and 2 * stock > len(menus) and not scripted.intersection(menus):
+            candidates[i] = {id(n) for n in target.walk()}
+    if not candidates:
+        return []
+    # a list something that stays points into stays too (the lists often share strings and items,
+    # e.g. the lobby points into the main menu): repeat until no more lists are kept
+    list_of = {member: i for i, members in candidates.items() for member in members}
+    pointers = []  # (list pointed into, list of the pointer or None)
+    for n in zone.extra_root.walk():
+        for ptr in n.relocs.values():
+            target = ptr.node if ptr.kind == "ref" else ptr.slot.owner if ptr.kind == "alias" and ptr.slot is not None else None
+            if target is not None and id(target) in list_of and list_of.get(id(n)) != list_of[id(target)]:
+                pointers.append((list_of[id(target)], list_of.get(id(n))))
+    while True:
+        kept = {i for i, source in pointers if i in candidates and source not in candidates}
+        if not kept:
+            break
+        for i in kept:
+            del candidates[i]
+    if not candidates:
+        return []
+    dropped = [zone.assets[i].name for i in sorted(candidates)]
+    keep = []
+    for i, asset in enumerate(zone.assets):
+        if i in candidates:
+            continue
+        ptr = node.relocs.get(8 * i + 4)
+        keep.append((asset, ptr, ptr.node if ptr is not None and ptr.kind in ("follow", "insert") else None))
+    _set_asset_list(zone, keep)
+    log(f"menus: left out {', '.join(dropped)}, the mod's versions of menus the console has (its main menu and lobbies)")
+    return dropped
 
 
 def _is_reference(p: Platform, node: Node) -> bool:

@@ -213,6 +213,14 @@ game's own zones, loaded before any map, which makes the conversion better:
   but most maps lack it, and the game then prints "'0' is not a valid value for
   dvar 'bg_shock_viewKickPeriod'"; CoD Xenon's `nazi_zombie_derberg` has it).
 
+With `patch_ui.ff` or `ui.ff` among them, the mod's own versions of the
+console's menus are left out: PC mods ship restyled main menus and lobbies
+(The Simpsons' `ui/main.menu` and `ui/xboxlive_lobby.menu`), which only take
+memory in the map's zone and would replace the console's menus of the same
+names. A menu list goes when most of its menus are the console's and the map's
+scripts open or precache none of them; menus the scripts use (a music box menu
+in `ui/scriptmenus`) stay, and so does a list another kept one points into.
+
 Some errors in the console log come from the PC map itself and are harmless:
 PC Aztec's zombie type names a `walther` sidearm zombies never draw, and
 `collision_geo_32x32x128` is precached but never used.

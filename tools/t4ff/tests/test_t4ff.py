@@ -442,6 +442,11 @@ class LoadScreenTests(unittest.TestCase):
             with open(os.path.join(tmp, "mod.arena"), "w") as f:
                 f.write('{\n\tmap "nazi_zombie_wh"\n\tlongname "^1Zombie ^7Woods"\n}\n')
             self.assertEqual(map_title(IwdLibrary([tmp]), "nazi_zombie_wh"), "Zombie Woods")
+            # an arena file listing other maps first (The Simpsons' lists the campaign's "mak")
+            with open(os.path.join(tmp, "mod.arena"), "w") as f:
+                f.write('{\n\tmap "mak"\n\tlongname "MENU_LEVEL_MAK"\n}\n{\n\tmap "simpsons"\n\tlongname "simpsons"\n}\n')
+            self.assertEqual(map_title(IwdLibrary([tmp]), "simpsons"), "simpsons")
+            self.assertEqual(map_title(IwdLibrary([tmp]), "other_map"), "Other Map")
 
     def test_load_zone_from_cod_xenon_template(self):
         """The load zone of a map is CoD Xenon's with the map's picture and names."""
@@ -474,6 +479,71 @@ class LoadScreenTests(unittest.TestCase):
 
 
 class MenuTests(unittest.TestCase):
+    def test_frontend_menus_left_out(self):
+        """The mod's own main menu and lobby (menu lists of the console's menus) are left out of
+        the map's zone, also when one points into the other; a list of script menus stays, and so
+        do lists it points into or whose menus the scripts open."""
+        from unittest import mock
+
+        import t4ff.scripts  # noqa: F401 (imported before asset_name is patched, it keeps the real one)
+        from t4ff.layout import TypeRef
+        from t4ff.merge import drop_frontend_menus
+        from t4ff.platforms import x360
+        from t4ff.zone import BLOCK_VIRTUAL, Node, Ptr, Zone, ZoneAsset
+
+        names = {}
+
+        def node(type_name, *children, name=None):
+            n = Node(TypeRef("record", type_name), 1, BLOCK_VIRTUAL)
+            n.children = list(children)
+            names[id(n)] = name
+            return n
+
+        def point(source, target, kind="ref"):
+            ptr = Ptr(kind, target) if kind == "ref" else Ptr(kind, slot=target)
+            ptr.owner, ptr.offset = source, 4 * len(source.relocs)
+            source.relocs[ptr.offset] = ptr
+
+        lists = {
+            "ui/main.menu": node("MenuList", node("menuDef_t", name="main"), node("menuDef_t", name="main_text"), node("char")),
+            "ui/xboxlive_lobby.menu": node("MenuList", node("menuDef_t", name="lobby"), node("menuDef_t", name="multi_popmenu"),
+                                           node("menuDef_t", name="main_solo")),
+            "ui/shared.menu": node("MenuList", node("menuDef_t", name="pausedmenu")),
+            "ui/scriptmenus/music.menu": node("MenuList", node("menuDef_t", name="music_box")),
+            "ui/briefing.menu": node("MenuList", node("menuDef_t", name="briefing")),
+        }
+        lobby = lists["ui/xboxlive_lobby.menu"]
+        point(lobby.children[0], lists["ui/main.menu"].children[2])  # the lobby shares a string of the main menu
+        item = node("itemDef_s")
+        lists["ui/main.menu"].children[1].children.append(item)
+        slot = Ptr("follow", item)
+        slot.owner = lists["ui/main.menu"].children[1]
+        point(lobby.children[1], slot, "alias")  # and an item
+        point(lists["ui/scriptmenus/music.menu"].children[0], lists["ui/shared.menu"].children[0])
+        rawfile = node("RawFile")
+        assets_node = Node(TypeRef("scalar", "uint", 4, 4), 0, BLOCK_VIRTUAL)
+        assets = []
+        for name, target in list(lists.items()) + [("maps/zombie.gsc", rawfile)]:
+            ptr = Ptr("follow", target)
+            ptr.owner, ptr.offset = assets_node, 8 * len(assets) + 4
+            assets_node.relocs[ptr.offset] = ptr
+            assets_node.children.append(target)
+            assets.append(ZoneAsset("rawfile" if name.endswith(".gsc") else "menulist", ptr, name))
+        assets_node.data = bytearray(8 * len(assets))
+        assets_node.count = 2 * len(assets)
+        zone = Zone(x360().name, [], assets, [], 0, 0, None, assets_node)
+        zone.extra_root = node("root", assets_node)
+        stock = {"main", "main_text", "lobby", "main_solo", "pausedmenu", "briefing"}
+        script = b'precacheMenu( "briefing" );\nself openMenu("music_box");'
+        with mock.patch("t4ff.zone.asset_name", lambda p, n: names.get(id(n))), \
+             mock.patch("t4ff.scripts._rawfiles", lambda p, z: [("maps/zombie.gsc", script)]), \
+             mock.patch("t4ff.scripts.rawfile_text", lambda raw: raw):
+            dropped = drop_frontend_menus(x360(), zone, lambda m: m in stock, log=lambda msg: None)
+        self.assertEqual(dropped, ["ui/main.menu", "ui/xboxlive_lobby.menu"])
+        self.assertEqual([a.name for a in zone.assets], ["ui/shared.menu", "ui/scriptmenus/music.menu", "ui/briefing.menu", "maps/zombie.gsc"])
+        self.assertEqual(sorted(assets_node.relocs), [4, 12, 20, 28])
+        self.assertEqual(assets_node.children, [lists["ui/shared.menu"], lists["ui/scriptmenus/music.menu"], lists["ui/briefing.menu"], rawfile])
+
     def test_dynamic_map_list(self):
         """The Nazi Zombies map list of CoD Xenon's patch_ui.ff: the stock rows stay, the 13 rows of
         their maps become 13 rows showing dvars (CoD Xe fills them from the usermaps folder), with

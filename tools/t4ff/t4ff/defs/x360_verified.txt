@@ -31,9 +31,13 @@ GfxDrawSurf
 GfxImage
 GfxImageLoadDef
 GfxLight
+GfxLightDef
 GfxLightGridColors
 GfxLightGridEntry
+GfxLightImage
 GfxLightRegion
+GfxLightRegionAxis
+GfxLightRegionHull
 GfxLightmapArray
 GfxPackedVertex
 GfxReflectionProbe
