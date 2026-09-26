@@ -203,6 +203,32 @@ def build_load_zone(p: Platform, template: Zone, map_name: str, rgba: Optional[n
     return Writer(p).write(template)
 
 
+def load_zone_picture(path: str) -> Optional[np.ndarray]:
+    """The loading screen picture of a console load zone (made like CoD Xenon's), as RGBA."""
+    from .assets import _decode_console_image
+    from .platforms import x360
+
+    p = x360()
+    zone = read_template(p, path)
+    if zone is None:
+        return None
+    image = _decode_console_image(p, _picture_image(p, zone), "loadscreen")
+    return rgba_of(image) if image is not None else None
+
+
+def write_preview(map_dir: str, map_name: str, log=print) -> bool:
+    """preview.bin (the map's picture in the Nazi Zombies map list, see menu.py) from the map's
+    loading screen, when the map folder has one."""
+    from .menu import PREVIEW_FILE, preview_file
+
+    rgba = load_zone_picture(os.path.join(map_dir, f"{map_name}_load.ff"))
+    if rgba is None:
+        return False
+    with open(os.path.join(map_dir, PREVIEW_FILE), "wb") as f:
+        f.write(preview_file(rgba))
+    return True
+
+
 def pc_picture(map_files, pc_load_zone: Optional[str], map_name: str) -> Optional[img.ImageData]:
     """The map's own PC loading screen: the loadscreen_* image of its PC load zone (or named after
     the map), from the map's files."""

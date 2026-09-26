@@ -287,6 +287,11 @@ def cmd_convert(args):
             write_zone(zone, os.path.join(out_dir, os.path.basename(files["load"])), args.jobs)
         elif not done:
             print("loading screen: none written (add CoD Xenon's _codxe\\t4 folder to the console fastfiles): the game shows a checkerboard while the map loads")
+        # the same picture for the map list (CoD Xe shows it next to the map's name)
+        from .loadscreen import write_preview
+
+        if write_preview(out_dir, name):
+            print("map list picture: preview.bin, from the loading screen")
     return 0
 
 
@@ -377,6 +382,20 @@ def cmd_menu(args):
                 f.write(row["image"] + "\n")
     if written:
         print(f"wrote the names and descriptions of {written} of CoD Xenon's maps (description.txt in their folders)")
+
+    # pictures of the other maps, from their loading screens
+    from .loadscreen import write_preview
+    from .menu import PREVIEW_FILE
+
+    pictures = []
+    for name in sorted(os.listdir(usermaps)) if os.path.isdir(usermaps) else []:
+        folder = os.path.join(usermaps, name)
+        if not os.path.isdir(folder) or any(os.path.exists(os.path.join(folder, f)) for f in ("preview.txt", PREVIEW_FILE)):
+            continue
+        if write_preview(folder, name):
+            pictures.append(name)
+    if pictures:
+        print(f"map list pictures (preview.bin) from the loading screens of {', '.join(pictures)}")
     return 0
 
 

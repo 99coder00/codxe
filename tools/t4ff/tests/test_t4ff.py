@@ -485,9 +485,9 @@ class MenuTests(unittest.TestCase):
 
         from t4ff.__main__ import main
         from t4ff.fastfile import read_fastfile
-        from t4ff.menu import MenuEditor
+        from t4ff.menu import COUNTER_DX, PREVIEW_SLOT, MenuEditor
         from t4ff.platforms import x360
-        from t4ff.zone import Reader
+        from t4ff.zone import Reader, asset_name
 
         patch_ui = sample("v020", "_codxe", "t4", "zone", "patch_ui.ff")
         patch = sample("v020", "_codxe", "t4", "zone", "patch.ff")
@@ -497,6 +497,15 @@ class MenuTests(unittest.TestCase):
                 shutil.copy(f, os.path.join(tmp, "zone"))
             for name in ("nazi_zombie_aztec", "nazi_zombie_wh"):
                 os.makedirs(os.path.join(tmp, "usermaps", name))
+            # a converted map installed with its loading screen: its picture for the list comes from it
+            from t4ff.loadscreen import build_load_zone, read_template, title_card
+
+            template = read_template(x360(), sample("v020", "_codxe", "t4", "usermaps", "mario", "mario_load.ff"))
+            card = title_card("Zombie Woods", 1280, 720)
+            with open(os.path.join(tmp, "usermaps", "nazi_zombie_wh", "nazi_zombie_wh_load.ff"), "wb") as f:
+                from t4ff.fastfile import write_fastfile
+
+                write_fastfile(f.name, ">", build_load_zone(x360(), template, "nazi_zombie_wh", card))
             for _ in range(2):  # a second run starts again from CoD Xenon's menu
                 with contextlib.redirect_stdout(io.StringIO()):
                     self.assertEqual(main(["--no-install", "menu", tmp]), 0)
@@ -506,6 +515,11 @@ class MenuTests(unittest.TestCase):
             with open(os.path.join(tmp, "usermaps", "nazi_zombie_aztec", "preview.txt")) as f:
                 self.assertEqual(f.read().strip(), "loadscreen_nazi_zombie_aztec")
             self.assertFalse(os.path.exists(os.path.join(tmp, "usermaps", "nazi_zombie_wh", "description.txt")))
+            self.assertFalse(os.path.exists(os.path.join(tmp, "usermaps", "nazi_zombie_aztec", "preview.bin")))  # has preview.txt
+            with open(os.path.join(tmp, "usermaps", "nazi_zombie_wh", "preview.bin"), "rb") as f:
+                preview = f.read()
+            magic, (version, width, height, _, fmt, size) = preview[:4], struct.unpack(">HHHHII", preview[4:20])
+            self.assertEqual((magic, version, width, height, fmt, size, len(preview)), (b"CXPV", 1, 512, 288, 0x12, 98304, 20 + 98304))
 
             p = x360()
             zone = Reader(p, read_fastfile(os.path.join(tmp, "zone", "patch_ui.ff"))[2]).load()
@@ -524,6 +538,20 @@ class MenuTests(unittest.TestCase):
                 self.assertIn(f'"setdvar" "ui_codxe_focus" "{k}"', editor.string(item, "onFocus"))
                 self.assertAlmostEqual(editor.rect(item)[1], 134 + 20 * k)
             self.assertEqual(names.count("image_codxe_map"), 3)
+            counter = next(item for item in editor.items if editor.expression(item, "textExp") == [("op", 31), ("str", "ui_codxe_maprange"), ("op", 1)])
+            last = editor.items[rows[-1]]
+            self.assertAlmostEqual(editor.rect(counter)[0], editor.rect(last)[0] + COUNTER_DX)
+            self.assertAlmostEqual(editor.rect(counter)[1], editor.rect(last)[1] + 1)
+            # the picture slot preview.bin is copied into: its size and format are those of preview.bin
+            slot = zone.assets[-1]
+            self.assertEqual((slot.type, slot.name), ("material", PREVIEW_SLOT))
+            image = next(n for n in slot.ptr.node.walk() if n.type.name == "GfxImage")
+            self.assertEqual(asset_name(p, image), PREVIEW_SLOT)
+            rec = p.record("GfxImage")
+            from t4ff.commands import find_field
+
+            get = lambda f, fmt: struct.unpack_from(">" + fmt, image.data, find_field(rec, f).offset)[0]  # noqa: E731
+            self.assertEqual((get("width", "H"), get("height", "H"), get("baseSize", "I")), (width, height, size))
             handlers = {}
             for node in zone.extra_root.walk():
                 if node.type.name == "ItemKeyHandler":

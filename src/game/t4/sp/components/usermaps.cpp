@@ -1,6 +1,8 @@
 #include "pch.h"
 #include "usermaps.h"
 
+#include "image/xenos_texture.h"
+
 #include <algorithm>
 #include <cstdlib>
 
@@ -22,6 +24,24 @@ const char *const USERMAPS_DIRECTORY = "usermaps";
 const char *const DVAR_FOCUS = "ui_codxe_focus";
 const char *const DVAR_SCROLL = "ui_codxe_scroll";
 
+// The picture of a map without one in the menu zone: its preview.bin (written by t4ff, a texture tiled for the
+// console) is copied into this image of the menu zone, whose material the preview shows.
+const char *const PREVIEW_SLOT = "codxe_map_preview";
+const char *const PREVIEW_FILE = "preview.bin";
+
+// preview.bin: this header (big endian), then the texture data.
+struct PreviewHeader
+{
+    char magic[4]; // "CXPV"
+    uint16_t version;
+    uint16_t width;
+    uint16_t height;
+    uint16_t reserved;
+    uint32_t format; // GPUTEXTUREFORMAT
+    uint32_t size;
+};
+static_assert(sizeof(PreviewHeader) == 20, "");
+
 // Played from their own menu rows, never listed twice.
 const char *const STOCK_MAPS[] = {"nazi_zombie_prototype", "nazi_zombie_asylum", "nazi_zombie_sumpf",
                                   "nazi_zombie_factory"};
@@ -29,6 +49,7 @@ const char *const STOCK_MAPS[] = {"nazi_zombie_prototype", "nazi_zombie_asylum",
 struct UsermapEntry
 {
     std::string name;
+    std::string directory;
     std::string displayName;
     std::string description;
     std::string image;
@@ -38,6 +59,7 @@ std::vector<UsermapEntry> usermaps;
 int listOffset = 0;
 int focusedRow = -1;
 bool dvarsCreated = false;
+std::string previewInSlot; // the map whose preview.bin the slot holds
 
 std::string Trim(const std::string &text)
 {
@@ -160,6 +182,7 @@ void ScanUsermaps()
         // preview.txt: a material the menu zone has (CoD Xenon's map pictures), for the preview.
         UsermapEntry entry;
         entry.name = name;
+        entry.directory = mapDirectory;
         const std::vector<std::string> description =
             ReadLines(filesystem::JoinPath(mapDirectory.c_str(), "description.txt"));
         entry.displayName = MenuText(description.empty() ? PrettyName(name) : description[0]);
@@ -200,13 +223,64 @@ void SetDvar(const char *name, const std::string &value)
     }
 }
 
+// Copy the map's preview.bin into the preview slot of the menu zone. Only a file made for this very image (its
+// size and texture format) is copied.
+bool LoadPreview(const UsermapEntry &entry)
+{
+    if (_stricmp(previewInSlot.c_str(), entry.name.c_str()) == 0)
+        return true;
+
+    const std::string path = filesystem::JoinPath(entry.directory.c_str(), PREVIEW_FILE);
+    if (!filesystem::FileExists(path.c_str()))
+        return false;
+
+    GfxImage *image = DB_FindXAssetHeader(ASSET_TYPE_IMAGE, PREVIEW_SLOT, false, 0).image;
+    if (!image || !image->name || _stricmp(image->name, PREVIEW_SLOT) != 0 || !image->texture.basemap)
+    {
+        DbgPrint("[codxe][T4 SP][UsermapList] The menu has no %s image (update the menu with t4ff)\n", PREVIEW_SLOT);
+        return false;
+    }
+
+    const std::string data = filesystem::ReadFileToString(path);
+    if (data.size() < sizeof(PreviewHeader))
+        return false;
+
+    PreviewHeader header;
+    memcpy(&header, data.data(), sizeof(header));
+    const uint32_t format = static_cast<uint32_t>(image->texture.basemap->Format.DataFormat);
+    if (memcmp(header.magic, "CXPV", 4) != 0 || header.width != image->width || header.height != image->height ||
+        header.format != format || header.size != image->baseSize || data.size() != sizeof(header) + header.size ||
+        (image->cardMemory.platform[0] > 0 && header.size > static_cast<uint32_t>(image->cardMemory.platform[0])))
+    {
+        DbgPrint("[codxe][T4 SP][UsermapList] %s does not fit the %s image\n", path.c_str(), PREVIEW_SLOT);
+        return false;
+    }
+
+    unsigned char *pixels = image::xenos_texture::GetTextureBase(image->texture.basemap, image->pixels);
+    if (!pixels)
+        return false;
+
+    memcpy(pixels, data.data() + sizeof(header), header.size);
+    previewInSlot = entry.name;
+    return true;
+}
+
 void PublishPreview()
 {
     const int index = listOffset + focusedRow;
     const bool valid = focusedRow >= 0 && index >= 0 && index < static_cast<int>(usermaps.size());
+    std::string picture;
+    if (valid)
+    {
+        // A picture of the menu zone (CoD Xenon's maps, preview.txt), else the map's own preview.bin.
+        picture = usermaps[index].image;
+        if (picture.empty() && LoadPreview(usermaps[index]))
+            picture = PREVIEW_SLOT;
+    }
+
     SetDvar("ui_codxe_maptitle", valid ? usermaps[index].displayName : "");
     SetDvar("ui_codxe_mapdesc", valid ? usermaps[index].description : "");
-    SetDvar("ui_codxe_mapimage", valid ? usermaps[index].image : "");
+    SetDvar("ui_codxe_mapimage", picture);
 }
 
 void PublishRows()
@@ -265,6 +339,7 @@ void UsermapList::OnMenuOpen(const char *menuName)
 
     // Maps copied onto the drive since the last visit show up without restarting.
     ScanUsermaps();
+    previewInSlot.clear();
     listOffset = 0;
     focusedRow = -1;
     SetDvar(DVAR_SCROLL, "0");
@@ -301,6 +376,7 @@ UsermapList::UsermapList()
     listOffset = 0;
     focusedRow = -1;
     dvarsCreated = false;
+    previewInSlot.clear();
 }
 
 UsermapList::~UsermapList()

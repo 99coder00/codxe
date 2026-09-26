@@ -32,6 +32,14 @@ ROWS = 13
 STOCK_MAPS = ("nazi_zombie_prototype", "nazi_zombie_asylum", "nazi_zombie_sumpf", "nazi_zombie_factory")
 FIRST_HIGHLIGHT = 100  # ui_highlight of the dynamic rows (the stock ones use 2 to 5)
 PREVIEW = "image_codxe_map"
+COUNTER_DX = 280.0  # the counter, right of the rows (250 wide)
+
+# The picture of the focused map when the menu zone has none of its own: CoD Xe copies the map's
+# preview.bin (a 512x288 DXT1 texture, tiled for the console) into this image, which the menu shows.
+PREVIEW_SLOT = "codxe_map_preview"
+PREVIEW_SIZE = (512, 288)
+PREVIEW_MAGIC = b"CXPV"
+PREVIEW_FILE = "preview.bin"
 KEY_LSHLDR, KEY_RSHLDR = 5, 6
 
 # menu expression operators (operationEnum)
@@ -149,10 +157,10 @@ class MenuEditor:
     def rect(self, item: Node) -> Tuple[float, float, float, float]:
         return struct.unpack_from(">4f", item.data, self.offset("window.rect"))
 
-    def move(self, item: Node, dy: float):
+    def move(self, item: Node, dy: float, dx: float = 0.0):
         for field in ("window.rect", "window.rectClient"):
-            off = self.offset(field) + 4
-            struct.pack_into(">f", item.data, off, struct.unpack_from(">f", item.data, off)[0] + dy)
+            for off, delta in ((self.offset(field), dx), (self.offset(field) + 4, dy)):
+                struct.pack_into(">f", item.data, off, struct.unpack_from(">f", item.data, off)[0] + delta)
 
     def expression(self, item: Node, field: str) -> List[Tuple[str, object]]:
         """The tokens of an item's expression: ("op", n), ("int", n), ("float", x), ("str", s)."""
@@ -381,8 +389,9 @@ def make_dynamic(p: Platform, zone: Zone, rows: int = ROWS) -> List[dict]:
     editor.set_expression(down, "visibleExp", [("op", OP_DVARINT), ("str", "ui_codxe_mapmore"), ("op", OP_RIGHTPAREN), ("op", OP_EQUALS), ("int", 1)])
     new_items.append(down)
 
-    # the position in the list ("14-26 / 40"), under the rows
-    counter = row_copy(hint, rows)
+    # the position in the list ("14-26 / 40"), right of the last row (under it is the Back button)
+    counter = row_copy(hint, rows - 1)
+    editor.move(counter, 0.0, COUNTER_DX)
     editor.set_string(counter, "text", None)
     editor.set_expression(counter, "textExp", _dvar_string("ui_codxe_maprange"))
     editor.set_expression(counter, "visibleExp", _not_empty("ui_codxe_maprange"))
@@ -410,7 +419,76 @@ def make_dynamic(p: Platform, zone: Zone, rows: int = ROWS) -> List[dict]:
     key_owner = next((item for item in editor.items if item.relocs.get(editor.offset("onKey")) is not None and item.relocs[editor.offset("onKey")].kind == "follow"), editor.items[0])
     editor.add_key_handler(key_owner, KEY_LSHLDR, f'"setdvar" "ui_codxe_scroll" "-{rows}" ; ')
     editor.add_key_handler(key_owner, KEY_RSHLDR, f'"setdvar" "ui_codxe_scroll" "{rows}" ; ')
+
+    add_preview_slot(p, zone, template["image"])
     return found
+
+
+def preview_texture(rgba):
+    """A picture as the preview slot's texture: 512x288 DXT1, one level, tiled."""
+    import numpy as np
+
+    from . import images as img
+    from .loadscreen import resize
+
+    width, height = PREVIEW_SIZE
+    picture = np.array(resize(rgba, width, height), dtype=np.uint8, copy=True)
+    picture[:, :, 3] = 255
+    bgra = picture[:, :, [2, 1, 0, 3]].tobytes()
+    return img.build_console_texture(img.ImageData(PREVIEW_SLOT, "A8R8G8B8", width, height, [bgra]), keep_mips=False)
+
+
+def preview_file(rgba) -> bytes:
+    """preview.bin: "CXPV", version, width, height, 0, GPU texture format, size (big endian), then the
+    texture as the console holds it, which CoD Xe copies as is into the preview slot."""
+    tex = preview_texture(rgba)
+    return PREVIEW_MAGIC + struct.pack(">HHHHII", 1, tex.width, tex.height, 0, tex.format.gpu, len(tex.pixels)) + tex.pixels
+
+
+def add_preview_slot(p: Platform, zone: Zone, template_material: Optional[str]):
+    """Add the material and image ``codxe_map_preview`` (a copy of a preview material of CoD
+    Xenon's, with a black 512x288 image of its own) at the end of the zone."""
+    import types
+
+    import numpy as np
+
+    from .assets import build_console_image
+    from .zone import ZoneAsset
+
+    material = next((a for a in zone.assets if a.type == "material" and a.name == template_material), None)
+    if material is None:
+        raise MenuError(f"no preview material {template_material!r} to copy")
+    source = material.ptr.target() if material.ptr.kind == "alias" else material.ptr.node
+    copy = clone(source)
+    rec = p.record("Material")
+    name_off = find_field(rec, "info").offset + find_field(p.record("MaterialInfo"), "name").offset
+    name = _string_node(PREVIEW_SLOT, next(n for n in source.walk() if n.string))
+    copy.relocs[name_off] = _ptr("follow", copy, name_off, name)
+    name.extra["ptr"] = copy.relocs[name_off]
+    _rebuild_children(copy)
+
+    tex = preview_texture(np.zeros((PREVIEW_SIZE[1], PREVIEW_SIZE[0], 4), dtype=np.uint8))
+    image = build_console_image(types.SimpleNamespace(dst=p), PREVIEW_SLOT, tex, 0, 3, 0)
+    table = copy.relocs[find_field(rec, "textureTable").offset].node
+    image_off = find_field(p.record("MaterialTextureDef"), "u").offset
+    image.insert = True
+    table.relocs[image_off] = _ptr("insert", table, image_off, image)
+    image.extra["ptr"] = table.relocs[image_off]
+    struct.pack_into(">I", table.data, image_off, 0xFFFFFFFE)
+    _rebuild_children(table)
+
+    # the zone's asset list: one more entry, loading the material (and its image)
+    assets = zone.assets_node
+    offset = len(assets.data)
+    assets.data += struct.pack(">iI", p.asset_type_index["material"], 0xFFFFFFFE)
+    assets.count += 2
+    assets.segments = [(assets.segments[0][0], assets.count, len(assets.data), False)]
+    ptr = _ptr("insert", assets, offset + 4, copy)
+    copy.insert = True
+    copy.extra["ptr"] = ptr
+    assets.relocs[offset + 4] = ptr
+    _rebuild_children(assets)
+    zone.assets.append(ZoneAsset("material", ptr, PREVIEW_SLOT))
 
 
 def localized_strings(p: Platform, zone: Zone) -> Dict[str, str]:
