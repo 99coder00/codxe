@@ -53,7 +53,8 @@ class Settings:
     no_mod: bool = False
     no_patch: bool = False
     load_zone: bool = True
-    loading_image: str = ""
+    loading_image: str = ""  # these two belong to one map: not saved
+    map_name: str = ""
     t4_layout: bool = True
     no_sounds: bool = False
     version: int = 3  # of the settings file: 2 made the t4 layout the default, 3 the automatic texture budget
@@ -83,8 +84,11 @@ class Settings:
     def save(self, path: str):
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
+            data = asdict(self)
+            for per_map in ("loading_image", "map_name"):
+                data.pop(per_map, None)
             with open(path, "w", encoding="utf-8") as f:
-                json.dump(asdict(self), f, indent=2)
+                json.dump(data, f, indent=2)
         except OSError:
             pass
 
@@ -128,6 +132,8 @@ def convert_args(s: Settings) -> List[str]:
         args += ["--xma-quality", str(s.xma_quality)]
     if s.max_loaded_sounds != DEFAULT_MAX_LOADED_SOUNDS:
         args += ["--max-loaded-sounds", str(s.max_loaded_sounds)]
+    if s.map_name.strip():
+        args += ["--name", s.map_name.strip()]
     if s.loading_image:
         args += ["--loading-image", s.loading_image]
     for flag in ("mono_sounds", "mono_streams", "no_mips", "no_compress", "no_mod", "no_patch", "no_sounds"):
@@ -301,6 +307,7 @@ def main():
         "output": tk.StringVar(value=settings.output),
         "xma_encoder": tk.StringVar(value=settings.xma_encoder),
         "loading_image": tk.StringVar(value=settings.loading_image),
+        "map_name": tk.StringVar(value=settings.map_name),
         "texture_budget": tk.StringVar(value=budget_text(settings.texture_budget)),
         "memory_target": tk.StringVar(value=f"{settings.memory_target:g}"),
         "max_texture_size": tk.StringVar(value=str(settings.max_texture_size or TEXTURE_SIZES[0])),
@@ -352,9 +359,10 @@ def main():
     )
     path_row(files, 1, "Output folder", "output", [("Folder...", ask_dir("output", "Output folder (a _codxe folder is created inside)"))])
     path_row(files, 2, "xma2encode.exe", "xma_encoder", [("File...", ask_file("xma_encoder", "xma2encode.exe (Xbox 360 XDK)", [("Programs", "*.exe"), ("All files", "*")]))])
+    path_row(files, 3, "Map name (optional)", "map_name", [])
     path_row(
         files,
-        3,
+        4,
         "Loading picture (optional)",
         "loading_image",
         [("File...", ask_file("loading_image", "Loading screen picture", [("Pictures", "*.png *.jpg *.jpeg *.bmp *.tga *.dds *.webp *.iwi"), ("All files", "*")]))],
@@ -460,6 +468,8 @@ def main():
     open_button.pack(side="left", padx=2)
     setup_button = ttk.Button(actions, text="Set up dependencies")
     setup_button.pack(side="left", padx=2)
+    menu_button = ttk.Button(actions, text="Update game menu...")
+    menu_button.pack(side="left", padx=2)
     stop_button = ttk.Button(actions, text="Stop", state="disabled")
     stop_button.pack(side="left", padx=2)
     # what the conversion is doing: the step, its count and a bar
@@ -498,6 +508,7 @@ def main():
             output=var["output"].get().strip(),
             xma_encoder=var["xma_encoder"].get().strip(),
             loading_image=var["loading_image"].get().strip(),
+            map_name=var["map_name"].get().strip(),
             console_zones=list(zones_box.get(0, "end")),
             iwds=list(iwds_box.get(0, "end")),
             texture_budget=budget_text(var["texture_budget"].get()),
@@ -512,7 +523,7 @@ def main():
 
     def set_running(running: bool, text: str):
         state["running"] = running
-        for button in (convert_button, inspect_button, setup_button):
+        for button in (convert_button, inspect_button, setup_button, menu_button):
             button.configure(state="disabled" if running else "normal")
         stop_button.configure(state="normal" if running and state["process"] is not None else "disabled")
         status.configure(text=text)
@@ -635,6 +646,22 @@ def main():
 
         start(convert_args(s), "Converting...", done)
 
+    def update_menu():
+        """Make the Nazi Zombies map list of CoD Xenon's patch_ui.ff list the usermaps folder."""
+        chosen = filedialog.askdirectory(title="The _codxe\\t4 folder the game reads (with zone and usermaps)")
+        if not chosen:
+            return
+
+        def done(ok):
+            if ok:
+                messagebox.showinfo(
+                    "t4ff",
+                    "The map list now shows every map of the usermaps folder, 13 at a time (LB / RB: a page).\n\n"
+                    "It needs the CoD Xe build with the usermaps list (src/game/t4/sp/components/usermaps.cpp).",
+                )
+
+        start(["menu", chosen], "Updating the menu...", done)
+
     def inspect():
         chosen = filedialog.askopenfilename(title="Fastfile to inspect (PC or Xbox 360)", filetypes=[("Fastfiles", "*.ff"), ("All files", "*")])
         if chosen:
@@ -707,6 +734,14 @@ def main():
     inspect_button.configure(command=inspect)
     open_button.configure(command=open_output)
     setup_button.configure(command=set_up)
+    menu_button.configure(command=update_menu)
+
+    def new_usermap(*_):
+        # the name and the loading picture belong to the previous map
+        var["map_name"].set("")
+        var["loading_image"].set("")
+
+    var["input"].trace_add("write", new_usermap)
     stop_button.configure(command=stop)
 
     def close():

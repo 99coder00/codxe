@@ -6,6 +6,7 @@
 #include "components/gsc.h"
 #include "components/scr_parser.h"
 #include "components/ui.h"
+#include "components/usermaps.h"
 #include "main.h"
 
 namespace t4
@@ -29,6 +30,7 @@ T4_SP_Plugin::T4_SP_Plugin()
     RegisterModule(new GSCFields());
     RegisterModule(new scr_parser());
     RegisterModule(new ui());
+    RegisterModule(new UsermapList());
 }
 
 } // namespace sp

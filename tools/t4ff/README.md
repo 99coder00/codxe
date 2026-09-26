@@ -119,6 +119,7 @@ Useful options:
 | `--xma-quality N` | xma2encode quality (1-100, default 60). |
 | `--no-mod`, `--no-patch` | Do not merge `mod.ff` / `<map>_patch.ff` into the map fastfile. |
 | `--no-load-zone` | Do not write `<map>_load.ff`, the loading screen (see [Loading screen](#loading-screen)). |
+| `--name TEXT` | The map's name in the map list and on its title card (default: the `longname` of its `.arena` file, else from its file name). Written to `description.txt` in the map's folder. |
 | `--loading-image PATH` | Picture for the loading screen (`.png`, `.jpg`, `.bmp`, `.tga`, `.dds`, `.webp` or `.iwi`, any size: scaled to 1280x720). |
 | `--no-t4-layout` | Write `_codxe/usermaps/<map>` instead of `_codxe/t4/usermaps/<map>`. CoD Xe reads `_codxe\t4` when it exists (its newer layout, used by CoD Xenon's 0.2.0 maps) and then ignores `_codxe\usermaps`, so this is only for a console without a `_codxe\t4` folder. |
 | `--allow-unverified` | Also convert asset types whose console layout was not verified. Expect crashes. |
@@ -129,6 +130,7 @@ Other commands:
 
 ```sh
 python -m t4ff info <fastfile> [--list]   # blocks, asset counts, asset names (PC or console)
+python -m t4ff menu <game>/_codxe/t4       # the map list shows every map of usermaps (see below)
 python -m t4ff roundtrip <fastfile>...    # read + rewrite, checks the result is byte identical
 ```
 
@@ -140,7 +142,8 @@ game opens the fastfile of a zone, CoD Xe serves
 active map from its `sounds` folder). So the folder and the fastfile must carry
 the map's name exactly; `t4ff` names them after the PC map fastfile.
 
-**How it appears in the menu.** The map list is part of CoD Xenon's
+**How it appears in the menu.** See [Map list in the menu](#map-list-in-the-menu)
+for a list of every map of the `usermaps` folder. Otherwise, the map list is part of CoD Xenon's
 `_codxe/t4/zone/patch_ui.ff` (one button per map that runs `devmap <map>`) and
 `patch.ff` (map names and descriptions). It lists the maps of their release. A map converted by `t4ff` with one of these names (e.g.
 `nazi_zombie_aztec`) is started from that button. Any other map is started from
@@ -213,6 +216,30 @@ game's own zones, loaded before any map, which makes the conversion better:
 Some errors in the console log come from the PC map itself and are harmless:
 PC Aztec's zombie type names a `walther` sidearm zombies never draw, and
 `collision_geo_32x32x128` is precached but never used.
+
+### Map list in the menu
+
+CoD Xenon's Nazi Zombies menu lists the four stock maps and a fixed set of
+converted maps, as many as the screen holds. With the CoD Xe build that lists
+the usermaps folder (`src/game/t4/sp/components/usermaps.cpp`, see
+[docs/t4.md](/docs/t4.md#usermaps-list)), run once:
+
+```sh
+python -m t4ff menu "<game>/_codxe/t4"      # or Update game menu... in the window
+```
+
+It keeps CoD Xenon's `zone/patch_ui.ff` as `patch_ui.ff.orig` and rewrites the
+menu's map list: the stock maps stay, then 13 rows show the maps of the
+`usermaps` folder, sorted by name. The D-pad scrolls past the first and last
+rows, LB / RB move a page, the line under the rows tells where you are
+("14-26 / 40"), and the right side shows the focused map's name, description and,
+for CoD Xenon's maps, their picture. New maps show up the next time the menu
+opens, without running it again.
+
+A map's name and description come from `description.txt` in its folder (first
+line, next lines): `convert` writes the name (`--name`, the "Map name" field),
+`menu` writes those of CoD Xenon's maps from their menu (and `preview.txt`,
+their picture).
 
 ### Loading screen
 

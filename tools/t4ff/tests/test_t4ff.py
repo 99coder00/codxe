@@ -438,7 +438,7 @@ class LoadScreenTests(unittest.TestCase):
         from t4ff.loadscreen import map_title
 
         with tempfile.TemporaryDirectory() as tmp:
-            self.assertEqual(map_title(IwdLibrary([tmp]), "nazi_zombie_wh"), "nazi zombie wh")
+            self.assertEqual(map_title(IwdLibrary([tmp]), "nazi_zombie_wh"), "Nazi Zombie Wh")
             with open(os.path.join(tmp, "mod.arena"), "w") as f:
                 f.write('{\n\tmap "nazi_zombie_wh"\n\tlongname "^1Zombie ^7Woods"\n}\n')
             self.assertEqual(map_title(IwdLibrary([tmp]), "nazi_zombie_wh"), "Zombie Woods")
@@ -471,6 +471,65 @@ class LoadScreenTests(unittest.TestCase):
         image = _decode_console_image(p, _picture_image(p, zone), "loadscreen")
         rgba = dxt.decode(image.levels[0], image.width, image.height, image.format)
         self.assertLess(np.abs(rgba[:, :, :3].astype(int) - card[:, :, :3]).mean(), 3)
+
+
+class MenuTests(unittest.TestCase):
+    def test_dynamic_map_list(self):
+        """The Nazi Zombies map list of CoD Xenon's patch_ui.ff: the stock rows stay, the 13 rows of
+        their maps become 13 rows showing dvars (CoD Xe fills them from the usermaps folder), with
+        scroll catchers, a counter, the preview of the focused map and LB / RB paging."""
+        import contextlib
+        import io
+        import shutil
+        import struct
+
+        from t4ff.__main__ import main
+        from t4ff.fastfile import read_fastfile
+        from t4ff.menu import MenuEditor
+        from t4ff.platforms import x360
+        from t4ff.zone import Reader
+
+        patch_ui = sample("v020", "_codxe", "t4", "zone", "patch_ui.ff")
+        patch = sample("v020", "_codxe", "t4", "zone", "patch.ff")
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "zone"))
+            for f in (patch_ui, patch):
+                shutil.copy(f, os.path.join(tmp, "zone"))
+            for name in ("nazi_zombie_aztec", "nazi_zombie_wh"):
+                os.makedirs(os.path.join(tmp, "usermaps", name))
+            for _ in range(2):  # a second run starts again from CoD Xenon's menu
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(main(["--no-install", "menu", tmp]), 0)
+            self.assertTrue(os.path.exists(os.path.join(tmp, "zone", "patch_ui.ff.orig")))
+            with open(os.path.join(tmp, "usermaps", "nazi_zombie_aztec", "description.txt")) as f:
+                self.assertEqual(f.read().splitlines()[0], "Aztec")
+            with open(os.path.join(tmp, "usermaps", "nazi_zombie_aztec", "preview.txt")) as f:
+                self.assertEqual(f.read().strip(), "loadscreen_nazi_zombie_aztec")
+            self.assertFalse(os.path.exists(os.path.join(tmp, "usermaps", "nazi_zombie_wh", "description.txt")))
+
+            p = x360()
+            zone = Reader(p, read_fastfile(os.path.join(tmp, "zone", "patch_ui.ff"))[2]).load()
+            editor = MenuEditor(p, zone)
+            actions = [editor.string(item, "action") or "" for item in editor.items]
+            self.assertEqual(sorted(a.split("devmap ")[1].split('"')[0] for a in actions if "devmap" in a), sorted(["nazi_zombie_asylum", "nazi_zombie_factory", "nazi_zombie_prototype", "nazi_zombie_sumpf"]))
+            names = [editor.string(item, "window.name") for item in editor.items]
+            rows = [names.index(f"codxe_map{k}") for k in range(13)]
+            self.assertEqual(rows, sorted(rows))
+            self.assertLess(names.index("codxe_map_up"), rows[0])
+            self.assertGreater(names.index("codxe_map_down"), rows[-1])
+            for k, index in enumerate(rows):
+                item = editor.items[index]
+                self.assertEqual(editor.expression(item, "textExp"), [("op", 31), ("str", f"ui_codxe_map{k}"), ("op", 1)])
+                self.assertIn(f'"exec" "vstr ui_codxe_mapcmd{k}"', actions[index])
+                self.assertIn(f'"setdvar" "ui_codxe_focus" "{k}"', editor.string(item, "onFocus"))
+                self.assertAlmostEqual(editor.rect(item)[1], 134 + 20 * k)
+            self.assertEqual(names.count("image_codxe_map"), 3)
+            handlers = {}
+            for node in zone.extra_root.walk():
+                if node.type.name == "ItemKeyHandler":
+                    handlers.setdefault(struct.unpack_from(">i", node.data, 0)[0], []).append(bytes(node.relocs[4].target().data))
+            self.assertIn(b'"setdvar" "ui_codxe_scroll" "-13" ; \0', handlers[5])
+            self.assertIn(b'"setdvar" "ui_codxe_scroll" "13" ; \0', handlers[6])
 
 
 class GuiTests(unittest.TestCase):
@@ -517,6 +576,13 @@ class GuiTests(unittest.TestCase):
             self.assertEqual(gui.Settings.load(path), s)
             self.assertEqual(gui.Settings.load(os.path.join(tmp, "missing.json")), gui.Settings())
             self.assertTrue(gui.check_settings(gui.Settings()))
+            # the name and the loading picture belong to one map: not kept for the next
+            gui.Settings(input="x", map_name="Zombie Woods", loading_image="woods.png").save(path)
+            loaded = gui.Settings.load(path)
+            self.assertEqual((loaded.map_name, loaded.loading_image), ("", ""))
+        args = gui.convert_args(gui.Settings(input="in", output="out", map_name="Zombie Woods", loading_image="woods.png"))
+        self.assertEqual(args[args.index("--name") + 1], "Zombie Woods")
+        self.assertEqual(args[args.index("--loading-image") + 1], "woods.png")
 
     def test_t4_layout_is_the_default(self):
         """CoD Xe reads _codxe\\t4 once it exists: the window and the command line write there

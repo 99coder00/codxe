@@ -227,7 +227,7 @@ def pc_picture(map_files, pc_load_zone: Optional[str], map_name: str) -> Optiona
     return None
 
 
-def write_load_zone(map_name: str, out_dir: str, console_files: List[str], map_files, pc_load_zone: Optional[str] = None, picture_path: str = "", jobs: int = 0, log=print) -> bool:
+def write_load_zone(map_name: str, out_dir: str, console_files: List[str], map_files, pc_load_zone: Optional[str] = None, picture_path: str = "", jobs: int = 0, log=print, title: str = "") -> bool:
     """Write ``<map>_load.ff`` into ``out_dir`` from a CoD Xenon load zone among ``console_files``
     (fastfiles, see library.library_files). False when there is none to make it from."""
     from .fastfile import write_fastfile
@@ -253,7 +253,7 @@ def write_load_zone(map_name: str, out_dir: str, console_files: List[str], map_f
             if picture is not None:
                 rgba, source = resize(rgba_of(picture), width, height), f"the map's own {picture.name}"
             else:
-                title = map_title(map_files, map_name)
+                title = title or map_title(map_files, map_name)
                 rgba, source = title_card(title, width, height), f'a title card "{title}" (the map has no loading screen picture: give one with --loading-image)'
 
         out = build_load_zone(p, template, map_name, rgba)
@@ -330,7 +330,7 @@ def map_title(map_files, map_name: str) -> str:
             title = re.sub(r"\^.", "", found.group(1)).strip()
             if title:
                 return title
-    return map_name.replace("_", " ")
+    return " ".join(word[:1].upper() + word[1:] for word in map_name.replace("_", " ").split())
 
 
 def title_card(title: str, width: int, height: int) -> np.ndarray:

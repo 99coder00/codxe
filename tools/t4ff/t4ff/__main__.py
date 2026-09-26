@@ -258,6 +258,16 @@ def cmd_convert(args):
         options = dataclasses.replace(options, texture_budget=budget)
     write_zone(main_zone, os.path.join(out_dir, f"{name}.ff"), args.jobs, out)
 
+    # the map's name in the Nazi Zombies map list (CoD Xe reads the first line of description.txt)
+    from .loadscreen import map_title
+
+    title = args.name.strip() or map_title(map_files, name)
+    description = os.path.join(out_dir, "description.txt")
+    if args.name.strip() or not os.path.exists(description):
+        with open(description, "w", encoding="latin-1", errors="replace", newline="\r\n") as f:
+            f.write(title + "\n")
+        print(f'map list name: "{title}" ({description}; change it there or with --name)')
+
     if args.load_zone:
         # CoD Xe serves <map>_load.ff as the loading screen zone (CoD Xenon's 0.2.0 maps have one):
         # made like theirs, with the map's picture
@@ -266,7 +276,7 @@ def cmd_convert(args):
 
         progress.step("Writing the loading screen")
         try:
-            done = write_load_zone(name, out_dir, library_files(args.console_zone, name), map_files, files.get("load"), args.loading_image, args.jobs)
+            done = write_load_zone(name, out_dir, library_files(args.console_zone, name), map_files, files.get("load"), args.loading_image, args.jobs, title=title)
         except LoadScreenError as e:
             print(f"warning: {e}")
             done = False
@@ -318,6 +328,56 @@ def _convert_map(args, paths, options, map_files, out_dir):
     if fixed:
         print(f"sound aliases: the type in the flags of {fixed} aliases set to their sound file's")
     return main_zone, getattr(convs[0], "planned_texture_bytes", 0)
+
+
+def cmd_menu(args):
+    """Make the Nazi Zombies map list of CoD Xenon's patch_ui.ff dynamic (see menu.py)."""
+    import shutil
+
+    from .menu import MenuError, description_text, localized_strings, make_dynamic
+
+    root = args.folder
+    zone_dir = os.path.join(root, "zone") if os.path.isdir(os.path.join(root, "zone")) else root
+    target = os.path.join(zone_dir, "patch_ui.ff")
+    original = target + ".orig"
+    if not os.path.exists(original):
+        if not os.path.exists(target):
+            print(f"error: {target} not found (give CoD Xenon's _codxe\\t4 folder)")
+            return 1
+        shutil.copyfile(target, original)
+        print(f"kept CoD Xenon's menu as {original}")
+    endian, _, data = read_fastfile(original)
+    zone = Reader(x360(), data).load()
+    try:
+        rows = make_dynamic(x360(), zone, args.rows)
+    except MenuError as e:
+        print(f"error: {e}")
+        return 1
+    write_zone(zone, target)
+    print(f"{target}: the map list shows the maps of the usermaps folder, {args.rows} at a time (LB / RB: a page)")
+
+    # names, descriptions and pictures of CoD Xenon's maps, whose rows the list replaces
+    usermaps = os.path.join(root, "usermaps")
+    patch = os.path.join(zone_dir, "patch.ff")
+    strings = localized_strings(x360(), Reader(x360(), read_fastfile(patch)[2]).load()) if os.path.exists(patch) else {}
+    written = 0
+    for row in rows:
+        folder = os.path.join(usermaps, row["map"])
+        if not os.path.isdir(folder):
+            continue
+        title = strings.get((row["title"] or "").lstrip("@"), row["map"])
+        description = strings.get((row["description"] or "").lstrip("@"), "")
+        path = os.path.join(folder, "description.txt")
+        if not os.path.exists(path):
+            with open(path, "w", encoding="latin-1", newline="\r\n") as f:
+                f.write(description_text(title, description))
+            written += 1
+        if row["image"]:
+            with open(os.path.join(folder, "preview.txt"), "w", encoding="latin-1") as f:
+                f.write(row["image"] + "\n")
+    if written:
+        print(f"wrote the names and descriptions of {written} of CoD Xenon's maps (description.txt in their folders)")
+    return 0
 
 
 def cmd_setup(args):
@@ -376,6 +436,7 @@ def main(argv=None):
     p.add_argument("--no-patch", action="store_true", help="do not merge the usermap's <map>_patch.ff into the map fastfile")
     p.add_argument("--t4-layout", action=argparse.BooleanOptionalAction, default=True, help="write _codxe/t4/usermaps/<map>, CoD Xe's newer layout (default; CoD Xe reads _codxe/t4 when it exists, e.g. with CoD Xenon's 0.2.0 maps, and then ignores _codxe/usermaps). --no-t4-layout: _codxe/usermaps/<map>")
     p.add_argument("--load-zone", action=argparse.BooleanOptionalAction, default=True, help="write <map>_load.ff, the loading screen (default; made like CoD Xenon's, whose 0.2.0 maps all have one)")
+    p.add_argument("--name", default="", help="the map's name in the map list and on its title card (default: the longname of its .arena file, else from the map's file name)")
     p.add_argument("--loading-image", default="", help="picture for the loading screen (.png, .jpg, .bmp, .tga, .dds or .iwi; default: CoD Xenon's for the map, the map's own, else a title card)")
     p.add_argument("--no-load", action="store_true", help=argparse.SUPPRESS)  # the default now
     p.add_argument("--no-compress", action="store_true", help="keep uncompressed textures uncompressed (they are DXT compressed by default)")
@@ -385,6 +446,11 @@ def main(argv=None):
     p.add_argument("--loaded-sound-memory", type=float, default=DEFAULT_LOADED_SOUND_MIB, help=f"memory of the loaded sounds in MiB: beyond it the longest are streamed (default {DEFAULT_LOADED_SOUND_MIB}; CoD Xenon's maps have up to 35; 0: no limit)")
     p.add_argument("--jobs", type=int, default=0, help="sounds encoded / compression threads at a time (default: one per processor)")
     p.set_defaults(func=cmd_convert)
+
+    p = sub.add_parser("menu", help="make the Nazi Zombies map list of CoD Xenon's patch_ui.ff show every map of the usermaps folder (needs the CoD Xe build with the usermaps list)")
+    p.add_argument("folder", help="the _codxe\\t4 folder the game reads (with zone\\patch_ui.ff and usermaps)")
+    p.add_argument("--rows", type=int, default=13, help="rows the list shows at a time (default 13, as CoD Xenon's)")
+    p.set_defaults(func=cmd_menu)
 
     p = sub.add_parser("gui", help="open the converter window")
     p.set_defaults(func=cmd_gui)

@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "ui.h"
 #include "console.h"
+#include "usermaps.h"
 
 #include <cstdlib>
 #include <cstdio>
@@ -29,6 +30,7 @@ void UI_Refresh_Hook(int localClientNum)
 {
     UI_Refresh_Detour.GetOriginal<decltype(UI_Refresh)>()(localClientNum);
     console::OnUIRefresh();
+    UsermapList::OnUIRefresh();
     DrawBranding(localClientNum);
 }
 
@@ -86,6 +88,9 @@ void Menus_OpenByName_Hook(UiContext *dc, const char *menuName)
         || std::strcmp(menuName, "main_online") == 0 // coop mission select
     )
         Campaign_UnlockAll();
+
+    // Before the menu opens, so its rows show the maps from the first frame.
+    UsermapList::OnMenuOpen(menuName);
 
     Menus_OpenByName_Detour.GetOriginal<decltype(Menus_OpenByName)>()(dc, menuName);
 }
