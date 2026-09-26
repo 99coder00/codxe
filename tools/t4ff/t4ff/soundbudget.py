@@ -27,6 +27,9 @@ LOADED_SOUND_LIMIT = 1600
 # Room left for the loaded sounds of the zones loaded before the map (fewer than 68: CoD Xenon's
 # Aztec loads with 1532, the PC one with 1576 does not).
 DEFAULT_MAX_LOADED_SOUNDS = 1500
+# Memory of the loaded sounds (MiB): CoD Xenon's maps have up to 35 MiB. Streamed sounds keep their
+# quality and leave the memory to the textures.
+DEFAULT_LOADED_SOUND_MIB = 32
 
 SAT_STREAMED = 2
 
@@ -38,6 +41,11 @@ def _sound_content(node: Node) -> bytes:
         if not n.string:
             h.update(bytes(n.data))
     return h.digest()
+
+
+def _sound_bytes(node: Node) -> int:
+    """Memory of a loaded sound's XMA data."""
+    return sum(len(n.data) for n in node.walk() if (n.extra.get("origin") or ("", "", ""))[1:] == ("snd_asset", "data"))
 
 
 def _loaded_sounds(p: Platform, zone: Zone) -> List[Node]:
@@ -94,9 +102,10 @@ def sync_alias_types(p: Platform, zone: Zone) -> int:
     return changed
 
 
-def limit_loaded_sounds(p: Platform, zone: Zone, limit: int, streams: Dict[str, object], sounds_dir: str, log=print) -> dict:
-    """Bring the loaded sounds of ``zone`` down to ``limit``. ``streams`` gives the XMA2 stream
-    (audio.XmaStream) of each converted loaded sound by name, for the ones to stream."""
+def limit_loaded_sounds(p: Platform, zone: Zone, limit: int, streams: Dict[str, object], sounds_dir: str, log=print, max_bytes: int = 0) -> dict:
+    """Bring the loaded sounds of ``zone`` down to ``limit`` (0: no limit) and their memory to
+    ``max_bytes`` (0: no limit). ``streams`` gives the XMA2 stream (audio.XmaStream) of each
+    converted loaded sound by name, for the ones to stream."""
     from .audio import write_sdns
 
     stats = {"shared": 0, "streamed": 0, "stream_bytes": 0}
@@ -107,10 +116,15 @@ def limit_loaded_sounds(p: Platform, zone: Zone, limit: int, streams: Dict[str, 
     stats["shared"] = dedupe_nested_assets(p, zone, log=lambda msg: None, key_of=same_sound)
     sounds = _loaded_sounds(p, zone)
     count = len(sounds)
+    size = sum(_sound_bytes(s) for s in sounds)
     if stats["shared"]:
         log(f"loaded sounds: {stats['shared']} identical sounds shared")
-    if count <= limit:
-        stats["count"] = count
+
+    def within() -> bool:
+        return (not limit or count <= limit) and (not max_bytes or size <= max_bytes)
+
+    if within():
+        stats.update(count=count, bytes=size)
         return stats
 
     rec = p.record("SoundFile")
@@ -159,7 +173,7 @@ def limit_loaded_sounds(p: Platform, zone: Zone, limit: int, streams: Dict[str, 
 
     candidates = sorted((s for s in sounds if duration(s) > 0), key=duration, reverse=True)
     for sound in candidates:
-        if count <= limit:
+        if within():
             break
         owners = sound_files(sound)
         if owners is None:
@@ -189,14 +203,16 @@ def limit_loaded_sounds(p: Platform, zone: Zone, limit: int, streams: Dict[str, 
                 sf.children.append(node)
             sf.relocs[prime_off] = _pointer("null", sf, prime_off)
         count -= 1
+        size -= _sound_bytes(sound)
         stats["streamed"] += 1
         stats["stream_bytes"] += len(data)
     # the aliases carry the type of their sound file too
     sync_alias_types(p, zone)
-    stats["count"] = count
+    stats.update(count=count, bytes=size)
+    limits = " and ".join(([f"{limit} loaded sounds"] if limit else []) + ([f"{max_bytes / 1048576:.0f} MiB"] if max_bytes else []))
     log(
         f"loaded sounds: {stats['streamed']} of the longest are streamed from the map's sounds folder "
-        f"({stats['stream_bytes'] / 1048576:.1f} MiB) to stay within {limit} loaded sounds"
-        + ("" if count <= limit else f"; {count} remain, more than the limit: the map may not load")
+        f"({stats['stream_bytes'] / 1048576:.1f} MiB) to stay within {limits}"
+        + ("" if not limit or count <= limit else f"; {count} remain, more than the limit: the map may not load")
     )
     return stats

@@ -8,8 +8,10 @@ keeps them small enough for the console's memory:
   (GfxWorld, collision, paths), effects, weapons, materials, sounds, menus,
   scripts, string tables and localized strings.
 - **Textures** are rebuilt as tiled Xenos textures with their mip chains.
-  Uncompressed textures are DXT compressed. An optional memory budget drops the
-  top mip levels of the largest textures first.
+  Uncompressed textures are DXT compressed. Each map keeps as much texture
+  quality as fits in memory: the texture budget is what a memory target based on
+  CoD Xenon's working maps leaves, and only when a map is over it do its largest
+  textures lose top mip levels. Stock textures use the console's own versions.
 - **Sounds** are encoded to XMA: loaded sounds into the fastfile (XMA1, as the
   console's in-memory sounds are), streamed sounds to `sounds/*.xma` files.
   Both can be downsampled or downmixed to save memory.
@@ -24,7 +26,9 @@ keeps them small enough for the console's memory:
   console has no mod zone) and `<map>_patch.ff` are merged into `<map>.ff`.
   Scripts of later zones win (`_patch` over the map, `mod.ff` over both), and
   assets several zones define (including textures nested in materials) are
-  loaded once. `<map>_load.ff` (loading screen) is optional (`--load-zone`).
+  loaded once.
+- **A loading screen** (`<map>_load.ff`) made like CoD Xenon's, with the map's
+  own picture, one you give, or a title card with the map's name.
 
 Every written fastfile is read back with the console loading rules before the
 tool reports success.
@@ -93,8 +97,7 @@ cd tools/t4ff
 python -m t4ff convert "C:/.../mods/nazi_zombie_aztec" -o out \
     --xma-encoder "C:/Program Files (x86)/Microsoft Xbox 360 SDK/bin/win32/xma2encode.exe" \
     --console-zone "D:/codxe-t4-fastfiles-v0.2.0/_codxe/t4" \
-    --iwd "C:/Program Files (x86)/Activision/Call of Duty - World at War/main" \
-    --texture-budget 64 --sound-rate 32000
+    --iwd "C:/Program Files (x86)/Activision/Call of Duty - World at War/main"
 
 # Then copy out/_codxe into the World at War game folder (merge with the existing _codxe folder).
 ```
@@ -104,8 +107,10 @@ Useful options:
 | Option | Effect |
 | --- | --- |
 | `--console-zone PATH` | Xbox 360 fastfile (or folder of them) to copy console only assets from: technique sets, and stock images, sounds, models... the PC map expects from the game. Repeatable; the first one that has an asset wins. See [Console fastfiles](#console-fastfiles). |
-| `--iwd PATH` | Extra `.iwd` files or folders to look up `images/*.iwi` and sounds (e.g. the PC game's `main` folder for stock images a map embeds). |
-| `--texture-budget MIB` | Texture memory budget for the map and its mod together, including textures copied from console fastfiles. Largest textures lose their top mip level first. |
+| `--iwd PATH` | The PC game's own files (e.g. its `main` folder): stock textures a map uses and no console fastfile has are converted from them. Stock textures the console fastfiles have keep the console's version (Treyarch sized them for the console), which leaves the memory to the map's own textures. |
+| `--texture-budget MIB` | Texture memory for the map and its mod together, `0` for no limit. Default `auto`: what `--memory-target` leaves, at most 96 MiB. Largest textures lose their top mip level first; the world's lightmaps keep theirs. |
+| `--memory-target MIB` | Memory the map may use once loaded, for the automatic texture budget (default 200: CoD Xenon's 13 maps use 148 to 220). The map is converted, measured and, when over, converted again with less texture memory. |
+| `--loaded-sound-memory MIB` | Memory of the loaded sounds (default 32; CoD Xenon's maps have up to 35). Beyond it the longest become streamed sounds, which keep their quality. 0: no limit. |
 | `--max-texture-size N` | Cap texture dimensions. |
 | `--no-mips` | Drop all mip levels (about 25% less memory, but textures shimmer at a distance). |
 | `--no-compress` | Keep uncompressed textures uncompressed. |
@@ -113,7 +118,8 @@ Useful options:
 | `--stream-rate HZ`, `--mono-streams` | Resample or downmix streamed sounds. |
 | `--xma-quality N` | xma2encode quality (1-100, default 60). |
 | `--no-mod`, `--no-patch` | Do not merge `mod.ff` / `<map>_patch.ff` into the map fastfile. |
-| `--load-zone` | Also write `<map>_load.ff`, the loading screen zone (CoD Xenon's 0.2.0 maps have one). Its technique sets stay name references to the game's own, as in CoD Xenon's: the zone is unloaded once the map runs. |
+| `--no-load-zone` | Do not write `<map>_load.ff`, the loading screen (see [Loading screen](#loading-screen)). |
+| `--loading-image PATH` | Picture for the loading screen (`.png`, `.jpg`, `.bmp`, `.tga`, `.dds`, `.webp` or `.iwi`, any size: scaled to 1280x720). |
 | `--no-t4-layout` | Write `_codxe/usermaps/<map>` instead of `_codxe/t4/usermaps/<map>`. CoD Xe reads `_codxe\t4` when it exists (its newer layout, used by CoD Xenon's 0.2.0 maps) and then ignores `_codxe\usermaps`, so this is only for a console without a `_codxe\t4` folder. |
 | `--allow-unverified` | Also convert asset types whose console layout was not verified. Expect crashes. |
 | `--max-loaded-sounds N` | Loaded (in memory) sounds the map may have, default 1500. The console holds 1600, the game's own included; a map with more stops with "Exceeded limit of 1600 'loaded_sound' assets". Identical sounds are shared, then the longest ones become streamed sounds played from the map's `sounds` folder. 0: no limit. |
@@ -208,13 +214,35 @@ Some errors in the console log come from the PC map itself and are harmless:
 PC Aztec's zombie type names a `walther` sidearm zombies never draw, and
 `collision_geo_32x32x128` is precached but never used.
 
+### Loading screen
+
+While a map loads, the game shows the material `$levelbriefing` of the map's
+load zone, and a checkerboard when there is none. The load zone is made from one
+of CoD Xenon's (found among the console fastfiles: all of their 0.2.0 maps have
+the same one, with a 1280x720 picture) with, in this order:
+
+1. the picture given with `--loading-image`;
+2. CoD Xenon's own loading screen, when they converted the same map;
+3. the map's own PC loading screen (`images/loadscreen_<map>.iwi`);
+4. a title card with the map's name (from its `.arena` file), for maps without
+   one: Zombie Woods (2008) has none.
+
+Without any of CoD Xenon's load zones among the console fastfiles, the map's PC
+`_load.ff` is converted when it has one.
+
 ### Memory
 
-The tool prints the memory each fastfile needs once loaded. CoD Xenon's own
-conversion of `nazi_zombie_aztec` needs about 157 MiB (64 MiB of textures, 35 MiB
-of in-memory sounds). Textures and loaded sounds are the parts you can shrink:
-`--texture-budget`, `--max-texture-size`, `--sound-rate 32000` and
-`--mono-sounds` trade quality for memory.
+The tool prints the memory the map needs once loaded. CoD Xenon's 13 maps of
+their 0.2.0 release need 148 to 220 MiB (textures up to 99 MiB, loaded sounds up
+to 35 MiB); CoD Xe does not change the game's memory, so these are the known
+good values. By default each map gets what fits: its textures get what the
+`--memory-target` (200 MiB) leaves after everything else, at most 96 MiB, and
+keep full quality when that is enough (Zombie Woods, Aztec: about 130 MiB with
+every texture at full size). A map over the target is converted again with
+less texture memory, its largest textures losing top mip levels first; the
+world's lightmaps keep theirs. Loaded sounds beyond `--loaded-sound-memory`
+(32 MiB) are streamed, the longest first. `--max-texture-size`,
+`--sound-rate 32000` and `--mono-sounds` trade more quality for memory.
 
 Besides memory, the console has a fixed number of slots per asset type, the
 game's own assets included. Loaded sounds are the tight one: 1600 slots, which

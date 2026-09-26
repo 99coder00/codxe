@@ -6,6 +6,7 @@ environment variable and are skipped otherwise:
     $T4FF_SAMPLES/pc/nazi_zombie_aztec.ff, mod.ff, nazi_zombie_aztec_load.ff, nazi_zombie_aztec_patch.ff,
                     nazi_zombie_aztec.iwd
     $T4FF_SAMPLES/x360/patch.ff, patch_ui.ff, sounds/para_egg.xma, nazi_zombie_aztec.ff (CoD Xenon's)
+    $T4FF_SAMPLES/v020/_codxe/t4/...: CoD Xenon's 0.2.0 fastfiles package
 
 Run with ``python -m unittest discover -s tests`` from tools/t4ff.
 """
@@ -366,6 +367,112 @@ class LibraryTests(unittest.TestCase):
             self.assertEqual(short(library_files([t4], "zm_unknown")), everything)
 
 
+class MemoryTests(unittest.TestCase):
+    def test_automatic_texture_budget(self):
+        """Textures get what the memory target leaves: a map that fits is converted once, one over
+        it again with less, down to a floor."""
+        from t4ff.memory import MARGIN_MIB, MIB, MIN_TEXTURE_BUDGET_MIB, next_texture_budget
+
+        # Zombie Woods: 48 MiB besides 96 MiB of textures fits 200 MiB
+        self.assertIsNone(next_texture_budget(144 * MIB, 200 * MIB, 96 * MIB, 96 * MIB))
+        # 130 MiB besides the textures: 26 MiB over, the textures lose it
+        self.assertEqual(next_texture_budget(226 * MIB, 200 * MIB, 96 * MIB, 96 * MIB), (70 - MARGIN_MIB) * MIB)
+        # textures smaller than the budget: from what they are
+        self.assertEqual(next_texture_budget(210 * MIB, 200 * MIB, 60 * MIB, 96 * MIB), (50 - MARGIN_MIB) * MIB)
+        # not below the floor, and no further once there
+        self.assertEqual(next_texture_budget(300 * MIB, 200 * MIB, 96 * MIB, 96 * MIB), MIN_TEXTURE_BUDGET_MIB * MIB)
+        self.assertIsNone(next_texture_budget(250 * MIB, 200 * MIB, 24 * MIB, MIN_TEXTURE_BUDGET_MIB * MIB))
+
+    def test_block_sizes_of_a_written_zone(self):
+        import struct
+
+        from t4ff.memory import block_sizes
+
+        self.assertEqual(block_sizes(struct.pack(">9I", 100, 0, 1, 2, 3, 4, 5, 6, 7) + b"data"), [1, 2, 3, 4, 5, 6, 7])
+
+    def test_stock_textures_use_the_console_versions(self):
+        """A texture from the map's own files is converted; a stock one (only in the PC game's
+        files) is referenced when the game's zones have it, copied from the console fastfiles
+        when they have it, converted from the PC game's files only otherwise."""
+        from t4ff.assets import image_choice
+
+        class Library:
+            def in_game_zones(self, rec, name):
+                return name == "in_common"
+
+            def find(self, rec, name):
+                return ("zone", "node") if name in ("in_common", "in_a_map") else None
+
+        class Conv:
+            pass
+
+        conv = Conv()
+        conv.console_library = Library()
+        conv.stock_library = None
+        own, stock = object(), object()
+        conv._image_sources = {"custom": own, "in_common": None, "in_a_map": None, "pc_only": None, "nowhere": None}
+        conv._stock_images = {"in_common": stock, "in_a_map": stock, "pc_only": stock, "nowhere": None}
+        node = None
+        self.assertEqual(image_choice(conv, node, "custom"), ("own", own))
+        self.assertEqual(image_choice(conv, node, "in_common"), ("game", None))
+        self.assertEqual(image_choice(conv, node, "in_a_map"), ("library", None))
+        self.assertEqual(image_choice(conv, node, "pc_only"), ("stock", stock))
+        self.assertEqual(image_choice(conv, node, "nowhere"), ("missing", None))
+
+
+class LoadScreenTests(unittest.TestCase):
+    def test_title_card(self):
+        """A map without a loading screen picture gets its name in red on a dark picture."""
+        from t4ff.loadscreen import title_card
+
+        card = title_card("Zombie Woods", 1280, 720)
+        self.assertEqual(card.shape, (720, 1280, 4))
+        self.assertTrue((card[:, :, 3] == 255).all())
+        self.assertLess(int(card[:40, :, :3].max()), 64)  # dark around the title
+        red = (card[:, :, 0] > 150) & (card[:, :, 1] < 60)
+        rows = np.nonzero(red.any(axis=1))[0]
+        self.assertTrue(red.sum() > 1000 and 250 < rows.mean() < 470)  # the title, in the middle
+
+    def test_map_title(self):
+        from t4ff.images import IwdLibrary
+        from t4ff.loadscreen import map_title
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(map_title(IwdLibrary([tmp]), "nazi_zombie_wh"), "nazi zombie wh")
+            with open(os.path.join(tmp, "mod.arena"), "w") as f:
+                f.write('{\n\tmap "nazi_zombie_wh"\n\tlongname "^1Zombie ^7Woods"\n}\n')
+            self.assertEqual(map_title(IwdLibrary([tmp]), "nazi_zombie_wh"), "Zombie Woods")
+
+    def test_load_zone_from_cod_xenon_template(self):
+        """The load zone of a map is CoD Xenon's with the map's picture and names."""
+        from t4ff import dxt
+        from t4ff.assets import _decode_console_image
+        from t4ff.fastfile import read_fastfile
+        from t4ff.loadscreen import _picture_image, build_load_zone, read_template, title_card
+        from t4ff.platforms import x360
+        from t4ff.zone import Reader
+
+        path = sample("v020", "_codxe", "t4", "usermaps", "mario", "mario_load.ff")
+        p = x360()
+        template = read_template(p, path)
+        self.assertIsNotNone(template)
+        card = title_card("Zombie Woods", 1280, 720)
+        out = build_load_zone(p, template, "nazi_zombie_wh", card)
+        zone = Reader(p, out).load()
+        self.assertEqual(
+            [a.name for a in zone.assets],
+            [",2d", ",$victorybackdrop", "defeat", "$defeatbackdrop", "loadscreen_nazi_zombie_wh", "$levelbriefing", "nazi_zombie_wh_load"],
+        )
+        _, _, original = read_fastfile(path)
+        sizes = Reader(p, original).load().block_sizes
+        self.assertEqual(sizes[2], zone.block_sizes[2])  # the pictures: same size and format
+        longer = 2 * (len("nazi_zombie_wh") - len("mario"))  # the image and raw file names
+        self.assertTrue(longer - 4 <= zone.block_sizes[4] - sizes[4] <= longer + 4)
+        image = _decode_console_image(p, _picture_image(p, zone), "loadscreen")
+        rgba = dxt.decode(image.levels[0], image.width, image.height, image.format)
+        self.assertLess(np.abs(rgba[:, :, :3].astype(int) - card[:, :, :3]).mean(), 3)
+
+
 class GuiTests(unittest.TestCase):
     def test_cli_runs_in_a_separate_process(self):
         """The window runs the converter as a child process (it keeps the window responsive)."""
@@ -429,19 +536,29 @@ class GuiTests(unittest.TestCase):
             self.assertTrue(gui.Settings.load(path).t4_layout)
             gui.Settings(input="x", t4_layout=False).save(path)  # unchecked since
             self.assertFalse(gui.Settings.load(path).t4_layout)
+            # the automatic texture budget replaces a fixed one saved before it existed
+            with open(path, "w") as f:
+                json.dump({"input": "x", "texture_budget": 48.0, "version": 2}, f)
+            self.assertEqual(gui.Settings.load(path).texture_budget, "auto")
+            gui.Settings(input="x", texture_budget="64").save(path)
+            self.assertEqual(gui.Settings.load(path).texture_budget, "64")
+        self.assertNotIn("--texture-budget", gui.convert_args(gui.Settings(input="in", output="out")))
+        self.assertEqual(gui.convert_args(gui.Settings(input="in", output="out", texture_budget="0"))[-2:], ["--texture-budget", "0"])
 
         # the command line
         from t4ff import __main__ as cli
 
         seen = []
         original = cli.cmd_convert
-        cli.cmd_convert = lambda args: seen.append(args.t4_layout)
+        cli.cmd_convert = lambda args: seen.append((args.t4_layout, args.texture_budget))
         try:
-            for extra in ([], ["--no-t4-layout"], ["--t4-layout"]):
+            for extra in ([], ["--no-t4-layout"], ["--t4-layout", "--texture-budget", "48"]):
                 main(["--no-install", "convert", "in", "-o", "out"] + extra)
+            with self.assertRaises(SystemExit), open(os.devnull, "w") as devnull, __import__("contextlib").redirect_stderr(devnull):
+                main(["--no-install", "convert", "in", "-o", "out", "--texture-budget", "lots"])
         finally:
             cli.cmd_convert = original
-        self.assertEqual(seen, [True, False, True])
+        self.assertEqual(seen, [(True, "auto"), (False, "auto"), (True, "48")])
 
 
 class IwiTests(unittest.TestCase):

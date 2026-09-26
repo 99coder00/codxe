@@ -432,7 +432,11 @@ class ConvertOptions:
     texture_budget: int = 0
     keep_mips: bool = True
     compress_textures: bool = True
+    # the map's own .iwd files / folders (images/<name>.iwi of its textures)
     iwd_paths: List[str] = field(default_factory=list)
+    # the PC game's own files (--iwd, e.g. its main folder): their images are stock textures, used
+    # only when no console version of them is at hand (the game's zones, the console library)
+    stock_paths: List[str] = field(default_factory=list)
     reference_missing_images: bool = True
     # sounds: xma2encode wrapper (audio.XmaEncoder) for loaded sounds, their rate cap / downmix,
     # and the output folder holding the converted streamed sounds (sounds/<dir>/<name>.xma)
@@ -493,10 +497,12 @@ class ZoneConverter:
         self.hooks: Dict[str, Callable] = {}
         self.image_drop_levels: Dict[str, int] = {}
         self.library = None
-        if self.options.iwd_paths:
+        self.stock_library = None
+        if self.options.iwd_paths or self.options.stock_paths:
             from .images import IwdLibrary
 
-            self.library = IwdLibrary(self.options.iwd_paths)
+            self.library = IwdLibrary(self.options.iwd_paths) if self.options.iwd_paths else None
+            self.stock_library = IwdLibrary(self.options.stock_paths) if self.options.stock_paths else None
         # console assets copied from other Xbox 360 fastfiles (shared by the zones of one run)
         self.script_strings = list(zone.script_strings)
         self.console_library = None

@@ -18,7 +18,8 @@ import zipfile
 
 from . import progress
 from .fastfile import read_fastfile, write_fastfile
-from .soundbudget import DEFAULT_MAX_LOADED_SOUNDS
+from .memory import MEMORY_TARGET_MIB
+from .soundbudget import DEFAULT_LOADED_SOUND_MIB, DEFAULT_MAX_LOADED_SOUNDS
 from .platforms import for_endian, pc, x360
 from .zone import BLOCK_NAMES, Reader, Writer
 
@@ -134,9 +135,11 @@ def convert_fastfile(path: str, options):
     return run_converter(path, converters([path], options)[0])
 
 
-def write_zone(zone, target: str, jobs: int = 0):
+def write_zone(zone, target: str, jobs: int = 0, out: bytes = None):
+    """Write a console zone (``out``: the zone already serialised)."""
     progress.step(f"Writing {os.path.basename(target)}")
-    out = Writer(x360()).write(zone)
+    if out is None:
+        out = Writer(x360()).write(zone)
     write_fastfile(target, ">", out, jobs=jobs)
     # reading the zone back checks it with the console loading rules
     progress.step(f"Checking {os.path.basename(target)}")
@@ -146,11 +149,23 @@ def write_zone(zone, target: str, jobs: int = 0):
     print(f"  memory: {sum(sizes) / 1048576:.1f} MiB ({blocks})")
 
 
+def _texture_budget(text: str) -> str:
+    """--texture-budget: "auto" or a number of MiB (0: no limit)."""
+    if text.strip().lower() == "auto":
+        return "auto"
+    try:
+        if float(text) >= 0:
+            return text
+    except ValueError:
+        pass
+    raise argparse.ArgumentTypeError("a number of MiB, 0 for no limit, or auto")
+
+
 def cmd_convert(args):
     from .audio import XmaEncoder, convert_streamed_sounds
     from .convert import ConvertOptions
     from .images import IwdLibrary
-    from .merge import merge_zones, prune_references
+    from .merge import prune_references
 
     name, files, iwds = find_usermap(args.input)
     print(f"usermap {name}:")
@@ -187,13 +202,18 @@ def cmd_convert(args):
                 f"{stats['input_bytes'] / 1048576:.1f} MiB -> {stats['output_bytes'] / 1048576:.1f} MiB"
             )
 
+    from .memory import MIB, TEXTURE_CAP_MIB, block_sizes, next_texture_budget, texture_bytes
+
+    auto_budget = args.texture_budget == "auto"
+    target = int(args.memory_target * MIB)
     options = ConvertOptions(
         allow_unverified=args.allow_unverified,
         max_texture_size=args.max_texture_size,
-        texture_budget=int(args.texture_budget * 1024 * 1024),
+        texture_budget=TEXTURE_CAP_MIB * MIB if auto_budget else int(float(args.texture_budget) * MIB),
         keep_mips=not args.no_mips,
         compress_textures=not args.no_compress,
-        iwd_paths=iwds + args.iwd,
+        iwd_paths=iwds,
+        stock_paths=args.iwd,
         xma_encoder=None if args.no_sounds else encoder,
         sound_rate=args.sound_rate,
         mono_sounds=args.mono_sounds,
@@ -210,11 +230,65 @@ def cmd_convert(args):
         paths.append(files["patch"])
     if "mod" in files and not args.no_mod:
         paths.append(files["mod"])
+    map_files = IwdLibrary(list(dict.fromkeys([os.path.dirname(os.path.abspath(files["map"]))] + [os.path.dirname(os.path.abspath(p)) for p in iwds])))
+
+    # The automatic texture budget: the textures get what the memory target leaves, measured on the
+    # converted map (converted again with less when it is over; sounds are encoded once).
+    import dataclasses
+
+    for attempt in range(4):
+        main_zone, planned = _convert_map(args, paths, options, map_files, out_dir)
+        progress.step("Measuring the memory")
+        out = Writer(x360()).write(main_zone)
+        total = sum(block_sizes(out))
+        if not auto_budget:
+            break
+        textures = texture_bytes(main_zone)
+        budget = next_texture_budget(total, target, planned, options.texture_budget) if attempt < 3 else None
+        if budget is None:
+            if total > target:
+                print(
+                    f"warning: the map needs {total / MIB:.1f} MiB, over the {target / MIB:.0f} MiB target "
+                    f"({(total - textures) / MIB:.1f} MiB without its textures); CoD Xenon's largest map needs 219.5 MiB"
+                )
+            else:
+                print(f"memory: {total / MIB:.1f} MiB of the {target / MIB:.0f} MiB target, {textures / MIB:.1f} MiB of it textures")
+            break
+        print(f"memory: {total / MIB:.1f} MiB, over the {target / MIB:.0f} MiB target: converting again with {budget / MIB:.1f} MiB of textures")
+        options = dataclasses.replace(options, texture_budget=budget)
+    write_zone(main_zone, os.path.join(out_dir, f"{name}.ff"), args.jobs, out)
+
+    if args.load_zone:
+        # CoD Xe serves <map>_load.ff as the loading screen zone (CoD Xenon's 0.2.0 maps have one):
+        # made like theirs, with the map's picture
+        from .library import library_files
+        from .loadscreen import LoadScreenError, write_load_zone
+
+        progress.step("Writing the loading screen")
+        try:
+            done = write_load_zone(name, out_dir, library_files(args.console_zone, name), map_files, files.get("load"), args.loading_image, args.jobs)
+        except LoadScreenError as e:
+            print(f"warning: {e}")
+            done = False
+        if not done and "load" in files:
+            # no load zone of CoD Xenon's among the console fastfiles: the PC one converted
+            zone = convert_fastfile(files["load"], dataclasses.replace(options, reference_techsets=True, texture_budget=0))
+            prune_references(x360(), zone)
+            write_zone(zone, os.path.join(out_dir, os.path.basename(files["load"])), args.jobs)
+        elif not done:
+            print("loading screen: none written (add CoD Xenon's _codxe\\t4 folder to the console fastfiles): the game shows a checkerboard while the map loads")
+    return 0
+
+
+def _convert_map(args, paths, options, map_files, out_dir):
+    """The map's fastfiles converted and merged into one console zone."""
+    from .images import IwdLibrary
+    from .merge import merge_zones, prune_references
+
     convs = converters(paths, options)
     # the map's own loose scripts win over those of its fastfiles, as on PC
     from .scripts import missing_scripts_zone, override_scripts
 
-    map_files = IwdLibrary(list(dict.fromkeys([os.path.dirname(os.path.abspath(files["map"]))] + [os.path.dirname(os.path.abspath(p)) for p in iwds])))
     override_scripts(pc(), [c.zone for c in convs], map_files)
     zones = [run_converter(path, conv) for path, conv in zip(paths, convs)]
     if len(zones) > 1:
@@ -231,28 +305,19 @@ def cmd_convert(args):
     if extra is not None:
         main_zone = merge_zones(x360(), [main_zone, extra], log=lambda msg: None)
     prune_references(x360(), main_zone)
-    if args.max_loaded_sounds:
+    if args.max_loaded_sounds or args.loaded_sound_memory:
         from .audio import LoadedXma
         from .soundbudget import limit_loaded_sounds
 
         progress.step("Checking the loaded sound limit")
         streams = {key[0].lower(): xma.stream for key, xma in options.sound_cache.items() if isinstance(xma, LoadedXma) and xma.stream is not None}
-        limit_loaded_sounds(x360(), main_zone, args.max_loaded_sounds, streams, out_dir)
+        limit_loaded_sounds(x360(), main_zone, args.max_loaded_sounds, streams, out_dir, max_bytes=int(args.loaded_sound_memory * 1048576))
     from .soundbudget import sync_alias_types
 
     fixed = sync_alias_types(x360(), main_zone)
     if fixed:
         print(f"sound aliases: the type in the flags of {fixed} aliases set to their sound file's")
-    write_zone(main_zone, os.path.join(out_dir, f"{name}.ff"), args.jobs)
-
-    if "load" in files and args.load_zone:
-        # CoD Xe serves <map>_load.ff as the loading screen zone (CoD Xenon's 0.2.0 maps have one)
-        import dataclasses
-
-        zone = convert_fastfile(files["load"], dataclasses.replace(options, reference_techsets=True))
-        prune_references(x360(), zone)
-        write_zone(zone, os.path.join(out_dir, os.path.basename(files["load"])), args.jobs)
-    return 0
+    return main_zone, getattr(convs[0], "planned_texture_bytes", 0)
 
 
 def cmd_setup(args):
@@ -297,7 +362,8 @@ def main(argv=None):
     p.add_argument("-o", "--output", required=True, help="output folder (a _codxe folder is created inside)")
     p.add_argument("--iwd", action="append", default=[], help="extra .iwd files or folders to take images/sounds from (e.g. the PC game's main folder)")
     p.add_argument("--max-texture-size", type=int, default=0, help="largest texture dimension, bigger textures are downscaled (default: no limit)")
-    p.add_argument("--texture-budget", type=float, default=0, help="texture memory budget in MiB (default: no limit)")
+    p.add_argument("--texture-budget", type=_texture_budget, default="auto", help="texture memory budget in MiB, 0 for no limit, or auto (default): what the memory target leaves, at most 96 MiB")
+    p.add_argument("--memory-target", type=float, default=MEMORY_TARGET_MIB, help=f"memory the map may use in MiB, for the automatic texture budget (default {MEMORY_TARGET_MIB}; CoD Xenon's maps use 148 to 220)")
     p.add_argument("--xma-encoder", help="path to xma2encode.exe (Xbox 360 XDK); also read from XMA2ENCODE or XEDK")
     p.add_argument("--xma-quality", type=int, default=60, help="xma2encode quality 1-100 (default 60)")
     p.add_argument("--stream-rate", type=int, default=0, help="resample streamed sounds above this rate (e.g. 32000)")
@@ -309,12 +375,14 @@ def main(argv=None):
     p.add_argument("--no-mod", action="store_true", help="do not merge the usermap's mod.ff into the map fastfile")
     p.add_argument("--no-patch", action="store_true", help="do not merge the usermap's <map>_patch.ff into the map fastfile")
     p.add_argument("--t4-layout", action=argparse.BooleanOptionalAction, default=True, help="write _codxe/t4/usermaps/<map>, CoD Xe's newer layout (default; CoD Xe reads _codxe/t4 when it exists, e.g. with CoD Xenon's 0.2.0 maps, and then ignores _codxe/usermaps). --no-t4-layout: _codxe/usermaps/<map>")
-    p.add_argument("--load-zone", action="store_true", help="also convert <map>_load.ff (loading screen; experimental, CoD Xenon's maps have none)")
+    p.add_argument("--load-zone", action=argparse.BooleanOptionalAction, default=True, help="write <map>_load.ff, the loading screen (default; made like CoD Xenon's, whose 0.2.0 maps all have one)")
+    p.add_argument("--loading-image", default="", help="picture for the loading screen (.png, .jpg, .bmp, .tga, .dds or .iwi; default: CoD Xenon's for the map, the map's own, else a title card)")
     p.add_argument("--no-load", action="store_true", help=argparse.SUPPRESS)  # the default now
     p.add_argument("--no-compress", action="store_true", help="keep uncompressed textures uncompressed (they are DXT compressed by default)")
     p.add_argument("--no-mips", action="store_true", help="drop all mip levels (saves ~25%% memory, textures shimmer at distance)")
     p.add_argument("--allow-unverified", action="store_true", help="also convert assets whose console layout is not verified (may crash the game)")
     p.add_argument("--max-loaded-sounds", type=int, default=DEFAULT_MAX_LOADED_SOUNDS, help=f"loaded sounds the map may have: identical ones are shared, then the longest are streamed (default {DEFAULT_MAX_LOADED_SOUNDS}; the console holds 1600 with the game's own; 0: no limit)")
+    p.add_argument("--loaded-sound-memory", type=float, default=DEFAULT_LOADED_SOUND_MIB, help=f"memory of the loaded sounds in MiB: beyond it the longest are streamed (default {DEFAULT_LOADED_SOUND_MIB}; CoD Xenon's maps have up to 35; 0: no limit)")
     p.add_argument("--jobs", type=int, default=0, help="sounds encoded / compression threads at a time (default: one per processor)")
     p.set_defaults(func=cmd_convert)
 

@@ -23,11 +23,13 @@ from dataclasses import asdict, dataclass, field
 from typing import List
 
 from .progress import parse as parse_progress
+from .memory import MEMORY_TARGET_MIB
 from .soundbudget import DEFAULT_MAX_LOADED_SOUNDS
 
 SOUND_RATES = ("keep", "48000", "44100", "32000", "24000")
 STREAM_RATES = ("keep", "44100", "32000", "24000", "22050")
 TEXTURE_SIZES = ("no limit", "2048", "1024", "512", "256")
+TEXTURE_BUDGETS = ("auto", "0", "48", "64", "80", "96")
 
 
 @dataclass
@@ -37,7 +39,8 @@ class Settings:
     xma_encoder: str = ""
     console_zones: List[str] = field(default_factory=list)
     iwds: List[str] = field(default_factory=list)
-    texture_budget: float = 0.0
+    texture_budget: str = "auto"  # MiB, 0 for no limit, or auto (what the memory target leaves)
+    memory_target: float = MEMORY_TARGET_MIB
     max_texture_size: int = 0
     sound_rate: int = 0
     stream_rate: int = 0
@@ -49,10 +52,11 @@ class Settings:
     no_compress: bool = False
     no_mod: bool = False
     no_patch: bool = False
-    load_zone: bool = False
+    load_zone: bool = True
+    loading_image: str = ""
     t4_layout: bool = True
     no_sounds: bool = False
-    version: int = 2  # of the settings file: 2 made the t4 layout the default
+    version: int = 3  # of the settings file: 2 made the t4 layout the default, 3 the automatic texture budget
 
     @classmethod
     def load(cls, path: str) -> "Settings":
@@ -64,7 +68,13 @@ class Settings:
         known = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
         if known.get("version", 1) < 2:
             # saved before the t4 layout became the default (CoD Xe reads _codxe\t4 once it exists)
-            known.update(t4_layout=True, version=2)
+            known.update(t4_layout=True)
+        if known.get("version", 1) < 3:
+            # saved before the automatic texture budget, which is better than a fixed one for any map,
+            # and before loading screens were made for every map
+            known.update(texture_budget="auto", load_zone=True)
+        known["version"] = cls.version
+        known["texture_budget"] = budget_text(known.get("texture_budget", "auto"))
         try:
             return cls(**known)
         except TypeError:
@@ -77,6 +87,17 @@ class Settings:
                 json.dump(asdict(self), f, indent=2)
         except OSError:
             pass
+
+
+def budget_text(value) -> str:
+    """A texture budget setting as the command line takes it: "auto" or a number of MiB."""
+    text = str(value).strip().lower()
+    if text in ("", "auto"):
+        return "auto"
+    try:
+        return f"{max(0.0, float(text)):g}"
+    except ValueError:
+        return "auto"
 
 
 def settings_path() -> str:
@@ -93,8 +114,10 @@ def convert_args(s: Settings) -> List[str]:
         args += ["--console-zone", path]
     for path in s.iwds:
         args += ["--iwd", path]
-    if s.texture_budget:
-        args += ["--texture-budget", f"{s.texture_budget:g}"]
+    if budget_text(s.texture_budget) != "auto":
+        args += ["--texture-budget", budget_text(s.texture_budget)]
+    if s.memory_target != MEMORY_TARGET_MIB:
+        args += ["--memory-target", f"{s.memory_target:g}"]
     if s.max_texture_size:
         args += ["--max-texture-size", str(s.max_texture_size)]
     if s.sound_rate:
@@ -105,11 +128,15 @@ def convert_args(s: Settings) -> List[str]:
         args += ["--xma-quality", str(s.xma_quality)]
     if s.max_loaded_sounds != DEFAULT_MAX_LOADED_SOUNDS:
         args += ["--max-loaded-sounds", str(s.max_loaded_sounds)]
-    for flag in ("mono_sounds", "mono_streams", "no_mips", "no_compress", "no_mod", "no_patch", "load_zone", "no_sounds"):
+    if s.loading_image:
+        args += ["--loading-image", s.loading_image]
+    for flag in ("mono_sounds", "mono_streams", "no_mips", "no_compress", "no_mod", "no_patch", "no_sounds"):
         if getattr(s, flag):
             args.append("--" + flag.replace("_", "-"))
     if not s.t4_layout:
         args.append("--no-t4-layout")
+    if not s.load_zone:
+        args.append("--no-load-zone")
     return args
 
 
@@ -122,7 +149,7 @@ def check_settings(s: Settings) -> List[str]:
         problems.append(f"The usermap folder does not exist: {s.input}")
     if not s.output:
         problems.append("Choose an output folder.")
-    for path in s.console_zones + s.iwds + ([s.xma_encoder] if s.xma_encoder else []):
+    for path in s.console_zones + s.iwds + ([s.xma_encoder] if s.xma_encoder else []) + ([s.loading_image] if s.loading_image else []):
         if not os.path.exists(path):
             problems.append(f"Not found: {path}")
     return problems
@@ -273,7 +300,9 @@ def main():
         "input": tk.StringVar(value=settings.input),
         "output": tk.StringVar(value=settings.output),
         "xma_encoder": tk.StringVar(value=settings.xma_encoder),
-        "texture_budget": tk.StringVar(value=f"{settings.texture_budget:g}"),
+        "loading_image": tk.StringVar(value=settings.loading_image),
+        "texture_budget": tk.StringVar(value=budget_text(settings.texture_budget)),
+        "memory_target": tk.StringVar(value=f"{settings.memory_target:g}"),
         "max_texture_size": tk.StringVar(value=str(settings.max_texture_size or TEXTURE_SIZES[0])),
         "sound_rate": tk.StringVar(value=str(settings.sound_rate or SOUND_RATES[0])),
         "stream_rate": tk.StringVar(value=str(settings.stream_rate or STREAM_RATES[0])),
@@ -323,6 +352,13 @@ def main():
     )
     path_row(files, 1, "Output folder", "output", [("Folder...", ask_dir("output", "Output folder (a _codxe folder is created inside)"))])
     path_row(files, 2, "xma2encode.exe", "xma_encoder", [("File...", ask_file("xma_encoder", "xma2encode.exe (Xbox 360 XDK)", [("Programs", "*.exe"), ("All files", "*")]))])
+    path_row(
+        files,
+        3,
+        "Loading picture (optional)",
+        "loading_image",
+        [("File...", ask_file("loading_image", "Loading screen picture", [("Pictures", "*.png *.jpg *.jpeg *.bmp *.tga *.dds *.webp *.iwi"), ("All files", "*")]))],
+    )
 
     # -- lists ----------------------------------------------------------------
     lists = ttk.Frame(root)
@@ -383,15 +419,21 @@ def main():
         ttk.Label(options, text=label).grid(row=row, column=column, sticky="w", **pad)
         widget.grid(row=row, column=column + 1, sticky="w", **pad)
 
-    option(0, 0, "Texture budget (MiB, 0 = none)", ttk.Spinbox(options, from_=0, to=512, increment=8, width=8, textvariable=var["texture_budget"]))
-    option(0, 2, "Max texture size", ttk.Combobox(options, values=TEXTURE_SIZES, width=10, state="readonly", textvariable=var["max_texture_size"]))
-    option(1, 0, "Loaded sound rate (Hz)", ttk.Combobox(options, values=SOUND_RATES, width=10, state="readonly", textvariable=var["sound_rate"]))
-    option(1, 2, "Streamed sound rate (Hz)", ttk.Combobox(options, values=STREAM_RATES, width=10, state="readonly", textvariable=var["stream_rate"]))
-    option(2, 0, "XMA quality (1-100)", ttk.Spinbox(options, from_=1, to=100, width=8, textvariable=var["xma_quality"]))
-    option(2, 2, "Max loaded sounds (0 = no limit)", ttk.Spinbox(options, from_=0, to=5000, increment=50, width=8, textvariable=var["max_loaded_sounds"]))
+    option(0, 0, "Texture budget (MiB, 0 = none)", ttk.Combobox(options, values=TEXTURE_BUDGETS, width=8, textvariable=var["texture_budget"]))
+    option(0, 2, "Memory target (MiB)", ttk.Spinbox(options, from_=100, to=240, increment=5, width=8, textvariable=var["memory_target"]))
+    option(1, 0, "Max texture size", ttk.Combobox(options, values=TEXTURE_SIZES, width=10, state="readonly", textvariable=var["max_texture_size"]))
+    option(1, 2, "Max loaded sounds (0 = no limit)", ttk.Spinbox(options, from_=0, to=5000, increment=50, width=8, textvariable=var["max_loaded_sounds"]))
+    option(2, 0, "Loaded sound rate (Hz)", ttk.Combobox(options, values=SOUND_RATES, width=10, state="readonly", textvariable=var["sound_rate"]))
+    option(2, 2, "Streamed sound rate (Hz)", ttk.Combobox(options, values=STREAM_RATES, width=10, state="readonly", textvariable=var["stream_rate"]))
+    option(3, 0, "XMA quality (1-100)", ttk.Spinbox(options, from_=1, to=100, width=8, textvariable=var["xma_quality"]))
+    ttk.Label(
+        options,
+        text="auto: each map keeps as much texture quality as the memory target allows (CoD Xenon's maps use 148-220 MiB)",
+        foreground="gray",
+    ).grid(row=4, column=0, columnspan=4, sticky="w", **pad)
 
     checks = ttk.Frame(options)
-    checks.grid(row=3, column=0, columnspan=4, sticky="w", **pad)
+    checks.grid(row=5, column=0, columnspan=4, sticky="w", **pad)
     for i, (name, text) in enumerate(
         [
             ("mono_sounds", "Mono loaded sounds"),
@@ -401,7 +443,7 @@ def main():
             ("no_mod", "Skip mod.ff"),
             ("no_patch", "Skip _patch.ff"),
             ("no_sounds", "Skip sounds"),
-            ("load_zone", "Write _load.ff (loading screen, experimental)"),
+            ("load_zone", "Write _load.ff (loading screen)"),
             ("t4_layout", "CoD Xe t4 layout (_codxe\\t4\\usermaps)"),
         ]
     ):
@@ -455,9 +497,11 @@ def main():
             input=var["input"].get().strip(),
             output=var["output"].get().strip(),
             xma_encoder=var["xma_encoder"].get().strip(),
+            loading_image=var["loading_image"].get().strip(),
             console_zones=list(zones_box.get(0, "end")),
             iwds=list(iwds_box.get(0, "end")),
-            texture_budget=number("texture_budget", float, 0.0),
+            texture_budget=budget_text(var["texture_budget"].get()),
+            memory_target=max(64.0, number("memory_target", float, MEMORY_TARGET_MIB)),
             max_texture_size=number("max_texture_size", int, 0),
             sound_rate=number("sound_rate", int, 0),
             stream_rate=number("stream_rate", int, 0),

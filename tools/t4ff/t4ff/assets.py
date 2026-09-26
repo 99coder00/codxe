@@ -241,8 +241,8 @@ def image_hook(conv, asset_type, node, name):
     semantic = field_value(rec, node.data, "semantic")
     category = field_value(rec, node.data, "category")
 
-    source = image_source(conv, node, name)
-    if source is None and conv.image_drop_levels.get(name):
+    kind, source = image_choice(conv, node, name)
+    if kind == "library" and conv.image_drop_levels.get(name):
         source = console_image(conv, name)  # a console library texture reduced by the budget
 
     if source is None or map_type != 3:
@@ -291,6 +291,42 @@ def image_source(conv, node: Node, name: str) -> Optional[img.ImageData]:
             conv.warn(str(e))
     cache[name] = source
     return source
+
+
+def stock_image_source(conv, name: str) -> Optional[img.ImageData]:
+    """Pixel data of a stock image from the PC game's own files (--iwd), cached."""
+    cache = conv.__dict__.setdefault("_stock_images", {})
+    if name not in cache:
+        library = getattr(conv, "stock_library", None)
+        try:
+            cache[name] = library.image(name) if library is not None else None
+        except img.ImageError as e:
+            conv.warn(str(e))
+            cache[name] = None
+    return cache[name]
+
+
+def image_choice(conv, node: Node, name: str) -> Tuple[str, Optional[img.ImageData]]:
+    """Where the texture of the PC image asset ``name`` comes from, and its PC pixel data:
+
+    - "own": the map's own (its fastfile or its files), converted even when the name is a stock
+      one (the map changed it);
+    - "game": a stock texture the game's own zones load (common.ff, ...): a reference, no memory;
+    - "library": a stock texture of the console fastfiles given: their console version (as
+      Treyarch sized it for the console), leaving the memory to the map's own textures;
+    - "stock": a stock texture only the PC game's files have: converted from those;
+    - "missing": nowhere, a reference.
+    """
+    source = image_source(conv, node, name)
+    if source is not None:
+        return "own", source
+    if in_game_zones(conv, "GfxImage", name):
+        return "game", None
+    library = getattr(conv, "console_library", None)
+    if library is not None and library.find("GfxImage", name) is not None:
+        return "library", None
+    source = stock_image_source(conv, name)
+    return ("stock", source) if source is not None else ("missing", None)
 
 
 def in_game_zones(conv, rec_name: str, name: str) -> bool:
@@ -359,6 +395,8 @@ def plan_textures_shared(convs):
     """
     options = convs[0].options
     sources = {}
+    fixed = set()  # textures counted but not reduced
+    map_type = find_field(convs[0].src.record("GfxImage"), "mapType").offset
     for conv in convs:
         for node in conv.zone.extra_root.walk():
             if node.type.kind == "record" and node.type.name == "GfxImage" and (node.extra.get("origin") or ("",))[0] == "asset":
@@ -366,13 +404,21 @@ def plan_textures_shared(convs):
                 if not name:
                     continue
                 plain = name.lstrip(",")
-                if plain in sources:
-                    continue
-                src = image_source(conv, node, plain) if not name.startswith(",") else None
-                if src is None and options.texture_budget and not in_game_zones(conv, "GfxImage", plain):
+                if plain in sources or (not name.startswith(",") and node.data[map_type] != 3):
+                    continue  # cube and volume maps (reflection probes) are converted as they are
+                if name.startswith(","):
+                    kind = "game" if in_game_zones(conv, "GfxImage", plain) else "library"
+                    src = None
+                else:
+                    kind, src = image_choice(conv, node, plain)
+                if kind == "library" and options.texture_budget:
                     src = console_image(conv, plain)
                 if src is not None and src.format in ("DXT1", "DXT3", "DXT5", "DXN", "A8R8G8B8", "R8G8B8", "A8L8", "A8", "L8"):
                     sources[plain] = src
+                    # the world's own images (lightmaps, $outdoor: the map's lighting) keep their
+                    # size, and single level images of formats reduce_image cannot scale down
+                    if plain[:1] in "*$" or (len(src.levels) == 1 and src.format not in ("DXT1", "DXT3", "DXT5", "A8R8G8B8", "X8R8G8B8")):
+                        fixed.add(plain)
 
     # textures that console library copies of PC references (materials, models, effects, ...) bring along
     if options.texture_budget:
@@ -406,6 +452,8 @@ def plan_textures_shared(convs):
         return (img.console_texture_size(sources[n], options.max_texture_size, options.keep_mips, drops[n], options.compress_textures) + 4095) & ~4095
 
     def can_drop(n):
+        if n in fixed:
+            return False
         src = sources[n]
         level = drops[n] + 1
         return min(src.width >> level, src.height >> level) >= 64
@@ -425,6 +473,7 @@ def plan_textures_shared(convs):
     for conv in convs:
         conv.image_drop_levels = drops
         conv.textures_planned = True
+        conv.planned_texture_bytes = total
     if sources:
         reduced = sum(1 for n in drops if drops[n])
         convs[0].log(f"textures: {len(sources)} images, {before / 1048576:.1f} MiB -> {total / 1048576:.1f} MiB ({reduced} reduced)")
@@ -658,6 +707,8 @@ def gfxworld_hook(conv, asset_type, node, name):
 
     # Vertex layer data: (u, v, RGBA color) records; the console color is ARGB.
     for layer in _member_nodes(new, "GfxWorldVertexLayerData", "data"):
+        if len(layer.data) < 12:
+            continue  # a map without layered vertices has a 4 byte stub (CoD Xenon's hijacked and mcdonalds too), kept as is
         src_layer = next((n for n in _member_nodes(node, "GfxWorldVertexLayerData", "data") if len(n.data) == len(layer.data)), None)
         if src_layer is None or len(layer.data) % 12:
             conv.warn(f"gfxworld '{name}': unexpected vertex layer data size {len(layer.data)}")
