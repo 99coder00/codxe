@@ -767,7 +767,7 @@ UINT32 FindLongjmp(UINT32 function, int depth, UINT32 *visited, int &visitedCoun
 
 thread_watch::thread_watch()
 {
-    if (!Config::log_console)
+    if (!Config::thread_watch)
         return;
 
     const UINT32 threadMain = reinterpret_cast<UINT32>(Sys_ThreadMain);
@@ -778,13 +778,13 @@ thread_watch::thread_watch()
         Sys_ThreadMain_Detour.Install();
         SV_LinkEntity_Detour = Detour(SV_LinkEntity, SV_LinkEntity_Hook);
         SV_LinkEntity_Detour.Install();
-        DbgPrint("[codxe][T4 SP] log_console: Server and main threads watched (Sys_ThreadMain at %08X, "
+        DbgPrint("[codxe][T4 SP] thread_watch: Server and main threads watched (Sys_ThreadMain at %08X, "
                  "SV_LinkEntity at %08X)\n",
                  threadMain, linkEntity);
     }
     else
     {
-        DbgPrint("[codxe][T4 SP] log_console: %08X or %08X does not look like the start of Sys_ThreadMain or "
+        DbgPrint("[codxe][T4 SP] thread_watch: %08X or %08X does not look like the start of Sys_ThreadMain or "
                  "SV_LinkEntity, the threads are not watched\n",
                  threadMain, linkEntity);
     }
@@ -796,14 +796,14 @@ thread_watch::thread_watch()
     {
         // Its code, to check that it is longjmp.
         const UINT32 *code = reinterpret_cast<const UINT32 *>(longjmpAddress);
-        DbgPrint("[codxe][T4 SP] log_console: longjmps logged (longjmp at %08X: %08X %08X %08X %08X %08X %08X)\n",
+        DbgPrint("[codxe][T4 SP] thread_watch: longjmps logged (longjmp at %08X: %08X %08X %08X %08X %08X %08X)\n",
                  longjmpAddress, code[0], code[1], code[2], code[3], code[4], code[5]);
         longjmp_Detour = Detour(reinterpret_cast<void *>(longjmpAddress), longjmp_Hook);
         longjmp_Detour.Install();
     }
     else
     {
-        DbgPrint("[codxe][T4 SP] log_console: longjmp not found from Scr_Error (%08X, %d functions looked at)\n",
+        DbgPrint("[codxe][T4 SP] thread_watch: longjmp not found from Scr_Error (%08X, %d functions looked at)\n",
                  longjmpAddress, visitedCount);
     }
 }
