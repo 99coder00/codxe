@@ -522,8 +522,8 @@ void PrintCall(int index, bool guessed)
 void ReportThread(const char *name, UINT32 context, LONG id, UINT32 stackLow, UINT32 stackHigh, bool everything,
                   UINT32 *functions, int &functionCount)
 {
-    // Twice: what changed in between is where the thread runs. Nothing changed: it waits (or loops without
-    // calling anything or using its stack).
+    // Twice: what changed in between is where the thread runs. Nothing changed: it waits, or it loops doing the
+    // same work each time (the same calls write the same values).
     const int blocks = StackBlocks(stackLow, stackHigh);
     for (int b = 0; b < blocks; ++b)
         g_blocksBefore[b] = BlockSum(stackLow + b * STACK_BLOCK);
@@ -552,7 +552,8 @@ void ReportThread(const char *name, UINT32 context, LONG id, UINT32 stackLow, UI
 
     const int chainLength = WalkCalls(afterCount, stackLow, stackHigh);
     DbgPrint("[codxe][T4 SP] thread watch: %s thread (context %u, %08X, stack %08X-%08X): %s\n", name, context, id,
-             stackLow, stackHigh, changedBlocks ? "runs" : "waits");
+             stackLow, stackHigh,
+             changedBlocks ? "its stack changes" : "its stack does not change (it waits, or repeats the same work)");
     DbgPrint("[codxe][T4 SP]   within 100 ms, %d of its %d return addresses and %d of its %d 256-byte stack blocks "
              "changed, the lowest at %08X. The calls it is in, outermost first, the last one to the function it is "
              "in (* = changed, ? = guessed: a call through a pointer):\n",
