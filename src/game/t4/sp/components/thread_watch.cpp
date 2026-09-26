@@ -485,15 +485,15 @@ void LogCode(UINT32 function, int depth)
     }
 }
 
-// The start of each function the code of function calls (bl), to tell which they are.
+// The code of each function the code of function calls (bl), and of those they end by jumping to.
 void LogCallees(UINT32 function)
 {
     UINT32 end = function + 4;
     while (end < function + 0x800 && end < CODE_END && Read(end) != PPC_MFLR_R12)
         end += 4;
-    UINT32 logged[16];
+    UINT32 logged[8];
     int loggedCount = 0;
-    for (UINT32 at = function; at < end && loggedCount < 16; at += 4)
+    for (UINT32 at = function; at < end && loggedCount < 8; at += 4)
     {
         const UINT32 instruction = Read(at);
         if (!IsBranchAndLink(instruction))
@@ -505,7 +505,8 @@ void LogCallees(UINT32 function)
         if (seen)
             continue;
         logged[loggedCount++] = target;
-        LogWords("the start of a function it calls", target, target + 0x30);
+        DbgPrint("[codxe][T4 SP]   a function it calls, %08X:\n", target);
+        LogCode(target, 2);
     }
 }
 
@@ -576,8 +577,8 @@ void ReportThread(const char *name, UINT32 context, LONG id, UINT32 stackLow, UI
     if (!everything || chainLength == 0)
         return;
 
-    // The innermost call: the function it went to (the one the thread is in) and the starts of those it calls,
-    // the call and the stack around it.
+    // The innermost call: the function it went to (the one the thread is in) and those it calls, the call and
+    // the stack around it.
     const StackCall &innermost = g_after[g_chain[chainLength - 1]];
     const UINT32 function = Callee(innermost.value);
     DbgPrint("[codxe][T4 SP]   the innermost call, from %08X to %08X (0: through a pointer):\n", innermost.value - 4,
