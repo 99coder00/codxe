@@ -408,7 +408,7 @@ def main():
         settings.console_zones,
         [("Fastfiles", "*.ff"), ("All files", "*")],
         True,
-        "Best: the _codxe\\t4 folder of CoD Xenon's extracted zip",
+        "Best: the _codxe\\t4 folder of CoD Xenon's extracted zip (maps t4ff converted are left out)",
     )
     iwds_box = path_list(
         1,

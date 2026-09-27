@@ -20,7 +20,7 @@ following pointer of its parent, in the order the reader met those pointers
 from __future__ import annotations
 
 import os
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from . import progress
 from .fastfile import read_fastfile
@@ -45,19 +45,42 @@ def is_game_zone(path: str) -> bool:
     return stem in GAME_ZONES or (stem.startswith("localized_") and stem[len("localized_") :] in GAME_ZONES)
 
 
-def library_files(paths: List[str], first: str = "") -> List[str]:
+# Written next to the fastfiles of every map t4ff converts: they are not console data.
+T4FF_MARKER = "t4ff.txt"
+
+
+def made_by_t4ff(path: str) -> bool:
+    """Whether the fastfile ``path`` is one of t4ff's own conversions."""
+    return os.path.exists(os.path.join(os.path.dirname(os.path.abspath(path)), T4FF_MARKER))
+
+
+def _inside(path: str, folder: str) -> bool:
+    path, folder = (os.path.normcase(os.path.realpath(p)) for p in (path, folder))
+    return path == folder or path.startswith(folder.rstrip(os.sep) + os.sep)
+
+
+def library_files(paths: List[str], first: str = "", exclude: Sequence[str] = (), skipped: Optional[List[str]] = None) -> List[str]:
     """The fastfiles of ``paths`` (files, or folders searched in name order), each once, in the
     order they are read: the first that has an asset gives it. The fastfile named ``first`` (the
     map being converted: CoD Xenon's conversion of the same map, in a folder of their maps) comes
-    first, so its own versions of assets other maps also have win."""
+    first, so its own versions of assets other maps also have win.
+
+    t4ff's own conversions (a usermaps folder holding them among CoD Xenon's maps) and the fastfiles
+    in the folders of ``exclude`` (where this conversion writes) are left out, into ``skipped``:
+    read as console data, an earlier conversion of the map would hand its old copies back."""
     files, seen = [], set()
     for path in paths:
         found = sorted(os.path.join(root, f) for root, _, fs in os.walk(path) for f in fs if f.lower().endswith(".ff")) if os.path.isdir(path) else [path]
         for f in found:
             key = os.path.normcase(os.path.realpath(f))
-            if key not in seen:
-                seen.add(key)
-                files.append(f)
+            if key in seen:
+                continue
+            seen.add(key)
+            if made_by_t4ff(f) or any(folder and _inside(f, folder) for folder in exclude):
+                if skipped is not None:
+                    skipped.append(f)
+                continue
+            files.append(f)
     if first:
         files.sort(key=lambda f: os.path.splitext(os.path.basename(f))[0].lower() != first.lower())
     return files
@@ -66,11 +89,12 @@ def library_files(paths: List[str], first: str = "") -> List[str]:
 class ConsoleLibrary:
     """Assets of Xbox 360 fastfiles, looked up by type and name (loaded on first use)."""
 
-    def __init__(self, platform: Platform, paths: List[str], log=print, first: str = ""):
+    def __init__(self, platform: Platform, paths: List[str], log=print, first: str = "", exclude: Sequence[str] = ()):
         self.p = platform
         self.paths = [p for p in paths if p]
         self.log = log
         self.first = first  # the name of the map being converted (see library_files)
+        self.exclude = tuple(exclude)  # folders this conversion writes to (see library_files)
         self._zones: Optional[List[Zone]] = None
         self._index: Dict[Tuple[str, str], Tuple[Zone, Node]] = {}
         self._game: Dict[Tuple[str, str], Tuple[Zone, Node]] = {}  # assets of the game's own zones among them
@@ -80,7 +104,13 @@ class ConsoleLibrary:
         if self._zones is not None:
             return
         self._zones = []
-        files = library_files(self.paths, self.first)
+        skipped: List[str] = []
+        files = library_files(self.paths, self.first, self.exclude, skipped)
+        if skipped:
+            self.log(
+                f"console library: {len(skipped)} fastfiles t4ff converted left out (e.g. {os.path.basename(skipped[0])}): "
+                "give the console's and CoD Xenon's fastfiles, not converted maps"
+            )
         for index, f in enumerate(files):
             progress.step("Reading Xbox 360 fastfiles", index, len(files))
             try:

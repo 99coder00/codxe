@@ -108,7 +108,7 @@ Useful options:
 
 | Option | Effect |
 | --- | --- |
-| `--console-zone PATH` | Xbox 360 fastfile (or folder of them) to copy console only assets from: technique sets, and stock images, sounds, models... the PC map expects from the game. Repeatable; the first one that has an asset wins. See [Console fastfiles](#console-fastfiles). |
+| `--console-zone PATH` | Xbox 360 fastfile (or folder of them) to copy console only assets from: technique sets, and stock images, sounds, models... the PC map expects from the game. Repeatable; the first one that has an asset wins. Maps t4ff converted (a `t4ff.txt` in their folder) are left out: an earlier conversion would hand its old copies back. See [Console fastfiles](#console-fastfiles). |
 | `--iwd PATH` | The PC game's own files (e.g. its `main` folder): stock textures a map uses and no console fastfile has are converted from them. Stock textures the console fastfiles have keep the console's version (Treyarch sized them for the console), which leaves the memory to the map's own textures. The game's streamed sounds the map uses are encoded from them too, into the map's `sounds` folder: the console's disc has none of the downloadable maps' (Der Riese's voices, the easter egg songs of a music box). |
 | `--texture-budget MIB` | Texture memory for the map and its mod together, `0` for no limit. Default `auto`: what `--memory-target` leaves, at most 96 MiB. Largest textures lose their top mip level first; the world's lightmaps keep theirs. |
 | `--memory-target MIB` | Memory the map may use once loaded, for the automatic texture budget (default 200: CoD Xenon's 13 maps use 148 to 220). The map is converted, measured and, when over, converted again with less texture memory. |

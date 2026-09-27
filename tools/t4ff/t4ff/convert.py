@@ -513,7 +513,9 @@ class ZoneConverter:
         if self.options.console_zones:
             from .library import Cloner, ConsoleLibrary
 
-            self.console_library = _shared_library(dst, tuple(self.options.console_zones), self.options.log, self.options.map_name)
+            # not the fastfiles of the folder this conversion writes to (sounds_dir: the map's output folder)
+            exclude = (self.options.sounds_dir,) if self.options.sounds_dir else ()
+            self.console_library = _shared_library(dst, tuple(self.options.console_zones), self.options.log, self.options.map_name, exclude)
             self.cloner = Cloner(dst, self.script_strings, self._replace_library_asset)
         from . import assets
 
@@ -930,12 +932,12 @@ class _ArrayMap:
 _LIBRARIES: Dict[tuple, object] = {}
 
 
-def _shared_library(platform: Platform, paths: tuple, log, first: str = ""):
+def _shared_library(platform: Platform, paths: tuple, log, first: str = "", exclude: tuple = ()):
     from .library import ConsoleLibrary
 
-    key = (platform.name, paths, first)
+    key = (platform.name, paths, first, exclude)
     if key not in _LIBRARIES:
-        _LIBRARIES[key] = ConsoleLibrary(platform, list(paths), log, first)
+        _LIBRARIES[key] = ConsoleLibrary(platform, list(paths), log, first, exclude)
     return _LIBRARIES[key]
 
 

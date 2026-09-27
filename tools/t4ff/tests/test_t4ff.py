@@ -441,6 +441,21 @@ class LibraryTests(unittest.TestCase):
             self.assertEqual(short(library_files([aztec, t4])), [everything[2]] + everything[:2] + everything[3:])
             self.assertEqual(short(library_files([t4], "zm_unknown")), everything)
 
+            # maps t4ff converted, in the same usermaps folder, are left out (an earlier conversion
+            # of the map would come first and hand its old copies back), and so is the output folder
+            from t4ff.library import T4FF_MARKER
+
+            simpsons = os.path.join(t4, "usermaps", "simpsons")
+            os.makedirs(simpsons)
+            for n in ("simpsons.ff", "simpsons_load.ff", T4FF_MARKER):
+                open(os.path.join(simpsons, n), "wb").close()
+            skipped = []
+            self.assertEqual(short(library_files([t4], "simpsons", skipped=skipped)), everything)
+            self.assertEqual(short(skipped), ["usermaps/simpsons/simpsons.ff", "usermaps/simpsons/simpsons_load.ff"])
+            os.remove(os.path.join(simpsons, T4FF_MARKER))  # converted before the marker: the output folder
+            self.assertEqual(short(library_files([t4], "simpsons", [simpsons + os.sep])), everything)
+            self.assertEqual(short(library_files([t4], "simpsons"))[0], "usermaps/simpsons/simpsons.ff")  # what the marker prevents
+
 
 class WorldTests(unittest.TestCase):
     def test_vertex_layer_data(self):

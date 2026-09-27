@@ -257,6 +257,11 @@ def cmd_convert(args):
         print(f"memory: {total / MIB:.1f} MiB, over the {target / MIB:.0f} MiB target: converting again with {budget / MIB:.1f} MiB of textures")
         options = dataclasses.replace(options, texture_budget=budget)
     write_zone(main_zone, os.path.join(out_dir, f"{name}.ff"), args.jobs, out)
+    from .library import T4FF_MARKER
+
+    # later conversions do not take this map's fastfiles for console data (--console-zone)
+    with open(os.path.join(out_dir, T4FF_MARKER), "w", encoding="utf-8") as f:
+        f.write("Converted from the PC by t4ff (tools/t4ff): not console data, t4ff leaves these fastfiles out of its console fastfiles.\n")
 
     # the map's name in the Nazi Zombies map list (CoD Xe reads the first line of description.txt)
     from .loadscreen import map_title
@@ -276,7 +281,7 @@ def cmd_convert(args):
 
         progress.step("Writing the loading screen")
         try:
-            done = write_load_zone(name, out_dir, library_files(args.console_zone, name), map_files, files.get("load"), args.loading_image, args.jobs, title=title)
+            done = write_load_zone(name, out_dir, library_files(args.console_zone, name, (out_dir,)), map_files, files.get("load"), args.loading_image, args.jobs, title=title)
         except LoadScreenError as e:
             print(f"warning: {e}")
             done = False
