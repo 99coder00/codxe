@@ -1,13 +1,15 @@
-"""A dynamic, scrolling map list in the Nazi Zombies menu.
+"""A dynamic, scrolling list of the usermaps, opened from the Nazi Zombies menu.
 
 CoD Xenon's ``patch_ui.ff`` lists their maps in the menu ``levels_unlock``: the four stock maps,
 then one hand made row per converted map (a backing, a highlight, the A button hint and the button,
 which runs ``devmap <map>``) and its preview (picture, name and description) on the right. It
 holds 13 custom maps, the screen holds no more.
 
-:func:`make_dynamic` keeps the stock rows and replaces the custom ones by ``ROWS`` rows whose text
-and command are dvars, which CoD Xe fills from the usermaps folder (``src/game/t4/sp/components/
-usermaps.cpp``):
+:func:`make_dynamic` keeps the stock rows and replaces the custom ones by one "Custom Maps" row,
+which opens a menu of its own, ``codxe_usermaps`` (made from a copy of ``levels_unlock``: its
+background and Back button, a title): ``ROWS`` rows whose text and command are dvars, which CoD Xe
+fills from the usermaps folder (``src/game/t4/sp/components/usermaps.cpp``), and the preview of the
+focused map on the right. The dvars:
 
 - ``ui_codxe_map<k>`` / ``ui_codxe_mapcmd<k>``: the name and the command (``devmap <map>``) of the
   row ``k`` (empty: the row is hidden);
@@ -41,6 +43,13 @@ PREVIEW_SIZE = (512, 288)
 PREVIEW_MAGIC = b"CXPV"
 PREVIEW_FILE = "preview.bin"
 KEY_LSHLDR, KEY_RSHLDR = 5, 6
+ROW_HEIGHT = 19.0  # the items of a map row
+# the Custom Maps menu: its name, the list it is in (the game loads it), its title
+USERMAPS_MENU = "codxe_usermaps"
+MENU_LIST = "ui/patch_menus.txt"
+USERMAPS_TITLE = "Custom Maps"
+TITLE_RECT = (22.0, 32.0, 100.0, 100.0)
+TITLE_ALIGN, TITLE_SCALE, TITLE_STYLE = 4, 0.5476, 6
 
 # menu expression operators (operationEnum)
 OP_RIGHTPAREN, OP_GREATERTHAN, OP_EQUALS, OP_NOTEQUAL, OP_AND, OP_LEFTPAREN = 1, 10, 12, 13, 14, 16
@@ -108,17 +117,19 @@ def clone(node: Node, memo: Optional[Dict[int, Node]] = None) -> Node:
 class MenuEditor:
     """Reads and edits the items of a console menuDef_t."""
 
-    def __init__(self, p: Platform, zone: Zone, menu_name: str = LIST_MENU):
+    def __init__(self, p: Platform, zone: Zone, menu_name: str = LIST_MENU, menu: Optional[Node] = None):
         self.p = p
         self.zone = zone
         self.irec = p.record("itemDef_s")
         self.wrec = p.record("windowDef_t")
         self.mrec = p.record("menuDef_t")
         self.window = find_field(self.irec, "window").offset
-        menu = next((a for a in zone.assets if a.type == "menu" and a.name == menu_name), None)
         if menu is None:
-            raise MenuError(f"no menu {menu_name} in this zone")
-        self.menu = menu.ptr.target() if menu.ptr.kind == "alias" else menu.ptr.node
+            asset = next((a for a in zone.assets if a.type == "menu" and a.name == menu_name), None)
+            if asset is None:
+                raise MenuError(f"no menu {menu_name} in this zone")
+            menu = asset.ptr.target() if asset.ptr.kind == "alias" else asset.ptr.node
+        self.menu = menu
         ptr = self.menu.relocs.get(find_field(self.mrec, "items").offset)
         if ptr is None or ptr.kind != "follow":
             raise MenuError(f"menu {menu_name} has no items")
@@ -153,6 +164,31 @@ class MenuEditor:
             node.extra["ptr"] = item.relocs[off]
             struct.pack_into(">I", item.data, off, 0xFFFFFFFF)
         _rebuild_children(item)
+
+    def set_menu_string(self, field: str, text: Optional[str]):
+        """A string of the menu itself (``window.name``, ``onOpen``...)."""
+        rec = self.wrec if field.startswith("window.") else self.mrec
+        off = find_field(rec, field[7:] if field.startswith("window.") else field).offset
+        if field.startswith("window."):
+            off += find_field(self.mrec, "window").offset
+        if text is None:
+            self.menu.relocs[off] = _ptr("null", self.menu, off)
+            struct.pack_into(">I", self.menu.data, off, 0)
+        else:
+            node = _string_node(text, self.string_template)
+            self.menu.relocs[off] = _ptr("follow", self.menu, off, node)
+            node.extra["ptr"] = self.menu.relocs[off]
+            struct.pack_into(">I", self.menu.data, off, 0xFFFFFFFF)
+        _rebuild_children(self.menu)
+
+    def key_handlers(self, item: Node) -> List[Node]:
+        """The key handlers (execKey) of an item, in order."""
+        handlers = []
+        ptr = item.relocs.get(self.offset("onKey"))
+        while ptr is not None and ptr.kind != "null" and ptr.target() is not None:
+            handlers.append(ptr.target())
+            ptr = handlers[-1].relocs.get(8)
+        return handlers
 
     def rect(self, item: Node) -> Tuple[float, float, float, float]:
         return struct.unpack_from(">4f", item.data, self.offset("window.rect"))
@@ -318,14 +354,30 @@ def custom_rows(editor: MenuEditor) -> List[dict]:
 
 
 def make_dynamic(p: Platform, zone: Zone, rows: int = ROWS) -> List[dict]:
-    """Replace the custom map rows of ``levels_unlock`` by ``rows`` dynamic ones (see the module).
-    Returns CoD Xenon's rows that were there (map, localized name and description keys, preview
-    picture), for their description files."""
+    """The Nazi Zombies menu keeps the stock maps; CoD Xenon's rows of converted maps become one
+    "Custom Maps" row, which opens the menu ``codxe_usermaps``: ``rows`` dynamic rows showing the
+    maps of the usermaps folder, and the preview of the focused one (see the module). Returns CoD
+    Xenon's rows that were there (map, localized name and description keys, preview picture), for
+    their description files."""
     editor = MenuEditor(p, zone)
     found = custom_rows(editor)
     if not found:
-        raise MenuError(f"{LIST_MENU} has no custom map rows (already dynamic?)")
+        raise MenuError(f"{LIST_MENU} has no custom map rows (already made dynamic?)")
+    usermaps = MenuEditor(p, zone, menu=clone(editor.menu))
+    dropped = usermaps_menu(usermaps, rows)
+    custom_maps_row(editor, found)
+    add_menu(p, zone, usermaps.menu, USERMAPS_MENU, LIST_MENU, MENU_LIST)
+    check_references(zone, dropped)
+    add_preview_slot(p, zone, found[0]["image"])
+    return found
+
+
+def usermaps_menu(editor: MenuEditor, rows: int = ROWS) -> List[Node]:
+    """Make ``editor``'s menu (a copy of ``levels_unlock``) the Custom Maps menu: its frame (background,
+    Back), a title, and ``rows`` dynamic rows where the map rows were, with the preview of the
+    focused map. Returns the items of the copy left out."""
     items = editor.items
+    found = custom_rows(editor)
     template = found[0]
     button = items[template["button"]]
     row_items = [items[i] for i in template["row"]]
@@ -334,17 +386,34 @@ def make_dynamic(p: Platform, zone: Zone, rows: int = ROWS) -> List[dict]:
     backing, highlight, hint, _ = row_items
     old = template["highlight"]
     preview_items = [items[i] for i in template["preview"]]
-    removed = {i for r in found for i in r["row"] + r["preview"]}
-    first = min(removed)
-    y0 = min(r["y"] for r in found)
+    # the frame: the items before the first map row (row items are ROW_HEIGHT high)
+    first = next(i for i, item in enumerate(items) if abs(editor.rect(item)[3] - ROW_HEIGHT) < 1.5)
+    frame = items[:first]
+    y0 = editor.rect(items[first])[1]
     step = 20.0
-
-    new_items: List[Node] = []
 
     def row_copy(item: Node, row: int) -> Node:
         copy = clone(item)
         editor.move(copy, y0 + step * row - template["y"])
         return copy
+
+    new_items: List[Node] = list(frame)
+
+    # the title, in the style of the frame's texts
+    text_item = next((item for item in frame if editor.string(item, "text")), None)
+    if text_item is not None:
+        title = clone(text_item)
+        editor.set_string(title, "text", USERMAPS_TITLE)
+        editor.set_expression(title, "textExp", [])
+        editor.set_expression(title, "visibleExp", [])
+        struct.pack_into(">4f", title.data, editor.offset("window.rect"), *TITLE_RECT)
+        struct.pack_into(">4f", title.data, editor.offset("window.rectClient"), *TITLE_RECT)
+        struct.pack_into(">ii", title.data, editor.offset("window.rect") + 16, 1, 1)
+        struct.pack_into(">ii", title.data, editor.offset("window.rectClient") + 16, 1, 1)
+        struct.pack_into(">i", title.data, editor.offset("textAlignMode"), TITLE_ALIGN)
+        struct.pack_into(">f", title.data, editor.offset("textscale"), TITLE_SCALE)
+        struct.pack_into(">i", title.data, editor.offset("textStyle"), TITLE_STYLE)
+        new_items.append(title)
 
     visible_language = editor.expression(backing, "visibleExp")
 
@@ -389,7 +458,7 @@ def make_dynamic(p: Platform, zone: Zone, rows: int = ROWS) -> List[dict]:
     editor.set_expression(down, "visibleExp", [("op", OP_DVARINT), ("str", "ui_codxe_mapmore"), ("op", OP_RIGHTPAREN), ("op", OP_EQUALS), ("int", 1)])
     new_items.append(down)
 
-    # the position in the list ("14-26 / 40"), right of the last row (under it is the Back button)
+    # the position in the list ("14-26 / 40"), right of the last row
     counter = row_copy(hint, rows - 1)
     editor.move(counter, 0.0, COUNTER_DX)
     editor.set_string(counter, "text", None)
@@ -410,18 +479,86 @@ def make_dynamic(p: Platform, zone: Zone, rows: int = ROWS) -> List[dict]:
             editor.set_expression(copy, "textExp", _dvar_string("ui_codxe_maptitle" if is_title else "ui_codxe_mapdesc"))
         new_items.append(copy)
 
-    kept = [item for i, item in enumerate(items) if i not in removed]
-    position = sum(1 for i in range(first) if i not in removed)
-    editor.set_items(kept[:position] + new_items + kept[position:])
-    check_references(zone, [items[i] for i in removed])
+    dropped = [item for item in items if item not in new_items]
+    editor.set_items(new_items)
 
-    # LB / RB: a page up / down
-    key_owner = next((item for item in editor.items if item.relocs.get(editor.offset("onKey")) is not None and item.relocs[editor.offset("onKey")].kind == "follow"), editor.items[0])
+    # the menu: its own name, the first row focused; Back (B) closes it, LB / RB: a page up / down
+    editor.set_menu_string("window.name", USERMAPS_MENU)
+    editor.set_menu_string("onOpen", '"setfocus" "codxe_map0" ; ')
+    editor.set_menu_string("onClose", None)
+    for item in frame:
+        for handler in editor.key_handlers(item):
+            action = _text_of(handler, 4)
+            if action and LIST_MENU in action:
+                text = _string_node(action.replace(f'"{LIST_MENU}"', f'"{USERMAPS_MENU}"'), editor.string_template)
+                handler.relocs[4] = _ptr("follow", handler, 4, text)
+                text.extra["ptr"] = handler.relocs[4]
+                _rebuild_children(handler)
+    key_owner = next((item for item in frame if editor.key_handlers(item)), new_items[0])
     editor.add_key_handler(key_owner, KEY_LSHLDR, f'"setdvar" "ui_codxe_scroll" "-{rows}" ; ')
     editor.add_key_handler(key_owner, KEY_RSHLDR, f'"setdvar" "ui_codxe_scroll" "{rows}" ; ')
+    return dropped
 
-    add_preview_slot(p, zone, template["image"])
-    return found
+
+def custom_maps_row(editor: MenuEditor, found: List[dict]):
+    """Replace CoD Xenon's rows of converted maps (``found``) and their previews in the Nazi Zombies
+    menu by one "Custom Maps" row opening the Custom Maps menu."""
+    items = editor.items
+    template = found[0]
+    button = items[template["button"]]
+    row = [clone(items[i]) for i in template["row"]]
+    new_button = row[-1]
+    editor.set_string(new_button, "action", f'"play" "mouse_click" ; "open" "{USERMAPS_MENU}" ; ')
+    editor.set_expression(new_button, "textExp", [])
+    editor.set_string(new_button, "text", USERMAPS_TITLE)
+    # no map picture while it is focused
+    focus = re.sub(r'"show"\s+"image_[^"]*"\s*;\s*', "", editor.string(button, "onFocus") or "")
+    editor.set_string(new_button, "onFocus", focus)
+    removed = {i for r in found for i in r["row"] + r["preview"]}
+    first = min(removed)
+    kept = [item for i, item in enumerate(items) if i not in removed]
+    position = sum(1 for i in range(first) if i not in removed)
+    editor.set_items(kept[:position] + row + kept[position:])
+    check_references(editor.zone, [items[i] for i in removed])
+
+
+def add_menu(p: Platform, zone: Zone, menu: Node, name: str, after: str, menu_list: str):
+    """Add ``menu`` to the zone as the asset right after the menu ``after``, and to the menu list
+    ``menu_list`` (the game opens the menus of the lists it loads)."""
+    from .zone import ZoneAsset
+
+    assets = zone.assets_node
+    index = next((i for i, a in enumerate(zone.assets) if a.type == "menu" and a.name == after), None)
+    lists = [i for i, a in enumerate(zone.assets) if a.type == "menulist" and a.name == menu_list]
+    if index is None or not lists or lists[0] <= index:
+        raise MenuError(f"no menu {after} before the menu list {menu_list} in this zone")
+    ptr = _ptr("insert", assets, 0, menu)
+    menu.insert = True
+    menu.extra["ptr"] = ptr
+    entries = [(bytes(assets.data[8 * i : 8 * i + 8]), assets.relocs.get(8 * i + 4)) for i in range(len(zone.assets))]
+    entries.insert(index + 1, (struct.pack(">iI", p.asset_type_index["menu"], 0xFFFFFFFE), ptr))
+    assets.data = bytearray()
+    assets.relocs = {}
+    for i, (entry, slot) in enumerate(entries):
+        assets.data += entry
+        if slot is not None:
+            slot.offset = 8 * i + 4
+            assets.relocs[8 * i + 4] = slot
+    assets.count = 2 * len(entries)
+    assets.segments = [(assets.segments[0][0], assets.count, len(assets.data), False)]
+    _rebuild_children(assets)
+    zone.assets.insert(index + 1, ZoneAsset("menu", ptr, name))
+
+    # the menu list: one more menu
+    rec = p.record("MenuList")
+    listed = assets.relocs[8 * (lists[0] + 1) + 4].node
+    array = listed.relocs[find_field(rec, "menus").offset].node
+    offset = len(array.data)
+    array.data += b"\0\0\0\0"
+    array.count += 1
+    array.segments = [(array.segments[0][0], array.count, len(array.data), False)]
+    array.relocs[offset] = _ptr("alias", array, offset, slot=ptr, index=1)
+    struct.pack_into(">i", listed.data, find_field(rec, "menuCount").offset, array.count)
 
 
 def preview_texture(rgba):

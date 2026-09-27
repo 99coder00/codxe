@@ -245,12 +245,14 @@ python -m t4ff menu "<game>/_codxe/t4"      # or Update game menu... in the wind
 ```
 
 It keeps CoD Xenon's `zone/patch_ui.ff` as `patch_ui.ff.orig` and rewrites the
-menu's map list: the stock maps stay, then 13 rows show the maps of the
-`usermaps` folder, sorted by name. The D-pad scrolls past the first and last
-rows, LB / RB move a page, the line under the rows tells where you are
-("14-26 / 40"), and the right side shows the focused map's name, description and
-picture. New maps show up the next time the menu opens, without running it
-again.
+menu's map list: the stock maps stay, and CoD Xenon's own maps become one
+"Custom Maps" entry, which opens a menu of its own (`codxe_usermaps`, with the
+look of the Nazi Zombies menu: its background, a "Custom Maps" title and Back).
+There 13 rows show the maps of the `usermaps` folder, sorted by name. The D-pad
+scrolls past the first and last rows, LB / RB move a page, the line under the
+rows tells where you are ("14-26 / 40"), and the right side shows the focused
+map's name, description and picture; B goes back. New maps show up the next time
+the menu opens, without running it again.
 
 A map's name and description come from `description.txt` in its folder (first
 line, next lines): `convert` writes the name (`--name`, the "Map name" field),

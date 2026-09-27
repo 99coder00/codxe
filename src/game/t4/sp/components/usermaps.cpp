@@ -14,7 +14,8 @@ namespace
 {
 // Must match the menu (tools/t4ff/t4ff/menu.py): the rows it shows and the dvars it reads and sets.
 const int LIST_ROWS = 13;
-const char *const LIST_MENU = "levels_unlock";
+// The Custom Maps menu the Nazi Zombies menu opens; menus made by older t4ff have the rows in the Nazi Zombies menu.
+const char *const LIST_MENUS[] = {"codxe_usermaps", "levels_unlock"};
 const char *const USERMAPS_DIRECTORY = "usermaps";
 
 // ui_codxe_map<row>, ui_codxe_mapcmd<row>: the name and the command of each row ("" hides the row).
@@ -334,7 +335,10 @@ void Scroll(int delta)
 
 void UsermapList::OnMenuOpen(const char *menuName)
 {
-    if (!menuName || _stricmp(menuName, LIST_MENU) != 0)
+    bool listMenu = false;
+    for (size_t i = 0; menuName && i < ARRAYSIZE(LIST_MENUS); ++i)
+        listMenu = listMenu || _stricmp(menuName, LIST_MENUS[i]) == 0;
+    if (!listMenu)
         return;
 
     // Maps copied onto the drive since the last visit show up without restarting.

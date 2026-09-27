@@ -679,8 +679,9 @@ class MenuTests(unittest.TestCase):
 
     def test_dynamic_map_list(self):
         """The Nazi Zombies map list of CoD Xenon's patch_ui.ff: the stock rows stay, the 13 rows of
-        their maps become 13 rows showing dvars (CoD Xe fills them from the usermaps folder), with
-        scroll catchers, a counter, the preview of the focused map and LB / RB paging."""
+        their maps become one Custom Maps row opening the menu codxe_usermaps: 13 rows showing dvars
+        (CoD Xe fills them from the usermaps folder), with scroll catchers, a counter, the preview of
+        the focused map and LB / RB paging."""
         import contextlib
         import io
         import shutil
@@ -688,7 +689,7 @@ class MenuTests(unittest.TestCase):
 
         from t4ff.__main__ import main
         from t4ff.fastfile import read_fastfile
-        from t4ff.menu import COUNTER_DX, PREVIEW_SLOT, MenuEditor
+        from t4ff.menu import COUNTER_DX, MENU_LIST, PREVIEW_SLOT, USERMAPS_MENU, USERMAPS_TITLE, MenuEditor
         from t4ff.platforms import x360
         from t4ff.zone import Reader, asset_name
 
@@ -726,9 +727,26 @@ class MenuTests(unittest.TestCase):
 
             p = x360()
             zone = Reader(p, read_fastfile(os.path.join(tmp, "zone", "patch_ui.ff"))[2]).load()
-            editor = MenuEditor(p, zone)
-            actions = [editor.string(item, "action") or "" for item in editor.items]
+            levels = MenuEditor(p, zone)
+            actions = [levels.string(item, "action") or "" for item in levels.items]
             self.assertEqual(sorted(a.split("devmap ")[1].split('"')[0] for a in actions if "devmap" in a), sorted(["nazi_zombie_asylum", "nazi_zombie_factory", "nazi_zombie_prototype", "nazi_zombie_sumpf"]))
+            custom = [item for item in levels.items if levels.string(item, "text") == USERMAPS_TITLE]
+            self.assertEqual(len(custom), 1)
+            self.assertIn(f'"open" "{USERMAPS_MENU}"', levels.string(custom[0], "action"))
+            self.assertAlmostEqual(levels.rect(custom[0])[1], 134)
+            self.assertNotRegex(levels.string(custom[0], "onFocus"), r'"show"\s+"image_')  # no map picture
+            self.assertFalse(any((levels.string(item, "window.name") or "").startswith("codxe_map") for item in levels.items))
+            # the Custom Maps menu, loaded by the game with the menus of ui/patch_menus.txt
+            names = [a.name for a in zone.assets]
+            self.assertEqual(names.index(USERMAPS_MENU), names.index("levels_unlock") + 1)
+            listed = next(a for a in zone.assets if a.name == MENU_LIST).ptr.node
+            menus = listed.relocs[8].node
+            self.assertEqual(struct.unpack_from(">i", listed.data, 4)[0], menus.count)
+            self.assertIs(menus.relocs[4 * (menus.count - 1)].target(), next(a for a in zone.assets if a.name == USERMAPS_MENU).ptr.node)
+            editor = MenuEditor(p, zone, USERMAPS_MENU)
+            self.assertEqual([editor.string(item, "text") for item in editor.items].count(USERMAPS_TITLE), 1)
+            self.assertFalse(any("devmap" in (editor.string(item, "action") or "") for item in editor.items))
+            actions = [editor.string(item, "action") or "" for item in editor.items]
             names = [editor.string(item, "window.name") for item in editor.items]
             rows = [names.index(f"codxe_map{k}") for k in range(13)]
             self.assertEqual(rows, sorted(rows))
@@ -739,7 +757,7 @@ class MenuTests(unittest.TestCase):
                 self.assertEqual(editor.expression(item, "textExp"), [("op", 31), ("str", f"ui_codxe_map{k}"), ("op", 1)])
                 self.assertIn(f'"exec" "vstr ui_codxe_mapcmd{k}"', actions[index])
                 self.assertIn(f'"setdvar" "ui_codxe_focus" "{k}"', editor.string(item, "onFocus"))
-                self.assertAlmostEqual(editor.rect(item)[1], 134 + 20 * k)
+                self.assertAlmostEqual(editor.rect(item)[1], 54 + 20 * k)
             self.assertEqual(names.count("image_codxe_map"), 3)
             counter = next(item for item in editor.items if editor.expression(item, "textExp") == [("op", 31), ("str", "ui_codxe_maprange"), ("op", 1)])
             last = editor.items[rows[-1]]
@@ -761,6 +779,8 @@ class MenuTests(unittest.TestCase):
                     handlers.setdefault(struct.unpack_from(">i", node.data, 0)[0], []).append(bytes(node.relocs[4].target().data))
             self.assertIn(b'"setdvar" "ui_codxe_scroll" "-13" ; \0', handlers[5])
             self.assertIn(b'"setdvar" "ui_codxe_scroll" "13" ; \0', handlers[6])
+            self.assertIn(f'"close" "{USERMAPS_MENU}" ; \0'.encode(), handlers[2])  # Back
+            self.assertIn(b'"close" "levels_unlock" ; \0', handlers[2])
 
 
 class GuiTests(unittest.TestCase):

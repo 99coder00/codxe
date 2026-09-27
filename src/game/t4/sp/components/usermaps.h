@@ -6,8 +6,8 @@ namespace t4
 {
 namespace sp
 {
-// The Nazi Zombies map list (the levels_unlock menu) shows the maps of the usermaps folder, scrolling.
-// The menu (made by tools/t4ff "menu") has rows whose text and command are dvars this module fills;
+// The Custom Maps menu (codxe_usermaps, opened from the Nazi Zombies menu) shows the maps of the usermaps folder,
+// scrolling. The menu (made by tools/t4ff "menu") has rows whose text and command are dvars this module fills;
 // see OnMenuOpen and OnUIRefresh.
 class UsermapList : public Module
 {

@@ -376,7 +376,7 @@ def cmd_menu(args):
         print(f"error: {e}")
         return 1
     write_zone(zone, target)
-    print(f"{target}: the map list shows the maps of the usermaps folder, {args.rows} at a time (LB / RB: a page)")
+    print(f'{target}: "Custom Maps" in the Nazi Zombies menu lists the maps of the usermaps folder, {args.rows} at a time (LB / RB: a page)')
 
     # names, descriptions and pictures of CoD Xenon's maps, whose rows the list replaces
     usermaps = os.path.join(root, "usermaps")
