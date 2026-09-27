@@ -400,3 +400,8 @@ FodyWeavers.xsd
 
 # JetBrains Rider
 *.sln.iml
+
+# Private copies of OpenAssetTools (e.g. the Xbox 360 fork, shared with us on the condition that its code
+# is not published): keep them next to the repository, never in it
+/OpenAssetTools-xenon*/
+/OpenAssetTools-private*/
