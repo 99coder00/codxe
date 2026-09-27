@@ -268,7 +268,7 @@ def cmd_convert(args):
 
     title = args.name.strip() or map_title(map_files, name)
     description = os.path.join(out_dir, "description.txt")
-    if args.name.strip() or not os.path.exists(description):
+    if args.name.strip() or not os.path.exists(description) or _bare_description(description, name):
         with open(description, "w", encoding="latin-1", errors="replace", newline="\r\n") as f:
             f.write(title + "\n")
         print(f'map list name: "{title}" ({description}; change it there or with --name)')
@@ -298,6 +298,14 @@ def cmd_convert(args):
         if write_preview(out_dir, name):
             print("map list picture: preview.bin, from the loading screen")
     return 0
+
+
+def _bare_description(path: str, name: str) -> bool:
+    """Whether the description.txt at ``path`` only has the map's file name (as older conversions
+    wrote it from an .arena name that repeats it): a better one replaces it, edited ones stay."""
+    with open(path, "r", encoding="latin-1") as f:
+        lines = [line.strip() for line in f if line.strip()]
+    return lines == [name]
 
 
 def _convert_map(args, paths, options, map_files, out_dir):

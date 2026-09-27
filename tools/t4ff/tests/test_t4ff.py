@@ -551,7 +551,7 @@ class LoadScreenTests(unittest.TestCase):
             # an arena file listing other maps first (The Simpsons' lists the campaign's "mak")
             with open(os.path.join(tmp, "mod.arena"), "w") as f:
                 f.write('{\n\tmap "mak"\n\tlongname "MENU_LEVEL_MAK"\n}\n{\n\tmap "simpsons"\n\tlongname "simpsons"\n}\n')
-            self.assertEqual(map_title(IwdLibrary([tmp]), "simpsons"), "simpsons")
+            self.assertEqual(map_title(IwdLibrary([tmp]), "simpsons"), "Simpsons")  # the file name again: written like the others
             self.assertEqual(map_title(IwdLibrary([tmp]), "other_map"), "Other Map")
 
     def test_load_zone_from_cod_xenon_template(self):

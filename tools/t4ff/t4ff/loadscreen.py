@@ -362,8 +362,14 @@ def map_title(map_files, map_name: str) -> str:
             if not found or (entry_map and entry_map.group(1).lower() != map_name.lower()):
                 continue
             title = re.sub(r"\^.", "", found.group(1)).strip()
-            if title and not re.fullmatch(r"[A-Z0-9_]+", title):
+            # a localization key is no name, and a bare file name is written like the others
+            if title and not re.fullmatch(r"[A-Z0-9_]+", title) and title.lower() != map_name.lower():
                 return title
+    return pretty_map_name(map_name)
+
+
+def pretty_map_name(map_name: str) -> str:
+    """"nazi_zombie_wh" -> "Nazi Zombie Wh" (as CoD Xe names a map without a description.txt)."""
     return " ".join(word[:1].upper() + word[1:] for word in map_name.replace("_", " ").split())
 
 
