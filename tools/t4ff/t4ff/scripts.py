@@ -112,6 +112,43 @@ def use_key_hints(p: Platform, zone: Zone, log=print) -> List[str]:
     return changed
 
 
+# The DLC2 / DLC3 modding kits (Sparks') check a map's entities with modderHelp(entity, message), and
+# their setup code stops when one is missing ("return; // Kill Thread"). But modderHelp only says
+# so with the developer dvar on: in the game as played it says nothing is missing, and the setup
+# goes on without the entities. The retail game runs a script on past runtime errors, so a loop
+# over a missing entity never ends: The Simpsons has no zipline, and the zipline's setup loops
+# forever (the console kills the thread, "potential infinite loop in script"; Xenia crashes).
+_MODDER_HELP = re.compile(rb"(?m)^(modderHelp[ \t]*\([ \t]*(\w+)[ \t]*,[ \t]*(\w+)[ \t]*\)[ \t]*\r?\n[ \t]*\{)")
+_MODDER_HELP_FIX = b"// t4ff: a missing entity stops the setup without developer too"
+
+
+def fix_modder_help(p: Platform, zone: Zone, log=print) -> List[str]:
+    """modderHelp says a missing entity is missing also without developer (see above). Returns the
+    names of the scripts changed."""
+    changed = []
+    for name, node in _rawfiles(p, zone):
+        if name.startswith(",") or not name.lower().endswith(".gsc") or _buffer(node) is None:
+            continue
+        text = rawfile_text(node)
+        if b"modderHelp" not in text or _MODDER_HELP_FIX in text:
+            continue
+        newline = b"\r\n" if b"\r\n" in text else b"\n"
+
+        def fix(m):
+            entity, msg = m.group(2), m.group(3)
+            return (m.group(1) + newline + b"\t" + _MODDER_HELP_FIX + newline
+                    + b"\tif( !isDefined( " + entity + b" ) && isDefined( " + msg + b' ) && getDvarInt( "developer" ) < 1 )' + newline
+                    + b"\t\treturn true;" + newline)
+
+        new, count = _MODDER_HELP.subn(fix, text)
+        if count:
+            set_rawfile_text(p, node, new)
+            changed.append(normalize(name))
+    if changed:
+        log(f"scripts: the modding kit's check for missing entities works without developer too, so setups stop there ({', '.join(changed)})")
+    return changed
+
+
 def _pointer(kind: str, owner: Node, offset: int, node: Node) -> Ptr:
     ptr = Ptr(kind, node)
     ptr.owner = owner

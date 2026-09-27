@@ -343,6 +343,39 @@ death
         self.assertEqual(p.u32.unpack_from(music.data, find_field(p.record("RawFile"), "len").offset)[0], len(text))
         self.assertEqual(rawfile_text(other), b'iprintln("Press F to pay respects");\n')
 
+    def test_modder_help_without_developer(self):
+        """The modding kits' modderHelp says a missing entity is missing also without developer, so
+        the setups stop there (The Simpsons' zipline setup looped forever); once, CRLF kept."""
+        from unittest import mock
+
+        from t4ff.layout import TypeRef
+        from t4ff.platforms import x360
+        from t4ff.scripts import fix_modder_help, make_rawfile, rawfile_text
+        from t4ff.zone import BLOCK_VIRTUAL, Node, Ptr
+
+        p = x360()
+        template = Node(TypeRef("record", "RawFile", p.record("RawFile").size), 1, BLOCK_VIRTUAL)
+        template.data = bytearray(p.record("RawFile").size)
+        buffer = Node(TypeRef("scalar", "char", 1, 1), 1, BLOCK_VIRTUAL)
+        buffer.extra["origin"] = ("member", "RawFile", "buffer")
+        buffer.segments = [(buffer.type, 1, 1, False)]
+        template.relocs[8] = Ptr("follow", buffer)
+        template.children = [buffer]
+        kit = (b'modderHelp( Entity, Msg )\r\n{\r\n\t// Developer Needs To Be Set To 1\r\n\tif( getDvarInt( "developer" ) >= 1 )\r\n'
+               b'\t{\r\n\t\treturn true;\r\n\t}\r\n\treturn false;\r\n}\r\n\r\ninit()\r\n{\r\n\tif( modderHelp( trig, "Missing." ) )\r\n\t{\r\n\t\treturn;\r\n\t}\r\n}\r\n')
+        util = make_rawfile(p, template, "maps/dlc2_util.gsc", kit)
+        other = make_rawfile(p, template, "maps/zipline.gsc", b'init()\n{\n\tif( modderHelp( trig, "Missing." ) )\n\t\treturn;\n}\n')
+        files = [("maps/dlc2_util.gsc", util), ("maps/zipline.gsc", other)]
+        with mock.patch("t4ff.scripts._rawfiles", lambda p, z: files):
+            self.assertEqual(fix_modder_help(p, None, log=lambda msg: None), ["maps/dlc2_util.gsc"])
+            self.assertEqual(fix_modder_help(p, None, log=lambda msg: None), [])  # once
+        text = rawfile_text(util)
+        self.assertTrue(text.startswith(b'modderHelp( Entity, Msg )\r\n{\r\n\t// t4ff: a missing entity stops the setup without developer too\r\n'
+                                        b'\tif( !isDefined( Entity ) && isDefined( Msg ) && getDvarInt( "developer" ) < 1 )\r\n\t\treturn true;\r\n'
+                                        b'\r\n\t// Developer Needs To Be Set To 1\r\n'))
+        self.assertEqual(text.count(b"modderHelp"), kit.count(b"modderHelp"))  # the calls are left alone
+        self.assertEqual(rawfile_text(other), b'init()\n{\n\tif( modderHelp( trig, "Missing." ) )\n\t\treturn;\n}\n')
+
 
 class UsermapTests(unittest.TestCase):
     def test_find_usermap(self):

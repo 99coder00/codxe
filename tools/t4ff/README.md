@@ -229,6 +229,15 @@ name the buttons ("A: Beauty Of Annihilation", "Press B to close menu"). Hints
 the scripts set naming the PC's use key ("Press F To Play A Song") show the
 console's use button.
 
+Maps made with Sparks' DLC2 / DLC3 modding kits check their entities with
+`modderHelp()`, whose setups are meant to stop when one is missing, but it only
+says so with `developer` on. In the game as played the setups go on without the
+entities, and as the retail game keeps running a script past a runtime error,
+a loop over a missing entity never ends: The Simpsons has no zipline, and its
+zipline setup loops forever (the console kills the thread, "potential infinite
+loop in script"; Xenia crashes with "Overflowed stackpoints!"). The converted
+`modderHelp()` says a missing entity is missing also without `developer`.
+
 Some errors in the console log come from the PC map itself and are harmless:
 PC Aztec's zombie type names a `walther` sidearm zombies never draw, and
 `collision_geo_32x32x128` is precached but never used.
