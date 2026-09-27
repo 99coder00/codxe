@@ -1,8 +1,9 @@
-"""Vectorised DXT1/DXT3/DXT5 decoding and encoding (numpy).
+"""Vectorised DXT1/DXT3/DXT5/DXN decoding and encoding (numpy).
 
-Used to compress uncompressed PC textures for the console and to downscale
-textures that have no mip levels to drop. The encoder is a range fit along the
-principal colour axis, which is fast and good enough for game textures.
+Used to compress uncompressed PC textures for the console, to downscale
+textures that have no mip levels to drop and to turn PC normal maps into the
+console's DXN ones. The encoder is a range fit along the principal colour axis,
+which is fast and good enough for game textures.
 """
 
 from __future__ import annotations
@@ -80,10 +81,17 @@ def _decode_alpha5(alpha: np.ndarray) -> np.ndarray:
 
 
 def decode(data: bytes, width: int, height: int, fmt: str) -> np.ndarray:
-    """Decode DXT data (linear PC layout) to an (h, w, 4) RGBA uint8 array."""
+    """Decode DXT/DXN data (linear PC layout) to an (h, w, 4) RGBA uint8 array."""
     bpb = 8 if fmt == "DXT1" else 16
     n = max(1, (width + 3) // 4) * max(1, (height + 3) // 4)
     raw = np.frombuffer(data[: n * bpb], dtype=np.uint8).reshape(n, bpb)
+    if fmt == "DXN":
+        # two DXT5 alpha style blocks: red (x), then green (y); blue gets z back
+        x, y = _decode_alpha5(raw[:, :8]), _decode_alpha5(raw[:, 8:])
+        fx, fy = x / 127.5 - 1, y / 127.5 - 1
+        z = np.round((np.sqrt(np.clip(1 - fx * fx - fy * fy, 0, 1)) + 1) * 127.5)
+        out = np.stack([x, y, z, np.full_like(x, 255)], axis=2).astype(np.uint8)
+        return _unblocks(out, width, height)
     if fmt == "DXT1":
         rgb, alpha = _decode_color(raw, True)
     else:
@@ -175,7 +183,7 @@ def _encode_alpha5(alpha: np.ndarray) -> np.ndarray:
 
 
 def encode(rgba: np.ndarray, fmt: str) -> bytes:
-    """Encode an (h, w, 4) RGBA uint8 array to DXT1/DXT5 (linear PC layout)."""
+    """Encode an (h, w, 4) RGBA uint8 array to DXT1/DXT5 or DXN (red and green) (linear PC layout)."""
     blocks = _blocks(rgba).astype(np.float64)
     rgb = blocks[:, :, :3]
     alpha = blocks[:, :, 3]
@@ -183,9 +191,22 @@ def encode(rgba: np.ndarray, fmt: str) -> bytes:
         out = _encode_color(rgb, alpha < 128)
     elif fmt == "DXT5":
         out = np.concatenate([_encode_alpha5(alpha.astype(np.int64)), _encode_color(rgb)], axis=1)
+    elif fmt == "DXN":
+        out = np.concatenate([_encode_alpha5(rgb[:, :, 0].astype(np.int64)), _encode_alpha5(rgb[:, :, 1].astype(np.int64))], axis=1)
     else:
         raise ValueError(fmt)
     return out.tobytes()
+
+
+def dxt5_normal_to_dxn(data: bytes, width: int, height: int) -> bytes:
+    """A PC DXT5 normal map (x in alpha, y in the grey colour) as DXN (x, then y).
+
+    The alpha blocks are kept as they are (DXN blocks are DXT5 alpha blocks), only y is
+    encoded again."""
+    n = max(1, (width + 3) // 4) * max(1, (height + 3) // 4)
+    raw = np.frombuffer(data[: n * 16], dtype=np.uint8).reshape(n, 16)
+    rgb, _ = _decode_color(raw[:, 8:], False)
+    return np.concatenate([raw[:, :8], _encode_alpha5(rgb[:, :, 1].astype(np.int64))], axis=1).tobytes()
 
 
 def downscale(rgba: np.ndarray) -> np.ndarray:

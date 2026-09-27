@@ -22,6 +22,9 @@ IWI_FORMATS = {
     0x0D: "DXT5",
 }
 
+# GfxImage.semantic of normal maps: DXN on the console
+TS_NORMAL_MAP = 5
+
 IWI_FLAG_NOPICMIP = 0x01
 IWI_FLAG_NOMIPMAPS = 0x02
 IWI_FLAG_CUBEMAP = 0x04
@@ -254,7 +257,7 @@ def reduce_image(image: ImageData, count: int) -> ImageData:
             break
         if len(levels) > 1:
             levels.pop(0)
-        elif image.format in ("DXT1", "DXT3", "DXT5"):
+        elif image.format in ("DXT1", "DXT3", "DXT5", "DXN"):
             rgba = dxt.downscale(dxt.decode(levels[0], w, h, image.format))
             fmt = "DXT5" if image.format == "DXT3" else image.format
             levels = [dxt.encode(rgba, fmt)]
@@ -268,6 +271,28 @@ def reduce_image(image: ImageData, count: int) -> ImageData:
     return ImageData(image.name, image.format, w, h, levels, image.flags, image.source)
 
 
+def normal_map_to_dxn(image: ImageData) -> ImageData:
+    """A PC normal map in the console's normal map format, DXN.
+
+    PC normal maps keep x in alpha and y in green (DXT5: a grey colour block, x in the alpha
+    block); the console's shaders read x and y from the two channels of DXN, which all of its
+    normal maps use. Other formats are returned as they are."""
+    from . import dxt
+
+    if image.format not in ("DXT5", "A8R8G8B8"):
+        return image
+    levels = []
+    w, h = image.width, image.height
+    for level in image.levels:
+        if image.format == "DXT5":
+            levels.append(dxt.dxt5_normal_to_dxn(level, w, h))
+        else:
+            rgba = dxt.bgra_to_rgba(level, w, h)
+            levels.append(dxt.encode(rgba[:, :, [3, 1, 2, 0]], "DXN"))
+        w, h = max(w >> 1, 1), max(h >> 1, 1)
+    return ImageData(image.name, "DXN", image.width, image.height, levels, image.flags, image.source)
+
+
 def _drop_count(image: ImageData, max_size: int, drop_levels: int) -> int:
     count, w, h = 0, image.width, image.height
     while min(w, h) > 4 and ((max_size and (w > max_size or h > max_size)) or count < drop_levels):
@@ -276,13 +301,16 @@ def _drop_count(image: ImageData, max_size: int, drop_levels: int) -> int:
     return count
 
 
-def build_console_texture(image: ImageData, max_size: int = 0, keep_mips: bool = True, drop_levels: int = 0, compress: bool = True) -> ConsoleTexture:
+def build_console_texture(image: ImageData, max_size: int = 0, keep_mips: bool = True, drop_levels: int = 0, compress: bool = True, normal_map: bool = False) -> ConsoleTexture:
     """Tile ``image`` for the Xbox 360.
 
     ``max_size`` limits the base level dimensions and ``drop_levels`` removes additional top
     levels. Uncompressed colour textures are compressed to DXT when ``compress`` is set.
+    ``normal_map``: a PC normal map, made DXN (see :func:`normal_map_to_dxn`).
     """
 
+    if normal_map:
+        image = normal_map_to_dxn(image)
     if compress:
         image = compress_image(image)
     if image.format == "R8G8B8":
@@ -320,9 +348,11 @@ def build_console_texture(image: ImageData, max_size: int = 0, keep_mips: bool =
     return ConsoleTexture(fmt, width, height, len(levels), header, pixels, drop)
 
 
-def console_texture_size(image: ImageData, max_size: int = 0, keep_mips: bool = True, drop_levels: int = 0, compress: bool = True) -> int:
+def console_texture_size(image: ImageData, max_size: int = 0, keep_mips: bool = True, drop_levels: int = 0, compress: bool = True, normal_map: bool = False) -> int:
     """Size of the console texture :func:`build_console_texture` would produce (without tiling)."""
     fmt_name = image.format
+    if normal_map and fmt_name in ("DXT5", "A8R8G8B8"):
+        fmt_name = "DXN"
     if compress and fmt_name in ("A8R8G8B8", "X8R8G8B8", "R8G8B8"):
         fmt_name = "DXT5"  # upper bound, DXT1 when opaque
     fmt_name = {"R8G8B8": "A8R8G8B8", "X8R8G8B8": "A8R8G8B8", "A8": "A8L8"}.get(fmt_name, fmt_name)

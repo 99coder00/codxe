@@ -954,6 +954,47 @@ class IwiTests(unittest.TestCase):
         texture = images.build_console_texture(alpha, compress=True)
         self.assertEqual(texture.format.name, "A8L8")
 
+    def test_normal_maps_become_dxn(self):
+        """PC normal maps keep x in alpha and y in green (DXT5: a grey colour block); the console's
+        are DXN, x then y, which its shaders read."""
+        from t4ff import dxt
+
+        w, h = 64, 32
+        yy, xx = np.mgrid[0:h, 0:w]
+        x = (xx * 4 % 256).astype(np.uint8)
+        y = (255 - yy * 8 % 256).astype(np.uint8)
+        pc = np.stack([y, y, y, x], axis=2)  # grey y, x in alpha
+        levels, rgba = [], pc
+        while True:
+            levels.append(dxt.encode(rgba, "DXT5"))
+            if min(rgba.shape[:2]) <= 4:
+                break
+            rgba = dxt.downscale(rgba)
+        image = images.ImageData("brick_n", "DXT5", w, h, levels)
+        dxn = images.normal_map_to_dxn(image)
+        self.assertEqual((dxn.format, len(dxn.levels)), ("DXN", len(levels)))
+        self.assertEqual([len(level) for level in dxn.levels], [len(level) for level in levels])
+        decoded = dxt.decode(dxn.levels[0], w, h, "DXN").astype(int)
+        source = dxt.decode(levels[0], w, h, "DXT5").astype(int)
+        self.assertTrue(np.array_equal(decoded[:, :, 0], source[:, :, 3]))  # the alpha blocks are kept
+        self.assertLessEqual(np.abs(decoded[:, :, 1] - source[:, :, 1]).max(), 12)
+        self.assertLessEqual(np.abs(decoded[:, :, 0] - x.astype(int)).max(), 12)
+
+        # uncompressed (BGRA): the same channels
+        bgra = pc[:, :, [2, 1, 0, 3]].tobytes()
+        flat = images.normal_map_to_dxn(images.ImageData("flat_n", "A8R8G8B8", w, h, [bgra]))
+        decoded = dxt.decode(flat.levels[0], w, h, "DXN").astype(int)
+        self.assertLessEqual(np.abs(decoded[:, :, 0] - x.astype(int)).max(), 12)
+        self.assertLessEqual(np.abs(decoded[:, :, 1] - y.astype(int)).max(), 12)
+
+        texture = images.build_console_texture(image, normal_map=True)
+        self.assertEqual(texture.format.name, "DXN")
+        self.assertEqual(images.console_texture_size(image, normal_map=True), images.console_texture_size(dxn))
+        self.assertEqual(images.build_console_texture(image).format.name, "DXT5")  # not a normal map
+        # the texture budget can scale down a DXN texture without mip levels
+        single = images.reduce_image(images.ImageData("n", "DXN", w, h, dxn.levels[:1]), 1)
+        self.assertEqual((single.width, single.height, len(single.levels[0])), (32, 16, images.level_size("DXN", 32, 16)))
+
 
 class XenosTests(unittest.TestCase):
     def test_tiling_roundtrip(self):

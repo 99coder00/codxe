@@ -8,7 +8,9 @@ keeps them small enough for the console's memory:
   (GfxWorld, collision, paths), effects, weapons, materials, sounds, menus,
   scripts, string tables and localized strings.
 - **Textures** are rebuilt as tiled Xenos textures with their mip chains.
-  Uncompressed textures are DXT compressed. Each map keeps as much texture
+  Uncompressed textures are DXT compressed. Normal maps become DXN, the format
+  of all the console's (the PC keeps x in alpha and y in green, the console's
+  shaders read x and y from DXN's two channels). Each map keeps as much texture
   quality as fits in memory: the texture budget is what a memory target based on
   CoD Xenon's working maps leaves, and only when a map is over it do its largest
   textures lose top mip levels. Stock textures use the console's own versions.

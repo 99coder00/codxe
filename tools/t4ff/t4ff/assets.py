@@ -257,7 +257,7 @@ def image_hook(conv, asset_type, node, name):
 
     drop = conv.image_drop_levels.get(name, 0)
     try:
-        tex = img.build_console_texture(source, conv.options.max_texture_size, conv.options.keep_mips, drop, conv.options.compress_textures)
+        tex = img.build_console_texture(source, conv.options.max_texture_size, conv.options.keep_mips, drop, conv.options.compress_textures, _pc_normal_map(source, semantic))
     except img.ImageError as e:
         conv.warn(str(e) + ", emitting a reference")
         return _reference(conv, asset_type, node, name)
@@ -267,6 +267,11 @@ def image_hook(conv, asset_type, node, name):
     conv.node_map[id(node)] = new
     conv.offset_maps[id(node)] = lambda off: off
     return new
+
+
+def _pc_normal_map(source: img.ImageData, semantic: int) -> bool:
+    """Whether ``source`` is a PC normal map (made DXN; the console's are DXN already)."""
+    return semantic == img.TS_NORMAL_MAP and source.source != "console"
 
 
 def image_source(conv, node: Node, name: str) -> Optional[img.ImageData]:
@@ -396,8 +401,10 @@ def plan_textures_shared(convs):
     """
     options = convs[0].options
     sources = {}
+    normal_maps = set()  # PC normal maps, made DXN
     fixed = set()  # textures counted but not reduced
     map_type = find_field(convs[0].src.record("GfxImage"), "mapType").offset
+    semantic = find_field(convs[0].src.record("GfxImage"), "semantic").offset
     for conv in convs:
         for node in conv.zone.extra_root.walk():
             if node.type.kind == "record" and node.type.name == "GfxImage" and (node.extra.get("origin") or ("",))[0] == "asset":
@@ -416,9 +423,11 @@ def plan_textures_shared(convs):
                     src = console_image(conv, plain)
                 if src is not None and src.format in ("DXT1", "DXT3", "DXT5", "DXN", "A8R8G8B8", "R8G8B8", "A8L8", "A8", "L8"):
                     sources[plain] = src
+                    if _pc_normal_map(src, node.data[semantic]):
+                        normal_maps.add(plain)
                     # the world's own images (lightmaps, $outdoor: the map's lighting) keep their
                     # size, and single level images of formats reduce_image cannot scale down
-                    if plain[:1] in "*$" or (len(src.levels) == 1 and src.format not in ("DXT1", "DXT3", "DXT5", "A8R8G8B8", "X8R8G8B8")):
+                    if plain[:1] in "*$" or (len(src.levels) == 1 and src.format not in ("DXT1", "DXT3", "DXT5", "DXN", "A8R8G8B8", "X8R8G8B8")):
                         fixed.add(plain)
 
     # textures that console library copies of PC references (materials, models, effects, ...) bring along
@@ -450,7 +459,7 @@ def plan_textures_shared(convs):
 
     def size(n):
         # pixel data is 4 KiB aligned in the zone
-        return (img.console_texture_size(sources[n], options.max_texture_size, options.keep_mips, drops[n], options.compress_textures) + 4095) & ~4095
+        return (img.console_texture_size(sources[n], options.max_texture_size, options.keep_mips, drops[n], options.compress_textures, n in normal_maps) + 4095) & ~4095
 
     def can_drop(n):
         if n in fixed:
