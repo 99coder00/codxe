@@ -10,6 +10,7 @@ budget:
 2. then the longest sounds become streamed sounds, as CoD Xenon did with the tank sounds of Aztec:
    the alias plays ``sounds\\<dir>\\<name>.xma`` from the map folder (CoD Xe serves the map's
    ``sounds`` folder), which this writes, and the sound no longer takes memory in the fastfile.
+   Looping sounds stay loaded (see :func:`limit_loaded_sounds`).
 """
 
 from __future__ import annotations
@@ -71,6 +72,7 @@ def _pointer(kind: str, owner: Node, offset: int, node: Optional[Node] = None) -
 
 ALIAS_TYPE_SHIFT = 13  # snd_alias_t.flags bits 13-14: the type of the alias' sound file
 ALIAS_TYPE_MASK = 3 << ALIAS_TYPE_SHIFT
+ALIAS_LOOPING = 1  # snd_alias_t.flags bit 0: a looping sound (every ambient loop of the maps has it)
 
 
 def sync_alias_types(p: Platform, zone: Zone) -> int:
@@ -171,7 +173,27 @@ def limit_loaded_sounds(p: Platform, zone: Zone, limit: int, streams: Dict[str, 
         stream = streams.get(asset_name(p, sound).lstrip(",").lower())
         return stream.valid_samples / stream.rate if stream is not None and stream.rate else -1.0
 
-    candidates = sorted((s for s in sounds if duration(s) > 0), key=duration, reverse=True)
+    # Sounds a looping alias plays stay loaded: a looping stream holds one of the console's few
+    # stream channels as long as it plays (an ambient loop all game long, a fire loop per hellhound),
+    # and the other streamed sounds (music, voices) are cut off halfway or do not start.
+    arec = p.record("snd_alias_t")
+    flags_off = find_field(arec, "flags").offset
+    file_off = find_field(arec, "soundFile").offset
+    looping = set()
+    for n in zone.extra_root.walk():
+        if n.type.name != "snd_alias_t":
+            continue
+        for i in range(n.count):
+            if not p.u32.unpack_from(n.data, i * arec.size + flags_off)[0] & ALIAS_LOOPING:
+                continue
+            ptr = n.relocs.get(i * arec.size + file_off)
+            sound_file = ptr.target() if ptr is not None and ptr.kind != "null" else None
+            loaded = sound_file.relocs.get(u) if sound_file is not None else None
+            target = loaded.target() if loaded is not None and loaded.kind != "null" else None
+            if target is not None:
+                looping.add(id(target))
+
+    candidates = sorted((s for s in sounds if duration(s) > 0 and id(s) not in looping), key=duration, reverse=True)
     for sound in candidates:
         if within():
             break
@@ -210,9 +232,11 @@ def limit_loaded_sounds(p: Platform, zone: Zone, limit: int, streams: Dict[str, 
     sync_alias_types(p, zone)
     stats.update(count=count, bytes=size)
     limits = " and ".join(([f"{limit} loaded sounds"] if limit else []) + ([f"{max_bytes / 1048576:.0f} MiB"] if max_bytes else []))
+    stats["looping"] = sum(1 for s in sounds if id(s) in looping)
     log(
         f"loaded sounds: {stats['streamed']} of the longest are streamed from the map's sounds folder "
-        f"({stats['stream_bytes'] / 1048576:.1f} MiB) to stay within {limits}"
+        f"({stats['stream_bytes'] / 1048576:.1f} MiB) to stay within {limits}, looping ones stay loaded"
         + ("" if not limit or count <= limit else f"; {count} remain, more than the limit: the map may not load")
+        + ("" if not max_bytes or size <= max_bytes else f"; {size / 1048576:.1f} MiB remain (lower --sound-rate or --mono-sounds for less)")
     )
     return stats

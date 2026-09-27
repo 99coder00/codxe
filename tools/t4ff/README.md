@@ -110,7 +110,7 @@ Useful options:
 | `--iwd PATH` | The PC game's own files (e.g. its `main` folder): stock textures a map uses and no console fastfile has are converted from them. Stock textures the console fastfiles have keep the console's version (Treyarch sized them for the console), which leaves the memory to the map's own textures. The game's streamed sounds the map uses are encoded from them too, into the map's `sounds` folder: the console's disc has none of the downloadable maps' (Der Riese's voices, the easter egg songs of a music box). |
 | `--texture-budget MIB` | Texture memory for the map and its mod together, `0` for no limit. Default `auto`: what `--memory-target` leaves, at most 96 MiB. Largest textures lose their top mip level first; the world's lightmaps keep theirs. |
 | `--memory-target MIB` | Memory the map may use once loaded, for the automatic texture budget (default 200: CoD Xenon's 13 maps use 148 to 220). The map is converted, measured and, when over, converted again with less texture memory. |
-| `--loaded-sound-memory MIB` | Memory of the loaded sounds (default 32; CoD Xenon's maps have up to 35). Beyond it the longest become streamed sounds, which keep their quality. 0: no limit. |
+| `--loaded-sound-memory MIB` | Memory of the loaded sounds (default 32; CoD Xenon's maps have up to 35). Beyond it the longest become streamed sounds, which keep their quality; looping ones stay loaded. 0: no limit. |
 | `--max-texture-size N` | Cap texture dimensions. |
 | `--no-mips` | Drop all mip levels (about 25% less memory, but textures shimmer at a distance). |
 | `--no-compress` | Keep uncompressed textures uncompressed. |
@@ -306,7 +306,9 @@ keep full quality when that is enough (Zombie Woods, Aztec: about 130 MiB with
 every texture at full size). A map over the target is converted again with
 less texture memory, its largest textures losing top mip levels first; the
 world's lightmaps keep theirs. Loaded sounds beyond `--loaded-sound-memory`
-(32 MiB) are streamed, the longest first. `--max-texture-size`,
+(32 MiB) are streamed, the longest first; looping sounds stay loaded, since a
+looping stream holds one of the console's few stream channels as long as it
+plays and the music and voices, streamed too, are then cut off halfway. `--max-texture-size`,
 `--sound-rate 32000` and `--mono-sounds` trade more quality for memory.
 
 Besides memory, the console has a fixed number of slots per asset type, the

@@ -1465,6 +1465,15 @@ class SampleZoneTests(unittest.TestCase):
                             types[(target.data[0], (flags >> 13) & 3)] += 1
             self.assertEqual({k for k in types if k[0] != k[1]}, set())
             self.assertGreaterEqual(types[(2, 2)], stats["streamed"])
+            # looping sounds stay loaded: a looping stream would hold a stream channel all along
+            self.assertGreater(stats["looping"], 0)
+            for node in again.extra_root.walk():
+                if node.type.name == "snd_alias_t":
+                    for i in range(node.count):
+                        ptr = node.relocs.get(i * rec.size + file_off)
+                        target = ptr.target() if ptr is not None and ptr.kind != "null" else None
+                        if target is not None and struct.unpack_from(">I", node.data, i * rec.size + flags_off)[0] & 1:
+                            self.assertFalse(target.data[0] == 2 and struct.unpack_from(">I", target.data, 4)[0] == 0)
 
     def test_xwma_loaded_sounds_decode(self):
         """PC loaded sounds in xWMA whose header bit rate is not the real one decode completely
