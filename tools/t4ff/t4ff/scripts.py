@@ -57,10 +57,18 @@ def rawfile_text(node: Node) -> bytes:
     return bytes(buffer.data).rstrip(b"\0") if buffer is not None else b""
 
 
+def set_rawfile_text(p: Platform, node: Node, text: bytes):
+    """Give the RawFile asset ``node`` the content ``text``."""
+    buffer = _buffer(node)
+    buffer.data = bytearray(text + b"\0")
+    buffer.count = len(buffer.data)
+    buffer.segments = [(buffer.segments[0][0] if buffer.segments else buffer.type, buffer.count, buffer.count, False)]
+    p.u32.pack_into(node.data, find_field(p.record("RawFile"), "len").offset, len(text))
+
+
 def override_scripts(p: Platform, zones: List[Zone], loose, log=print) -> int:
     """Give the scripts of ``zones`` (PC) the content of the map's loose scripts (``loose``: an
     images.IwdLibrary of the map's .iwd files and folder)."""
-    length = find_field(p.record("RawFile"), "len").offset
     replaced = set()
     for zone in zones:
         for name, node in _rawfiles(p, zone):
@@ -73,14 +81,35 @@ def override_scripts(p: Platform, zones: List[Zone], loose, log=print) -> int:
             text = text.rstrip(b"\0")
             if bytes(buffer.data).rstrip(b"\0") == text:
                 continue
-            buffer.data = bytearray(text + b"\0")
-            buffer.count = len(buffer.data)
-            buffer.segments = [(buffer.segments[0][0] if buffer.segments else buffer.type, buffer.count, buffer.count, False)]
-            p.u32.pack_into(node.data, length, len(text))
+            set_rawfile_text(p, node, text)
             replaced.add(normalize(name))
     if replaced:
         log(f"scripts: {len(replaced)} taken from the map's own files, as the PC game does ({', '.join(sorted(replaced))})")
     return len(replaced)
+
+
+# A PC hint names the use key, F by default ("Press F To Play A Song"); in a hint string the game
+# shows the key bound to +activate for &&1, as the stock hints do: the console's use button.
+_USE_KEY_HINT = re.compile(rb'"(Press|Hold) F (?=[Tt]o )')
+
+
+def use_key_hints(p: Platform, zone: Zone, log=print) -> List[str]:
+    """Hints of the scripts naming the PC's use key show the console's use button (see above).
+    Only scripts that set hint strings are changed. Returns their names."""
+    changed = []
+    for name, node in _rawfiles(p, zone):
+        if name.startswith(",") or not name.lower().endswith(".gsc") or _buffer(node) is None:
+            continue
+        text = rawfile_text(node)
+        if b"sethintstring" not in text.lower():
+            continue
+        new, count = _USE_KEY_HINT.subn(rb'"\1 &&1 ', text)
+        if count:
+            set_rawfile_text(p, node, new)
+            changed.append(normalize(name))
+    if changed:
+        log(f"scripts: hints naming the PC's use key (F) show the console's use button ({', '.join(changed)})")
+    return changed
 
 
 def _pointer(kind: str, owner: Node, offset: int, node: Node) -> Ptr:

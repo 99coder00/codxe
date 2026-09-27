@@ -107,7 +107,7 @@ Useful options:
 | Option | Effect |
 | --- | --- |
 | `--console-zone PATH` | Xbox 360 fastfile (or folder of them) to copy console only assets from: technique sets, and stock images, sounds, models... the PC map expects from the game. Repeatable; the first one that has an asset wins. See [Console fastfiles](#console-fastfiles). |
-| `--iwd PATH` | The PC game's own files (e.g. its `main` folder): stock textures a map uses and no console fastfile has are converted from them. Stock textures the console fastfiles have keep the console's version (Treyarch sized them for the console), which leaves the memory to the map's own textures. |
+| `--iwd PATH` | The PC game's own files (e.g. its `main` folder): stock textures a map uses and no console fastfile has are converted from them. Stock textures the console fastfiles have keep the console's version (Treyarch sized them for the console), which leaves the memory to the map's own textures. The game's streamed sounds the map uses are encoded from them too, into the map's `sounds` folder: the console's disc has none of the downloadable maps' (Der Riese's voices, the easter egg songs of a music box). |
 | `--texture-budget MIB` | Texture memory for the map and its mod together, `0` for no limit. Default `auto`: what `--memory-target` leaves, at most 96 MiB. Largest textures lose their top mip level first; the world's lightmaps keep theirs. |
 | `--memory-target MIB` | Memory the map may use once loaded, for the automatic texture budget (default 200: CoD Xenon's 13 maps use 148 to 220). The map is converted, measured and, when over, converted again with less texture memory. |
 | `--loaded-sound-memory MIB` | Memory of the loaded sounds (default 32; CoD Xenon's maps have up to 35). Beyond it the longest become streamed sounds, which keep their quality. 0: no limit. |
@@ -220,6 +220,14 @@ memory in the map's zone and would replace the console's menus of the same
 names. A menu list goes when most of its menus are the console's and the map's
 scripts open or precache none of them; menus the scripts use (a music box menu
 in `ui/scriptmenus`) stay, and so does a list another kept one points into.
+
+PC script menus are played with the keyboard: Tom_bmx's music box menu picks a
+song with the keys 1 to 6 and closes with Escape, which a controller has not.
+Their number keys also go to the controller's buttons (1 A, 2 X, 3 Y, 4 LB,
+5 RB, 6 to 9 the D-pad up, down, left and right), Escape to B, and their labels
+name the buttons ("A: Beauty Of Annihilation", "Press B to close menu"). Hints
+the scripts set naming the PC's use key ("Press F To Play A Song") show the
+console's use button.
 
 Some errors in the console log come from the PC map itself and are harmless:
 PC Aztec's zombie type names a `walther` sidearm zombies never draw, and
@@ -394,7 +402,7 @@ writes them big endian like every other 16-bit value the console reads.
 | image | converted from the zone or from `.iwi` files; stock images without pixel data are copied from console fastfiles or referenced. Cube maps become references for now. |
 | sound (aliases) | converted, streamed names follow the console conventions |
 | loaded sounds | encoded to XMA1 (needs `xma2encode`), otherwise copied from console fastfiles or referenced |
-| streamed sounds | encoded to XMA2 `sounds/*.xma` (needs `xma2encode`) |
+| streamed sounds | encoded to XMA2 `sounds/*.xma` (needs `xma2encode`); the game's own the map uses too, from `--iwd` |
 
 Verify new console layouts with:
 

@@ -151,6 +151,9 @@ class IwdLibrary:
                 return f.read()
         return entry[1].read(entry[2])
 
+    def __contains__(self, rel: str) -> bool:
+        return rel.replace("\\", "/").lower() in self.entries
+
     def names(self, prefix: str) -> List[str]:
         prefix = prefix.lower()
         return [n for n in self.entries if n.startswith(prefix)]

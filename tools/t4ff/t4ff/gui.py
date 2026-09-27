@@ -416,7 +416,7 @@ def main():
         settings.iwds,
         [("IWD archives", "*.iwd"), ("All files", "*")],
         True,
-        "e.g. the PC game's main folder, for stock textures",
+        "e.g. the PC game's main folder, for stock textures and sounds",
     )
 
     # -- options --------------------------------------------------------------

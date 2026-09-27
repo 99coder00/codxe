@@ -305,6 +305,13 @@ def _convert_map(args, paths, options, map_files, out_dir):
     from .scripts import missing_scripts_zone, override_scripts
 
     override_scripts(pc(), [c.zone for c in convs], map_files)
+    # streamed sounds of the game's own the console's disc does not have (Der Riese's...): from the
+    # PC game's files, before the aliases are converted (they point to the files found next to the map)
+    if options.xma_encoder is not None and getattr(options.xma_encoder, "available", False) and options.sounds_dir:
+        from .assets import ship_stock_streams
+
+        ship_stock_streams(pc(), [c.zone for c in convs], IwdLibrary(args.iwd) if args.iwd else None, options.sounds_dir,
+                           options.xma_encoder, args.stream_rate, args.mono_streams, args.jobs)
     zones = [run_converter(path, conv) for path, conv in zip(paths, convs)]
     if len(zones) > 1:
         progress.step("Merging into one fastfile")
@@ -323,6 +330,12 @@ def _convert_map(args, paths, options, map_files, out_dir):
         from .merge import drop_frontend_menus
 
         drop_frontend_menus(x360(), main_zone, convs[0].console_library.is_stock_menu)
+    # PC script menus (a music box) and hints name keyboard keys: the controller's buttons instead
+    from .menu import gamepad_script_menus
+    from .scripts import use_key_hints
+
+    gamepad_script_menus(x360(), main_zone)
+    use_key_hints(x360(), main_zone)
     prune_references(x360(), main_zone)
     if args.max_loaded_sounds or args.loaded_sound_memory:
         from .audio import LoadedXma

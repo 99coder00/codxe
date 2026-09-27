@@ -18,6 +18,7 @@ from .zone import (
     BLOCK_TEMP,
     BLOCK_VIRTUAL,
     Node,
+    Platform,
     Ptr,
     asset_name,
 )
@@ -939,6 +940,66 @@ def sound_hook(conv, asset_type, node, name):
             edits.append((sf, name_off, stem))
         _fix_primed_sound(conv, sf, prime_off, rel if custom else None)
     return new
+
+
+def streamed_sound_files(p: Platform, zones) -> List[str]:
+    """The files of the streamed sounds of the aliases of ``zones`` (``dir\\name``, as they have them)."""
+    rec = p.record("SoundFile")
+    u = find_field(rec, "u").offset
+    fn = u + find_field(p.record("StreamedSound"), "filename").offset
+    sfn = p.record("StreamFileName")
+    dir_off, name_off = fn + find_field(sfn, "dir").offset, fn + find_field(sfn, "name").offset
+
+    def text(node, off):
+        ptr = node.relocs.get(off)
+        target = ptr.target() if ptr is not None and ptr.kind != "null" else None
+        return bytes(target.data).rstrip(b"\0").decode("latin-1") if target is not None else ""
+
+    files: Dict[str, str] = {}
+    for zone in zones:
+        for node in zone.extra_root.walk():
+            origin = node.extra.get("origin") or ("", "", "")
+            if origin[1:] != ("snd_alias_t", "soundFile") or not node.data or node.data[0] != 2:
+                continue
+            name = text(node, name_off)
+            if name:
+                directory = text(node, dir_off).replace("/", "\\")
+                rel = (directory + "\\" if directory else "") + name
+                files.setdefault(rel.lower(), rel)
+    return sorted(files.values(), key=str.lower)
+
+
+def ship_stock_streams(p: Platform, zones, stock_library, out_dir: str, encoder, max_rate: int = 0, mono: bool = False, jobs: int = 0, log=print) -> dict:
+    """Streamed sounds of the game's own that the map's aliases use (``zones``: the PC zones).
+
+    The console streams them from its disc, which has those of the game but not those of its
+    downloadable maps (Der Riese's voices and music, Shi No Numa's...): the ones the PC game's
+    files have (``stock_library``, --iwd) are encoded next to the map's own
+    (sounds/<dir>/<name>.xma), where their aliases then point (see :func:`sound_hook`). Files
+    already there (the map's own, or an earlier conversion's) are kept.
+    """
+    from .audio import convert_streamed_sounds, streamed_sound_target
+
+    wanted, missing = [], []
+    for rel in streamed_sound_files(p, zones):
+        source = "sound/" + rel.replace("\\", "/")
+        if os.path.exists(os.path.join(out_dir, *streamed_sound_target(source).split("/"))):
+            continue
+        (wanted if stock_library is not None and source in stock_library else missing).append(source)
+    stats = {"sounds": 0, "converted": 0, "failed": 0, "kept": 0, "output_bytes": 0}
+    if wanted:
+        stats = convert_streamed_sounds(stock_library, out_dir, encoder, max_rate, mono, log=log, jobs=jobs, names=wanted, skip_existing=True)
+        log(
+            f"streamed sounds: {stats['converted']} of the game's own the map uses taken from the PC game's files "
+            f"({stats['output_bytes'] / 1048576:.1f} MiB, e.g. {wanted[0][6:]})"
+        )
+    if missing:
+        where = "nor in the PC game's files given" if stock_library is not None else "(give the PC game's main folder with --iwd to add them)"
+        log(
+            f"streamed sounds: {len(missing)} the map uses are not in its files {where}: the console plays them only "
+            f"if its disc has them, which it has not for the downloadable maps' (e.g. {missing[0][6:]})"
+        )
+    return stats
 
 
 def _rebuild_children(node: Node):

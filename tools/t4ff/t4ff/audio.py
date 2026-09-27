@@ -707,14 +707,21 @@ def streamed_sound_target(rel: str) -> str:
     return "sounds/" + stem + ".xma"
 
 
-def convert_streamed_sounds(library, out_dir: str, encoder: XmaEncoder, max_rate: int = 0, mono: bool = False, log=print, jobs: int = 0) -> dict:
-    """Encode every sound/ file of the .iwd library to sounds/<path>.xma (SDNS) in ``out_dir``,
-    ``jobs`` at a time (0: one per processor; the encoders are separate processes)."""
+def convert_streamed_sounds(library, out_dir: str, encoder: XmaEncoder, max_rate: int = 0, mono: bool = False, log=print, jobs: int = 0,
+                            names: Optional[List[str]] = None, skip_existing: bool = False) -> dict:
+    """Encode the sound/ files of the .iwd library (``names``: these of them, default all) to
+    sounds/<path>.xma (SDNS) in ``out_dir``, ``jobs`` at a time (0: one per processor; the encoders
+    are separate processes). ``skip_existing``: keep the files already there."""
     import threading
     from concurrent.futures import ThreadPoolExecutor
 
-    names = [n for n in library.names("sound/") if n.endswith(AUDIO_EXTENSIONS)]
-    stats = {"sounds": len(names), "converted": 0, "failed": 0, "input_bytes": 0, "output_bytes": 0}
+    if names is None:
+        names = [n for n in library.names("sound/") if n.endswith(AUDIO_EXTENSIONS)]
+    stats = {"sounds": len(names), "converted": 0, "failed": 0, "input_bytes": 0, "output_bytes": 0, "kept": 0}
+    if skip_existing:
+        todo = [n for n in names if not os.path.exists(os.path.join(out_dir, *streamed_sound_target(n).split("/")))]
+        stats["kept"] = len(names) - len(todo)
+        names = todo
     if not names:
         return stats
     if not encoder.available:
@@ -727,7 +734,7 @@ def convert_streamed_sounds(library, out_dir: str, encoder: XmaEncoder, max_rate
         with reading:
             data = library.read(name)
         try:
-            pcm = read_wav(data) if name.endswith(".wav") else decode_with_ffmpeg(data)
+            pcm = read_wav(data) if name.lower().endswith(".wav") else decode_with_ffmpeg(data)
             if mono:
                 pcm = downmix_mono(pcm)
             if max_rate and pcm.rate > max_rate:
@@ -752,32 +759,4 @@ def convert_streamed_sounds(library, out_dir: str, encoder: XmaEncoder, max_rate
                 stats["converted"] += 1
                 stats["output_bytes"] += out_size
             progress.step("Encoding streamed sounds", done, len(names))
-    return stats
-    if not encoder.available:
-        log(f"warning: {len(names)} streamed sounds need xma2encode.exe (Xbox 360 XDK), skipped. Use --xma-encoder.")
-        stats["failed"] = len(names)
-        return stats
-    for index, name in enumerate(names):
-        progress.step("Encoding streamed sounds", index, len(names))
-        data = library.read(name)
-        stats["input_bytes"] += len(data)
-        try:
-            pcm = read_wav(data) if name.endswith(".wav") else decode_with_ffmpeg(data)
-            if mono:
-                pcm = downmix_mono(pcm)
-            if max_rate and pcm.rate > max_rate:
-                pcm = resample(pcm, max_rate)
-            stream = encoder.encode(pcm)
-        except AudioError as e:
-            log(f"warning: {name}: {e}")
-            stats["failed"] += 1
-            continue
-        target = os.path.join(out_dir, *streamed_sound_target(name).split("/"))
-        os.makedirs(os.path.dirname(target), exist_ok=True)
-        out = write_sdns(stream)
-        with open(target, "wb") as f:
-            f.write(out)
-        stats["converted"] += 1
-        stats["output_bytes"] += len(out)
-    progress.step("Encoding streamed sounds", len(names), len(names))
     return stats

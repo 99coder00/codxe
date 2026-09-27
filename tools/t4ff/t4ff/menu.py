@@ -523,3 +523,145 @@ def check_references(zone: Zone, removed: List[Node]):
         for ptr in node.relocs.values():
             if (ptr.kind == "ref" and id(ptr.node) in gone) or (ptr.kind == "alias" and ptr.slot is not None and id(ptr.slot.owner) in gone):
                 raise MenuError(f"{node!r} refers to a removed item")
+
+
+# ---------------------------------------------------------------------------
+# PC script menus on a controller
+
+# The console's gamepad keys (keyNum_t), which its own menus bind in key handlers (patch_ui.ff:
+# B 2, X 3, Y 4, LB 5, RB 6, the D-pad left and right 22 and 23).
+KEY_BUTTON_A, KEY_BUTTON_B, KEY_BUTTON_X, KEY_BUTTON_Y = 1, 2, 3, 4
+KEY_DPAD_UP, KEY_DPAD_DOWN, KEY_DPAD_LEFT, KEY_DPAD_RIGHT = 20, 21, 22, 23
+# the button a number key of a PC script menu becomes, and its name in the menu's labels
+GAMEPAD_FOR_DIGIT = {
+    "1": (KEY_BUTTON_A, "A"),
+    "2": (KEY_BUTTON_X, "X"),
+    "3": (KEY_BUTTON_Y, "Y"),
+    "4": (KEY_LSHLDR, "LB"),
+    "5": (KEY_RSHLDR, "RB"),
+    "6": (KEY_DPAD_UP, "Up"),
+    "7": (KEY_DPAD_DOWN, "Down"),
+    "8": (KEY_DPAD_LEFT, "Left"),
+    "9": (KEY_DPAD_RIGHT, "Right"),
+}
+# the number of an entry, color codes around it: "^11: ^4Beauty Of Annihilation"
+_DIGIT_LABEL = re.compile(r"^((?:\^\d)?\s*)([1-9])(?=\s*(?:\^\d)?\s*[:.)\-])")
+_ESC_LABEL = re.compile(r"\b(?:ESC|Esc|ESCAPE|Escape)\b")
+
+
+def _text_of(node: Node, off: int) -> Optional[str]:
+    ptr = node.relocs.get(off)
+    target = ptr.target() if ptr is not None and ptr.kind != "null" else None
+    return bytes(target.data).rstrip(b"\0").decode("latin-1") if target is not None and target.string else None
+
+
+def gamepad_script_menus(p: Platform, zone: Zone, log=print) -> List[str]:
+    """Give PC script menus (a music box...) controller buttons.
+
+    They answer the number keys (``execKey "1"``) and Escape, which a controller does not have. The
+    action of each number key also goes to a button, as the console's own menus bind theirs (key
+    handlers of the menu): 1 A, 2 X, 3 Y, 4 LB, 5 RB, 6 to 9 the D-pad up, down, left and right, and
+    the menu's Escape action to B. The labels naming the keys ("^11: ...", "Press ESC to close")
+    name the buttons. Returns the names of the menus changed.
+    """
+    mrec, irec, krec = p.record("menuDef_t"), p.record("itemDef_s"), p.record("ItemKeyHandler")
+    on_key, on_esc = find_field(mrec, "onKey").offset, find_field(mrec, "onESC").offset
+    items_off, count_off = find_field(mrec, "items").offset, find_field(mrec, "itemCount").offset
+    name_off = find_field(mrec, "window").offset + find_field(p.record("windowDef_t"), "name").offset
+    text_off = find_field(irec, "text").offset
+    key_off, action_off, next_off = (find_field(krec, f).offset for f in ("key", "action", "next"))
+
+    def append_handler(chain: List[Node], key: int, action: str, string_template: Node):
+        template = chain[-1]
+        handler = Node(template.type, 1, template.block)
+        handler.data = bytearray(len(template.data))
+        struct.pack_into(">i", handler.data, key_off, key)
+        struct.pack_into(">I", handler.data, action_off, 0xFFFFFFFF)
+        handler.segments = list(template.segments)
+        handler.extra = {k: v for k, v in template.extra.items() if k in ("align", "origin")}
+        text = _string_node(action, string_template)
+        handler.relocs[action_off] = _ptr("follow", handler, action_off, text)
+        text.extra["ptr"] = handler.relocs[action_off]
+        handler.relocs[next_off] = _ptr("null", handler, next_off)
+        _rebuild_children(handler)
+        template.relocs[next_off] = _ptr("follow", template, next_off, handler)
+        handler.extra["ptr"] = template.relocs[next_off]
+        struct.pack_into(">I", template.data, next_off, 0xFFFFFFFF)
+        _rebuild_children(template)
+        chain.append(handler)
+
+    changed = []
+    labels: List[Tuple[Node, str]] = []  # (string node, new text)
+    for asset in zone.assets:
+        if asset.type != "menulist" or asset.ptr is None:
+            continue
+        root = asset.ptr.target()
+        if root is None:
+            continue
+        for menu in root.walk():
+            if menu.type.name != "menuDef_t":
+                continue
+            chain: List[Node] = []
+            ptr = menu.relocs.get(on_key)
+            while ptr is not None and ptr.kind != "null" and ptr.target() is not None:
+                chain.append(ptr.target())
+                ptr = chain[-1].relocs.get(next_off)
+            keys = {struct.unpack_from(">i", h.data, key_off)[0]: h for h in chain}
+            digits = {chr(k): h for k, h in keys.items() if ord("1") <= k <= ord("9")}
+            if not digits:
+                continue
+            string_template = next(n for n in menu.walk() if n.string)
+            names: Dict[str, str] = {}  # digit -> button now doing its action
+            for digit, handler in sorted(digits.items()):
+                key, button = GAMEPAD_FOR_DIGIT[digit]
+                action = _text_of(handler, action_off)
+                if key not in keys and action is not None:
+                    append_handler(chain, key, action, string_template)
+                    names[digit] = button
+            escape = _text_of(menu, on_esc)
+            back = escape is not None and KEY_BUTTON_B not in keys
+            if back:
+                append_handler(chain, KEY_BUTTON_B, escape, string_template)
+            elif not names:
+                continue
+            ptr = menu.relocs.get(items_off)
+            array = ptr.target() if ptr is not None and ptr.kind != "null" else None
+            count = struct.unpack_from(">i", menu.data, count_off)[0]
+            for i in range(count if array is not None else 0):
+                item_ptr = array.relocs.get(4 * i)
+                item = item_ptr.target() if item_ptr is not None and item_ptr.kind != "null" else None
+                text_ptr = item.relocs.get(text_off) if item is not None else None
+                text = _text_of(item, text_off) if item is not None else None
+                if text is None or text_ptr.kind != "follow":
+                    continue
+                new = _DIGIT_LABEL.sub(lambda m: m.group(1) + names[m.group(2)] if m.group(2) in names else m.group(0), text)
+                if back:
+                    new = _ESC_LABEL.sub("B", new)
+                if new != text:
+                    labels.append((text_ptr.node, new))
+            name = _text_of(menu, name_off) or asset.name
+            buttons = [f"{names[d]} ({d})" for d in sorted(names)] + (["B (Escape)"] if back else [])
+            log(f"menu {name}: controller buttons for its keys: {', '.join(buttons)}")
+            changed.append(name)
+    _set_label_texts(zone, labels, log)
+    return changed
+
+
+def _set_label_texts(zone: Zone, labels: List[Tuple[Node, str]], log=print):
+    """Change the text of label strings in place. A string another pointer refers into (the PC linker
+    stores a string ending another one only once) keeps its text."""
+    if not labels:
+        return
+    targets = {id(node) for node, _ in labels}
+    shared = set()
+    for node in zone.extra_root.walk():
+        for ptr in node.relocs.values():
+            if ptr.kind == "ref" and id(ptr.node) in targets and (ptr.index or ptr.inner):
+                shared.add(id(ptr.node))
+    for node, text in labels:
+        if id(node) in shared:
+            log(f'menu label "{bytes(node.data).rstrip(bytes(1)).decode("latin-1")}" left as it is (shared with another string)')
+            continue
+        node.data = bytearray(text.encode("latin-1") + b"\0")
+        node.count = len(node.data)
+        node.segments = [(node.type, node.count, node.count, False)]

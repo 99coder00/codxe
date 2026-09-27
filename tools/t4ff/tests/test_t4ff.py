@@ -314,6 +314,36 @@ death
             self.assertEqual(is_game_zone(name), game, name)
 
 
+    def test_use_key_hints(self):
+        """Hints naming the PC's use key (F) show the console's use button (&&1), in scripts that
+        set hint strings only."""
+        from unittest import mock
+
+        from t4ff.commands import find_field
+        from t4ff.layout import TypeRef
+        from t4ff.platforms import x360
+        from t4ff.scripts import make_rawfile, rawfile_text, use_key_hints
+        from t4ff.zone import BLOCK_VIRTUAL, Node, Ptr
+
+        p = x360()
+        template = Node(TypeRef("record", "RawFile", p.record("RawFile").size), 1, BLOCK_VIRTUAL)
+        template.data = bytearray(p.record("RawFile").size)
+        buffer = Node(TypeRef("scalar", "char", 1, 1), 1, BLOCK_VIRTUAL)
+        buffer.extra["origin"] = ("member", "RawFile", "buffer")
+        buffer.segments = [(buffer.type, 1, 1, False)]
+        template.relocs[8] = Ptr("follow", buffer)
+        template.children = [buffer]
+        music = make_rawfile(p, template, "maps/tom_player_unl.gsc",
+                             b'ths_music( "Press F To Play A Song" );\nhint(h) { self setHintString(h); }\n// "Press Fire"\n')
+        other = make_rawfile(p, template, "maps/other.gsc", b'iprintln("Press F to pay respects");\n')
+        with mock.patch("t4ff.scripts._rawfiles", lambda p, z: [("maps/tom_player_unl.gsc", music), ("maps/other.gsc", other)]):
+            self.assertEqual(use_key_hints(p, None, log=lambda msg: None), ["maps/tom_player_unl.gsc"])
+        text = b'ths_music( "Press &&1 To Play A Song" );\nhint(h) { self setHintString(h); }\n// "Press Fire"\n'
+        self.assertEqual(rawfile_text(music), text)
+        self.assertEqual(p.u32.unpack_from(music.data, find_field(p.record("RawFile"), "len").offset)[0], len(text))
+        self.assertEqual(rawfile_text(other), b'iprintln("Press F to pay respects");\n')
+
+
 class UsermapTests(unittest.TestCase):
     def test_find_usermap(self):
         """The folder or any fastfile of the map finds the map, its _patch and _load, and mod.ff
@@ -559,6 +589,93 @@ class MenuTests(unittest.TestCase):
         self.assertEqual([a.name for a in zone.assets], ["ui/shared.menu", "ui/scriptmenus/music.menu", "ui/briefing.menu", "maps/zombie.gsc"])
         self.assertEqual(sorted(assets_node.relocs), [4, 12, 20, 28])
         self.assertEqual(assets_node.children, [lists["ui/shared.menu"], lists["ui/scriptmenus/music.menu"], lists["ui/briefing.menu"], rawfile])
+
+    def test_script_menu_on_a_controller(self):
+        """A PC script menu (a music box) answers the number keys and Escape: their actions also go
+        to the controller's buttons and its labels name them. A menu without number keys stays."""
+        import struct
+
+        from t4ff.commands import find_field
+        from t4ff.layout import TypeRef
+        from t4ff.menu import gamepad_script_menus
+        from t4ff.platforms import x360
+        from t4ff.zone import BLOCK_VIRTUAL, Node, Ptr, Zone, ZoneAsset
+
+        p = x360()
+        mrec, irec, krec = p.record("menuDef_t"), p.record("itemDef_s"), p.record("ItemKeyHandler")
+        window_name = find_field(mrec, "window").offset + find_field(p.record("windowDef_t"), "name").offset
+
+        def record(name):
+            node = Node(TypeRef("record", name, p.record(name).size), 1, BLOCK_VIRTUAL)
+            node.data = bytearray(p.record(name).size)
+            return node
+
+        def string(text):
+            node = Node(TypeRef("scalar", "char", 1, 1), len(text) + 1, BLOCK_VIRTUAL)
+            node.string = True
+            node.data = bytearray(text.encode("latin-1") + b"\0")
+            return node
+
+        def point(owner, off, target, kind="follow"):
+            ptr = Ptr(kind, target)
+            ptr.owner, ptr.offset = owner, off
+            owner.relocs[off] = ptr
+            if kind == "follow":
+                owner.children.append(target)
+                struct.pack_into(">I", owner.data, off, 0xFFFFFFFF)
+
+        def menu(name, keys, escape, texts):
+            m = record("menuDef_t")
+            point(m, window_name, string(name))
+            if escape:
+                point(m, find_field(mrec, "onESC").offset, string(escape))
+            owner, off = m, find_field(mrec, "onKey").offset
+            for key, action in keys:
+                handler = record("ItemKeyHandler")
+                struct.pack_into(">i", handler.data, find_field(krec, "key").offset, key)
+                point(handler, find_field(krec, "action").offset, string(action))
+                point(owner, off, handler)
+                owner, off = handler, find_field(krec, "next").offset
+            items = Node(TypeRef("pointer", "itemDef_s", 4, 4), len(texts), BLOCK_VIRTUAL)
+            items.data = bytearray(4 * len(texts))
+            for i, text in enumerate(texts):
+                item = record("itemDef_s")
+                point(item, find_field(irec, "text").offset, string(text))
+                point(items, 4 * i, item)
+            point(m, find_field(mrec, "items").offset, items)
+            struct.pack_into(">i", m.data, find_field(mrec, "itemCount").offset, len(texts))
+            return m
+
+        music = menu("music_box", [(ord("1"), "respond 1"), (ord("2"), "respond 2")], "respond 9",
+                     ["^11: ^4First song", "^12: ^4Second song", "Press ESC to close menu", "Made by 1 person"])
+        other = menu("other", [(27, "close")], "close", ["Press ESC"])
+        lists = Node(TypeRef("record", "MenuList"), 1, BLOCK_VIRTUAL)
+        lists.children = [music, other]
+        ptr = Ptr("follow", lists)
+        zone = Zone(p.name, [], [ZoneAsset("menulist", ptr, "ui/scriptmenus/music.menu")], [], 0, 0, None, None)
+        zone.extra_root = lists
+        messages = []
+        self.assertEqual(gamepad_script_menus(p, zone, log=messages.append), ["music_box"])
+        self.assertEqual(messages, ["menu music_box: controller buttons for its keys: A (1), X (2), B (Escape)"])
+
+        def handlers(m):
+            out, ptr = [], m.relocs.get(find_field(mrec, "onKey").offset)
+            while ptr is not None and ptr.kind != "null":
+                h = ptr.target()
+                action = h.relocs[find_field(krec, "action").offset].target()
+                out.append((struct.unpack_from(">i", h.data, 0)[0], bytes(action.data).rstrip(b"\0").decode()))
+                ptr = h.relocs.get(find_field(krec, "next").offset)
+            return out
+
+        def texts(m):
+            items = m.relocs[find_field(mrec, "items").offset].target()
+            return [bytes(items.relocs[4 * i].target().relocs[find_field(irec, "text").offset].target().data).rstrip(b"\0").decode()
+                    for i in range(items.count)]
+
+        self.assertEqual(handlers(music), [(49, "respond 1"), (50, "respond 2"), (1, "respond 1"), (3, "respond 2"), (2, "respond 9")])
+        self.assertEqual(texts(music), ["^1A: ^4First song", "^1X: ^4Second song", "Press B to close menu", "Made by 1 person"])
+        self.assertEqual(handlers(other), [(27, "close")])
+        self.assertEqual(texts(other), ["Press ESC"])
 
     def test_dynamic_map_list(self):
         """The Nazi Zombies map list of CoD Xenon's patch_ui.ff: the stock rows stay, the 13 rows of
@@ -923,6 +1040,83 @@ class AudioTests(unittest.TestCase):
         a = source.samples[tail, 0].astype(np.float64)
         b = decoded.samples[tail, 0].astype(np.float64)
         self.assertGreater(float(a @ b / np.sqrt((a @ a) * (b @ b))), 0.99)
+
+    def test_stock_streams_shipped(self):
+        """Streamed sounds of the game's own that the map's aliases use (Der Riese's voices) are
+        encoded from the PC game's files next to the map's own; those already there are kept and
+        the others are reported."""
+        import types
+
+        from t4ff.assets import ship_stock_streams, streamed_sound_files
+        from t4ff.commands import find_field
+        from t4ff.images import IwdLibrary
+        from t4ff.layout import TypeRef
+        from t4ff.platforms import pc
+        from t4ff.zone import BLOCK_VIRTUAL, Node, Ptr
+
+        p = pc()
+        u = find_field(p.record("SoundFile"), "u").offset
+        fn = u + find_field(p.record("StreamedSound"), "filename").offset
+        sfn = p.record("StreamFileName")
+        dir_off, name_off = fn + find_field(sfn, "dir").offset, fn + find_field(sfn, "name").offset
+
+        def string(text):
+            node = Node(TypeRef("scalar", "char", 1, 1), len(text) + 1, BLOCK_VIRTUAL)
+            node.string = True
+            node.data = bytearray(text.encode("latin-1") + b"\0")
+            return node
+
+        def sound_file(kind, directory, name):
+            node = Node(TypeRef("record", "SoundFile", p.record("SoundFile").size), 1, BLOCK_VIRTUAL)
+            node.data = bytearray(p.record("SoundFile").size)
+            node.data[0] = kind
+            node.extra["origin"] = ("member", "snd_alias_t", "soundFile")
+            for off, text in ((dir_off, directory), (name_off, name)):
+                node.relocs[off] = Ptr("follow", string(text))
+                node.children.append(node.relocs[off].node)
+            return node
+
+        root = Node(TypeRef("record", "root"), 1, BLOCK_VIRTUAL)
+        root.children = [
+            sound_file(2, "voiceovers\\zombie\\dlc3\\plr0", "power_out_01.wav"),
+            sound_file(2, "Voiceovers\\Zombie\\dlc3\\plr0", "POWER_OUT_01.wav"),  # the same file
+            sound_file(2, "music_box", "bart2.wav"),
+            sound_file(2, "sfx\\levels\\zombie\\chalk", "round_over.wav"),
+            sound_file(1, "", "loaded.wav"),
+        ]
+        zone = types.SimpleNamespace(extra_root=root)
+        self.assertEqual(streamed_sound_files(p, [zone]), ["music_box\\bart2.wav", "sfx\\levels\\zombie\\chalk\\round_over.wav",
+                                                           "voiceovers\\zombie\\dlc3\\plr0\\power_out_01.wav"])
+
+        class Encoder:
+            available = True
+            calls = 0
+
+            def encode(self, pcm):
+                Encoder.calls += 1
+                return audio.XmaStream(pcm.rate, pcm.channels, pcm.frames, bytes(audio.XMA_PACKET_SIZE))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            game, out = os.path.join(tmp, "main"), os.path.join(tmp, "out")
+            wav = audio.write_wav(audio.Pcm(22050, np.zeros((100, 1), dtype=np.int16)))
+            os.makedirs(os.path.join(game, "sound", "voiceovers", "zombie", "dlc3", "plr0"))
+            with open(os.path.join(game, "sound", "voiceovers", "zombie", "dlc3", "plr0", "power_out_01.wav"), "wb") as f:
+                f.write(wav)
+            os.makedirs(os.path.join(out, "sounds", "music_box"))
+            open(os.path.join(out, "sounds", "music_box", "bart2.xma"), "wb").close()  # the map's own
+            messages = []
+            stats = ship_stock_streams(p, [zone], IwdLibrary([game]), out, Encoder(), log=messages.append)
+            self.assertEqual(stats["converted"], 1)
+            shipped = os.path.join(out, "sounds", "voiceovers", "zombie", "dlc3", "plr0", "power_out_01.xma")
+            with open(shipped, "rb") as f:
+                self.assertEqual(audio.read_sdns(f.read()).rate, 22050)
+            self.assertEqual(len(messages), 2)
+            self.assertIn("1 of the game's own the map uses taken from the PC game's files", messages[0])
+            self.assertIn("1 the map uses are not in its files nor in the PC game's files given", messages[1])
+            self.assertIn("sfx/levels/zombie/chalk/round_over.wav", messages[1])
+            # converting again keeps what is there
+            ship_stock_streams(p, [zone], IwdLibrary([game]), out, Encoder(), log=lambda msg: None)
+            self.assertEqual(Encoder.calls, 1)
 
 
 class SampleZoneTests(unittest.TestCase):
