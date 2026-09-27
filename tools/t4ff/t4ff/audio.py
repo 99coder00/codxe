@@ -2,18 +2,22 @@
 
 Streamed sounds are stored next to the converted fastfile as ``sounds/<path>.xma``
 (CoD Xe redirects ``D:\\sounds\\`` requests of the active usermap there). These
-files use a small container recovered from CoD Xenon's converted maps:
+files use the container of the game's own streams (the .xma files of its disc):
 
     0x00  'SDNS'
     0x04  u32 0
     0x08  u32 sample rate
     0x0C  u32 channel count
-    0x10  u32 sample count (multiple of 512, the XMA frame size)
+    0x10  u32 sample count
     0x14  u32 size of the XMA data
+    0x18  u32 0, u32 0 (the loop start of some looping music), then the decoded sample count
+          at the end of every XMA2 block, as many as fit (1016 blocks)
     ...   zero padding up to 0x1000
-    0x1000 XMA2 packets (2048 bytes each)
+    0x1000 XMA2 packets (2048 bytes each) in blocks of two packets (4 KiB)
 
-All values are big endian.
+All values are big endian. The game reads a stream 4 KiB block after block along this table:
+with xma2encode's 64 KiB blocks and no table (as CoD Xenon's maps had them), a stream plays
+its first block, a fraction of a second, then stops.
 
 There is no open source XMA encoder: encoding uses ``xma2encode.exe`` from
 Microsoft's Xbox developer kits (Xbox 360 XDK, Xbox One XDK, GDK with Xbox
@@ -38,6 +42,10 @@ from .deps import NO_WINDOW
 
 SDNS_MAGIC = b"SDNS"
 SDNS_HEADER_SIZE = 0x1000
+SDNS_TABLE = 0x18  # the block table of the header
+SDNS_TABLE_ENTRIES = (SDNS_HEADER_SIZE - SDNS_TABLE) // 4
+STREAM_BLOCK_PACKETS = 2  # XMA2 blocks of the game's streams: 4 KiB
+XMA_MAX_PACKET_FRAMES = 63  # the frame count of an XMA2 packet header has 6 bits
 XMA_PACKET_SIZE = 2048
 XMA_FRAME_SAMPLES = 512
 XMA_SUBFRAME_SAMPLES = 128
@@ -298,8 +306,78 @@ def read_sdns(data: bytes) -> XmaStream:
 
 
 def write_sdns(stream: XmaStream) -> bytes:
-    header = SDNS_MAGIC + struct.pack(">5I", 0, stream.rate, stream.channels, stream.samples, len(stream.data))
-    return header + bytes(SDNS_HEADER_SIZE - len(header)) + stream.data
+    """An SDNS stream file as the game's: 4 KiB XMA2 blocks and their table (see the top)."""
+    data, block_frames = xma2_reblock(stream.data)
+    frames = sum(block_frames)
+    table, total = [0, 0], 0
+    for count in block_frames[: SDNS_TABLE_ENTRIES - 2]:
+        total += count * XMA_FRAME_SAMPLES
+        table.append(total)
+    samples = min(stream.valid_samples or stream.samples, frames * XMA_FRAME_SAMPLES) or stream.samples
+    header = SDNS_MAGIC + struct.pack(">5I", 0, stream.rate, stream.channels, samples, len(data))
+    header += struct.pack(f">{len(table)}I", *table)
+    return header + bytes(SDNS_HEADER_SIZE - len(header)) + data
+
+
+def sdns_has_game_layout(data: bytes) -> bool:
+    """Whether the SDNS file ``data`` has the layout of the game's streams (a quick look at its
+    packet headers and table: every 4 KiB block starts with a frame, the table counts them)."""
+    if data[:4] != SDNS_MAGIC or len(data) < SDNS_HEADER_SIZE:
+        return False
+    size = struct.unpack_from(">I", data, 0x14)[0]
+    packets = min(size, len(data) - SDNS_HEADER_SIZE) // XMA_PACKET_SIZE
+    if not packets:
+        return False
+    table = struct.unpack_from(f">{SDNS_TABLE_ENTRIES}I", data, SDNS_TABLE)
+    blocks = -(-packets // STREAM_BLOCK_PACKETS)
+    total = 0
+    for k in range(packets):
+        header = struct.unpack_from(">I", data, SDNS_HEADER_SIZE + k * XMA_PACKET_SIZE)[0]
+        if k % STREAM_BLOCK_PACKETS == 0:
+            if (header >> 11) & 0x7FFF:
+                return False  # a block that does not start with a frame
+        total += (header >> 26) * XMA_FRAME_SAMPLES
+        block = k // STREAM_BLOCK_PACKETS
+        if (k % STREAM_BLOCK_PACKETS == STREAM_BLOCK_PACKETS - 1 or k == packets - 1) and block < SDNS_TABLE_ENTRIES - 2:
+            if table[2 + block] != total:
+                return False
+    return blocks >= SDNS_TABLE_ENTRIES - 2 or not any(table[2 + blocks :])
+
+
+def upgrade_sdns(data: bytes) -> Optional[bytes]:
+    """The SDNS file ``data`` rewritten in the game's layout, None when it has it already
+    (conversions before it, CoD Xenon's maps: 64 KiB blocks, no table)."""
+    if sdns_has_game_layout(data):
+        return None
+    stream = read_sdns(data)
+    stream.valid_samples = stream.samples
+    new = bytearray(write_sdns(stream))
+    new[SDNS_TABLE : SDNS_TABLE + 8] = data[SDNS_TABLE : SDNS_TABLE + 8]  # a loop start stays
+    return None if new == data[: len(new)] else bytes(new)
+
+
+def upgrade_stream_files(folder: str, log=print) -> dict:
+    """Rewrite the .xma stream files under ``folder`` that do not have the game's layout."""
+    stats = {"files": 0, "upgraded": 0, "failed": 0}
+    for root, _, files in os.walk(folder):
+        for name in files:
+            if not name.lower().endswith(".xma"):
+                continue
+            path = os.path.join(root, name)
+            stats["files"] += 1
+            with open(path, "rb") as f:
+                data = f.read()
+            try:
+                new = upgrade_sdns(data)
+            except AudioError as e:
+                log(f"warning: {path}: {e}")
+                stats["failed"] += 1
+                continue
+            if new is not None:
+                with open(path, "wb") as f:
+                    f.write(new)
+                stats["upgraded"] += 1
+    return stats
 
 
 def xma2_wav(stream: XmaStream) -> bytes:
@@ -594,6 +672,61 @@ def xma_frames(data: bytes) -> List[Tuple[int, int]]:
             if pos is not None and pos < end:
                 break
     return frames
+
+
+def xma2_reblock(data: bytes, block_packets: int = STREAM_BLOCK_PACKETS) -> Tuple[bytes, List[int]]:
+    """The XMA2 packets of ``data`` in blocks of ``block_packets`` packets, and the number of frames
+    starting in each block.
+
+    xma2encode writes 64 KiB blocks; the game's streams have 4 KiB ones. Frames keep their bits and
+    their order: they run on from packet to packet within a block, a frame that does not fit in
+    what is left of a block starts the next one (the rest is padded with ones), and a packet has at
+    most 63 frames starting in it. As in :func:`xma1_repack` the last bit of a frame is set when the
+    next frame starts in the same packet. The game's own streams come out byte for byte.
+    """
+    frames = xma_frames(data)
+    if not frames:
+        raise AudioError("XMA stream without frames")
+    packet_bits = XMA_PACKET_SIZE * 8
+    payload_bits = (XMA_PACKET_SIZE - 4) * 8
+    block_bits = block_packets * payload_bits
+    starts, per_packet, pos = [], {}, 0
+    for _, length in frames:
+        if length > block_bits:
+            raise AudioError(f"XMA frame of {length} bits, larger than a block")
+        if per_packet.get(pos // payload_bits, 0) >= XMA_MAX_PACKET_FRAMES:
+            pos += payload_bits - pos % payload_bits
+        if pos % block_bits + length > block_bits:
+            pos += block_bits - pos % block_bits
+        starts.append(pos)
+        per_packet[pos // payload_bits] = per_packet.get(pos // payload_bits, 0) + 1
+        pos += length
+    packets = -(-pos // payload_bits)
+    source = np.unpackbits(np.frombuffer(data, dtype=np.uint8))
+    bits = np.ones(packets * payload_bits, dtype=np.uint8)
+    for (bit, length), start in zip(frames, starts):
+        # the source frame, without the packet headers it may span
+        chunks, remaining, at = [], length, bit
+        while remaining:
+            take = min(remaining, packet_bits - at % packet_bits)
+            chunks.append(source[at : at + take])
+            remaining -= take
+            at += take + 32
+        bits[start : start + length] = np.concatenate(chunks) if len(chunks) > 1 else chunks[0]
+    first = {}
+    for i, start in enumerate(starts):
+        last_in_packet = i + 1 == len(starts) or starts[i + 1] // payload_bits != start // payload_bits
+        bits[start + frames[i][1] - 1] = 0 if last_in_packet else 1
+        first.setdefault(start // payload_bits, start % payload_bits)
+    out = bytearray()
+    for k in range(packets):
+        # frame count, offset of the first frame starting in the packet (0x7FFF: none), metadata 1
+        out += ((per_packet.get(k, 0) << 26) | (first.get(k, 0x7FFF) << 11) | (1 << 8)).to_bytes(4, "big")
+        out += np.packbits(bits[k * payload_bits : (k + 1) * payload_bits]).tobytes()
+    block_frames = [0] * (-(-packets // block_packets))
+    for start in starts:
+        block_frames[start // block_bits] += 1
+    return bytes(out), block_frames
 
 
 def xma_seek_table(data: bytes, frames: List[Tuple[int, int]]) -> List[int]:

@@ -259,6 +259,13 @@ def cmd_convert(args):
     write_zone(main_zone, os.path.join(out_dir, f"{name}.ff"), args.jobs, out)
     from .library import T4FF_MARKER
 
+    # streams kept from an earlier conversion, in the game's layout too (see audio.py)
+    from .audio import upgrade_stream_files
+
+    if os.path.isdir(os.path.join(out_dir, "sounds")):
+        upgraded = upgrade_stream_files(os.path.join(out_dir, "sounds"))["upgraded"]
+        if upgraded:
+            print(f"streamed sounds: {upgraded} kept from an earlier conversion rewritten in the game's layout (4 KiB blocks)")
     # later conversions do not take this map's fastfiles for console data (--console-zone)
     with open(os.path.join(out_dir, T4FF_MARKER), "w", encoding="utf-8") as f:
         f.write("Converted from the PC by t4ff (tools/t4ff): not console data, t4ff leaves these fastfiles out of its console fastfiles.\n")
@@ -439,7 +446,29 @@ def cmd_menu(args):
             pictures.append(name)
     if pictures:
         print(f"map list pictures (preview.bin) from the loading screens of {', '.join(pictures)}")
+    # the streamed sounds of the maps (CoD Xenon's, older conversions) in the game's layout
+    if os.path.isdir(usermaps):
+        upgrade_map_streams(usermaps)
     return 0
+
+
+def upgrade_map_streams(folder: str) -> int:
+    """Rewrite the streamed sounds (.xma) under ``folder`` in the game's layout, reporting it."""
+    from .audio import upgrade_stream_files
+
+    stats = upgrade_stream_files(folder)
+    if stats["upgraded"]:
+        print(
+            f"streamed sounds: {stats['upgraded']} of {stats['files']} in {folder} rewritten in the game's layout "
+            "(4 KiB blocks and their table; before, they stopped after a split second)"
+        )
+    elif stats["files"]:
+        print(f"streamed sounds: the {stats['files']} in {folder} have the game's layout already")
+    return 1 if stats["failed"] else 0
+
+
+def cmd_streams(args):
+    return max(upgrade_map_streams(folder) for folder in args.folders)
 
 
 def cmd_setup(args):
@@ -513,6 +542,10 @@ def main(argv=None):
     p.add_argument("folder", help="the _codxe\\t4 folder the game reads (with zone\\patch_ui.ff and usermaps)")
     p.add_argument("--rows", type=int, default=13, help="rows the list shows at a time (default 13, as CoD Xenon's)")
     p.set_defaults(func=cmd_menu)
+
+    p = sub.add_parser("streams", help="rewrite the streamed sounds (.xma) of converted maps in the game's layout: those of older conversions and of CoD Xenon's maps stop after a split second")
+    p.add_argument("folders", nargs="+", help="folders searched for .xma files (e.g. the game's _codxe\\t4\\usermaps)")
+    p.set_defaults(func=cmd_streams)
 
     p = sub.add_parser("gui", help="open the converter window")
     p.set_defaults(func=cmd_gui)

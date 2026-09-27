@@ -14,6 +14,7 @@ Run with ``python -m unittest discover -s tests`` from tools/t4ff.
 import collections
 import os
 import stat
+import struct
 import sys
 import tempfile
 import textwrap
@@ -78,7 +79,7 @@ class EncodingTests(unittest.TestCase):
 
     def test_map_stream_hash(self):
         """The streams a map serves from its sounds folder get the hash of their path, as the game's
-        do: sharing one hash, a stream that starts silences the one playing."""
+        do."""
         from t4ff.assets import map_stream_hash, stream_name_hash
 
         songs = {map_stream_hash("sounds\\music_box", name) for name in ("bart2", "ned", "simpsons1")}
@@ -1042,11 +1043,14 @@ def xma2_packets(lengths, block_packets=2, seed=1):
     rng = np.random.default_rng(seed)
     payload_bits = (audio.XMA_PACKET_SIZE - 4) * 8
     block_bits = block_packets * payload_bits
-    starts, pos = [], 0
+    starts, pos, per_packet = [], 0, collections.Counter()
     for length in lengths:
+        if per_packet[pos // payload_bits] >= 63:  # the frame count of a packet header has 6 bits
+            pos += payload_bits - pos % payload_bits
         if pos % block_bits + length > block_bits:
             pos += block_bits - pos % block_bits
         starts.append(pos)
+        per_packet[pos // payload_bits] += 1
         pos += length
     total = -(-pos // block_bits) * block_bits
     bits = np.ones(total, dtype=np.uint8)
@@ -1119,14 +1123,83 @@ class AudioTests(unittest.TestCase):
         self.assertEqual(audio.ffmpeg_message(report), "[wmav2 @ 0x1] next_block_len_bits 4 out of range (and 2 more messages)")
 
     def test_sdns_roundtrip(self):
-        stream = audio.XmaStream(44100, 1, 1024, bytes(range(256)) * 16)
-        self.assertEqual(audio.read_sdns(audio.write_sdns(stream)).data, stream.data)
+        data, _ = xma2_packets([1600 + 37 * (i % 11) for i in range(40)], block_packets=32)
+        stream = audio.XmaStream(44100, 1, 40 * 512, data, 20000)
+        out = audio.write_sdns(stream)
+        back = audio.read_sdns(out)
+        self.assertEqual((back.rate, back.channels, back.samples), (44100, 1, 20000))
+        self.assertEqual(back.data, audio.xma2_reblock(data)[0])
+
+    def test_streams_in_the_games_layout(self):
+        """Streams as the game's own: XMA2 in 4 KiB blocks (2 packets), the header listing the
+        decoded samples at the end of every block. xma2encode's 64 KiB blocks without a table (CoD
+        Xenon's maps, earlier conversions) play a split second: the frames are repacked, their bits
+        unchanged."""
+        lengths = [1500 + (i * 7919) % 1500 for i in range(300)] + [200] * 150  # silence: tiny frames
+        data, frames = xma2_packets(lengths, block_packets=32)
+        out, block_frames = audio.xma2_reblock(data)
+        self.assertEqual(sum(block_frames), len(lengths))
+        self.assertEqual(len(block_frames), -(-len(out) // (2 * audio.XMA_PACKET_SIZE)))
+        new_frames = audio.xma_frames(out)
+        self.assertEqual([length for _, length in new_frames], lengths)
+
+        def frame_bits(buf, bit, length):
+            source = np.unpackbits(np.frombuffer(buf, dtype=np.uint8))
+            chunks, at = [], bit
+            while length:
+                take = min(length, audio.XMA_PACKET_SIZE * 8 - at % (audio.XMA_PACKET_SIZE * 8))
+                chunks.append(source[at : at + take])
+                length -= take
+                at += take + 32
+            return np.concatenate(chunks)[:-1]  # the last bit follows the packets
+
+        for (a, la), (b, lb) in zip(frames, new_frames):
+            self.assertTrue(np.array_equal(frame_bits(data, a, la), frame_bits(out, b, lb)))
+        packet_bits = audio.XMA_PACKET_SIZE * 8
+        per_packet = collections.Counter(bit // packet_bits for bit, _ in new_frames)
+        self.assertLessEqual(max(per_packet.values()), 63)
+        for bit, length in new_frames:  # no frame crosses a block
+            start = bit // packet_bits // 2
+            self.assertEqual(start, (bit + length + 32 - 1) // packet_bits // 2)
+        for k in range(len(out) // audio.XMA_PACKET_SIZE):
+            header = struct.unpack_from(">I", out, k * audio.XMA_PACKET_SIZE)[0]
+            self.assertEqual((header >> 26, (header >> 8) & 7, header & 0xFF), (per_packet.get(k, 0), 1, 0))
+            if k % 2 == 0:
+                self.assertEqual((header >> 11) & 0x7FFF, 0)  # every block starts with a frame
+
+        stream = audio.XmaStream(48000, 2, len(lengths) * 512, data, len(lengths) * 512 - 300)
+        sdns = audio.write_sdns(stream)
+        table = struct.unpack_from(f">{2 + len(block_frames)}I", sdns, 0x18)
+        self.assertEqual(table[:2], (0, 0))
+        self.assertEqual(list(table[2:]), [512 * sum(block_frames[: i + 1]) for i in range(len(block_frames))])
+        self.assertEqual(struct.unpack_from(">I", sdns, 0x10)[0], len(lengths) * 512 - 300)
+
+        # files of earlier conversions are rewritten, once
+        old = audio.SDNS_MAGIC + struct.pack(">5I", 0, 48000, 2, len(lengths) * 512, len(data)) + bytes(0x1000 - 24) + data
+        self.assertEqual(audio.upgrade_sdns(old)[0x1000:], out)
+        self.assertIsNone(audio.upgrade_sdns(audio.upgrade_sdns(old)))
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "a", "sounds"))
+            with open(os.path.join(tmp, "a", "sounds", "song.xma"), "wb") as f:
+                f.write(old)
+            self.assertEqual(audio.upgrade_stream_files(tmp), {"files": 1, "upgraded": 1, "failed": 0})
+            self.assertEqual(audio.upgrade_stream_files(tmp), {"files": 1, "upgraded": 0, "failed": 0})
+
+    def test_stock_streams_keep_their_layout(self):
+        """The game's own stream files (its disc's .xma) come out of the writer byte for byte."""
+        folder = sample("x360", "stock_sounds")
+        if not os.path.isdir(folder):
+            self.skipTest("no stock stream samples")
+        names = sorted(n for n in os.listdir(folder) if n.endswith(".xma"))
+        for name in names:
+            with open(os.path.join(folder, name), "rb") as f:
+                self.assertIsNone(audio.upgrade_sdns(f.read()), name)
 
     def test_streamed_sound_target(self):
         self.assertEqual(audio.streamed_sound_target("sound/eggs/para_egg.wav"), "sounds/eggs/para_egg.xma")
 
     def test_encoder_pipeline_matches_cod_xenon(self):
-        """An encoder producing CoD Xenon's XMA packets must yield CoD Xenon's SDNS file."""
+        """An encoder producing CoD Xenon's XMA packets yields CoD Xenon's SDNS file in the game's layout."""
         reference_path = sample("x360", "sounds", "para_egg.xma")
         with open(reference_path, "rb") as f:
             reference = f.read()
@@ -1149,7 +1222,11 @@ class AudioTests(unittest.TestCase):
             os.chmod(fake, os.stat(fake).st_mode | stat.S_IEXEC)
             encoder = audio.XmaEncoder(fake)
             pcm = audio.Pcm(44100, np.zeros((1000, 1), dtype=np.int16))
-            self.assertEqual(audio.write_sdns(encoder.encode(pcm)), reference)
+            # CoD Xenon's file, in the game's layout (its 64 KiB blocks stop after a split second)
+            out = audio.write_sdns(encoder.encode(pcm))
+            upgraded = audio.upgrade_sdns(reference)
+            self.assertEqual(out[0x14:], upgraded[0x14:])
+            self.assertEqual(struct.unpack_from(">I", out, 0x10)[0], 1000)
 
     def test_long_loaded_sound_decodes(self):
         """xma2encode data longer than one 64 KiB block (CoD Xenon's para_egg stream) makes a whole
@@ -1229,7 +1306,7 @@ class AudioTests(unittest.TestCase):
 
             def encode(self, pcm):
                 Encoder.calls += 1
-                return audio.XmaStream(pcm.rate, pcm.channels, pcm.frames, bytes(audio.XMA_PACKET_SIZE))
+                return audio.XmaStream(pcm.rate, pcm.channels, pcm.frames, xma2_packets([2000] * 4)[0])
 
         with tempfile.TemporaryDirectory() as tmp:
             game, out = os.path.join(tmp, "main"), os.path.join(tmp, "out")
@@ -1512,7 +1589,7 @@ class SampleZoneTests(unittest.TestCase):
                     directory, name = (bytes(c.data).rstrip(b"\0").decode() for c in n.children)
                     if directory.startswith("sounds\\"):
                         custom.append((directory, name))
-                        # a hash of its own: streams sharing one silence each other
+                        # a hash of its own, as the game's streams
                         self.assertEqual(struct.unpack_from(">I", n.data, 4)[0], map_stream_hash(directory, name))
                         hashes.setdefault(map_stream_hash(directory, name), set()).add((directory, name))
             self.assertGreaterEqual(len(custom), stats["streamed"])
@@ -1521,7 +1598,7 @@ class SampleZoneTests(unittest.TestCase):
             self.assertEqual(len(files), stats["streamed"])
             self.assertTrue(all(os.path.exists(f) for f in files))
             with open(next(iter(files)), "rb") as f:
-                self.assertEqual(audio.read_sdns(f.read()).data, packets)
+                self.assertEqual(audio.read_sdns(f.read()).data, audio.xma2_reblock(packets)[0])
             # the aliases say their sound is streamed too (flags bits 13-14 = SoundFile.type):
             # an alias still flagged loaded reads the stream name as a sound pointer and crashes
             from t4ff.commands import find_field

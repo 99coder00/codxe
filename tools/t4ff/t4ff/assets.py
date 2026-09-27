@@ -765,12 +765,9 @@ def stream_name_hash(path: str) -> int:
 
 
 def map_stream_hash(directory: str, name: str) -> int:
-    """StreamFileName hash of a stream the map serves from its sounds folder.
-
-    Every stream needs a hash of its own, like the game's (that of the path it opens): with one
-    hash for all of them, a stream of the map that starts silences the one playing (a song of the
-    music box after a split second, voice lines halfway through).
-    """
+    """StreamFileName hash of a stream the map serves from its sounds folder: like the game's
+    streams, the hash of the path the console opens (never 0, which CoD Xenon's maps give the
+    streams they made of loaded sounds)."""
     return stream_name_hash((directory + "\\" if directory else "") + name) or 1
 
 

@@ -133,6 +133,7 @@ Other commands:
 ```sh
 python -m t4ff info <fastfile> [--list]   # blocks, asset counts, asset names (PC or console)
 python -m t4ff menu <game>/_codxe/t4       # the map list shows every map of usermaps (see below)
+python -m t4ff streams <game>/_codxe/t4/usermaps   # streamed sounds of older conversions in the game's layout
 python -m t4ff roundtrip <fastfile>...    # read + rewrite, checks the result is byte identical
 ```
 
@@ -277,6 +278,11 @@ writes next to `<map>_load.ff` and `menu` writes for the maps already installed
 with one. CoD Xe copies it into a picture slot the menu zone has for it, so
 maps converted before need `menu` run once more, for the slot.
 
+`menu` also rewrites the streamed sounds (`.xma`) of the maps in `usermaps`
+that do not have the layout of the game's streams (CoD Xenon's maps, maps
+converted before t4ff wrote it): theirs play a split second, then stop. The
+`streams` command does only that, for any folder.
+
 ### Loading screen
 
 While a map loads, the game shows the material `$levelbriefing` of the map's
@@ -390,12 +396,16 @@ CoD Xenon's conversion of it, asset by asset:
   44.1 kHz ones; the 22.05 and 32 kHz ones carry a fake 96 kbps bit rate and
   decode with their real one (20 kbps), at 32 kHz with 3 block sizes instead of
   4 (codec options 0x17). The decoded length is checked against the `dpds`
-  chunk. Streamed sounds are XMA2 in an `SDNS` container
-  (sample count = XMA frames × 512); their names drop the extension and carry a
-  hash (`h = h * 0x1003F + c` from 5381 over `dir\name` in lower case). Sounds
-  of the map are served by CoD Xe from `sounds\`, with the hash of that path:
-  streams sharing a hash silence each other (a music box song stopped after a
-  split second, voice lines halfway through).
+  chunk. Streamed sounds are XMA2 in an `SDNS` container laid out as the game's
+  own (the `.xma` files of its disc, which the writer reproduces byte for byte):
+  4 KiB XMA2 blocks (two packets), the header giving the sample count and the
+  decoded sample count at the end of every block (as many as fit: 1016). The
+  game reads a stream block after block along that table: xma2encode's 64 KiB
+  blocks without it (as CoD Xenon's maps and earlier conversions had them) play
+  their first block, a split second, then stop. Their names drop the extension
+  and carry a hash (`h = h * 0x1003F + c` from 5381 over `dir\name` in lower
+  case). Sounds of the map are served by CoD Xe from `sounds\`, with the hash of
+  that path.
 - The clip map is stored under the PVS clip map asset type.
 - **Menus** keep per-client state for 4 splitscreen players (`[4]` arrays).
 
