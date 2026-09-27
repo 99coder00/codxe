@@ -294,6 +294,8 @@ build_zombies()
 	mm_add_sub("zombies", "Perks", "zm_perks");
 	mm_add_action("zombies", "Open All Doors", maps\mod_menu\zombies::open_all_doors);
 	mm_add_action("zombies", "Turn On Power", maps\mod_menu\zombies::power_on);
+	if (maps\mod_menu\zombies::music_box_triggers().size > 0)
+		mm_add_action("zombies", "Music Box", maps\mod_menu\zombies::music_box);
 	mm_add_sub("zombies", "Drop Power-Up Now", "zm_drop");
 	mm_add_sub("zombies", "Rig Next Drop", "zm_rig");
 	mm_add_action("zombies", "Skip Round", maps\mod_menu\zombies::skip_round);

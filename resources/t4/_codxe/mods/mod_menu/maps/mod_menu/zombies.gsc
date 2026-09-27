@@ -207,6 +207,50 @@ open_all_doors()
 	self iprintln("Opened ^3" + opened + "^7 doors and debris piles (free)");
 }
 
+// Tom_bmx's music box (maps\tom_player_unl.gsc, in many custom maps): using one of its triggers
+// opens the map's song menu. This does the same from anywhere; the map's script does the rest.
+music_box_triggers()
+{
+	if (isDefined(level.music_box_trigs))
+		return level.music_box_trigs;
+	return getEntArray("music_box", "targetname");
+}
+
+music_box()
+{
+	self endon("disconnect");
+
+	triggers = music_box_triggers();
+	trig = undefined;
+	for (i = 0; i < triggers.size && !isDefined(trig); i++)
+		trig = triggers[i];
+	if (!isDefined(trig))
+	{
+		self iprintln("^1This map has no music box");
+		return;
+	}
+
+	// The music box's own state (it ignores its triggers meanwhile).
+	if (isDefined(level.music_box_trigs))
+	{
+		if (isDefined(level.playing) && level.playing)
+		{
+			self iprintln("^1A song is playing, wait till it is done");
+			return;
+		}
+		if (isDefined(level.in_menu) && level.in_menu)
+		{
+			self iprintln("^1Someone is picking a song");
+			return;
+		}
+	}
+
+	// Its menu takes the controls: close this one first.
+	self maps\mod_menu\core::mm_close();
+	wait 0.05;
+	trig notify("trigger", self);
+}
+
 power_on()
 {
 	names = [];
