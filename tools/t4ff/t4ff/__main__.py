@@ -356,20 +356,31 @@ def cmd_menu(args):
     """Make the Nazi Zombies map list of CoD Xenon's patch_ui.ff dynamic (see menu.py)."""
     import shutil
 
-    from .menu import MenuError, description_text, localized_strings, make_dynamic
+    from .menu import MenuError, description_text, localized_strings, make_dynamic, not_cod_xenon_menu
 
     root = args.folder
     zone_dir = os.path.join(root, "zone") if os.path.isdir(os.path.join(root, "zone")) else root
     target = os.path.join(zone_dir, "patch_ui.ff")
     original = target + ".orig"
-    if not os.path.exists(original):
-        if not os.path.exists(target):
-            print(f"error: {target} not found (give CoD Xenon's _codxe\\t4 folder)")
-            return 1
+    # CoD Xenon's menu is kept as patch_ui.ff.orig and every run starts again from it
+    source = original if os.path.exists(original) else target
+    if not os.path.exists(source):
+        print(f"error: {target} not found (give CoD Xenon's _codxe\\t4 folder)")
+        return 1
+    endian, _, data = read_fastfile(source)
+    zone = Reader(x360(), data).load()
+    problem = not_cod_xenon_menu(x360(), zone)
+    if problem:
+        print(f"error: {source} is not CoD Xenon's menu: {problem}.")
+        print(
+            f"Put CoD Xenon's patch_ui.ff (_codxe\\t4\\zone\\patch_ui.ff of their 0.2.0 zip) in {zone_dir}"
+            + (f" and delete {original}" if source == original else "")
+            + ", then run this again."
+        )
+        return 1
+    if source == target:
         shutil.copyfile(target, original)
         print(f"kept CoD Xenon's menu as {original}")
-    endian, _, data = read_fastfile(original)
-    zone = Reader(x360(), data).load()
     try:
         rows = make_dynamic(x360(), zone, args.rows)
     except MenuError as e:

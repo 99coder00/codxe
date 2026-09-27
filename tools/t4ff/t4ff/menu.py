@@ -372,6 +372,22 @@ def make_dynamic(p: Platform, zone: Zone, rows: int = ROWS) -> List[dict]:
     return found
 
 
+def not_cod_xenon_menu(p: Platform, zone: Zone) -> Optional[str]:
+    """Why ``zone`` is not CoD Xenon's own patch_ui.ff (the menu :func:`make_dynamic` starts from),
+    or None when it is."""
+    if any(a.type == "menu" and a.name == USERMAPS_MENU for a in zone.assets):
+        return f"it already has a Custom Maps menu ({USERMAPS_MENU}): it is a CoD Xe menu"
+    try:
+        editor = MenuEditor(p, zone)
+    except MenuError as e:
+        return str(e)
+    if custom_rows(editor):
+        return None
+    if any((editor.string(item, "window.name") or "").startswith("codxe_map") for item in editor.items):
+        return "its map list was already made dynamic (by an older t4ff menu)"
+    return f"its {LIST_MENU} has no rows of CoD Xenon's maps"
+
+
 def usermaps_menu(editor: MenuEditor, rows: int = ROWS) -> List[Node]:
     """Make ``editor``'s menu (a copy of ``levels_unlock``) the Custom Maps menu: its frame (background,
     Back), a title, and ``rows`` dynamic rows where the map rows were, with the preview of the

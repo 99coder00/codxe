@@ -714,6 +714,20 @@ class MenuTests(unittest.TestCase):
                 with contextlib.redirect_stdout(io.StringIO()):
                     self.assertEqual(main(["--no-install", "menu", tmp]), 0)
             self.assertTrue(os.path.exists(os.path.join(tmp, "zone", "patch_ui.ff.orig")))
+            # a menu that is not CoD Xenon's (made already, or another CoD Xe menu) is refused, and
+            # not kept as the original
+            other = os.path.join(tmp, "other")
+            os.makedirs(os.path.join(other, "zone"))
+            shutil.copy(os.path.join(tmp, "zone", "patch_ui.ff"), os.path.join(other, "zone"))
+            for orig in (False, True):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    self.assertEqual(main(["--no-install", "menu", other]), 1)
+                self.assertIn("already has a Custom Maps menu", out.getvalue())
+                self.assertEqual(os.path.exists(os.path.join(other, "zone", "patch_ui.ff.orig")), orig)
+                self.assertEqual("and delete" in out.getvalue(), orig)
+                if not orig:  # then as the kept original
+                    os.replace(os.path.join(other, "zone", "patch_ui.ff"), os.path.join(other, "zone", "patch_ui.ff.orig"))
             with open(os.path.join(tmp, "usermaps", "nazi_zombie_aztec", "description.txt")) as f:
                 self.assertEqual(f.read().splitlines()[0], "Aztec")
             with open(os.path.join(tmp, "usermaps", "nazi_zombie_aztec", "preview.txt")) as f:
