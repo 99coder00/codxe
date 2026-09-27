@@ -755,6 +755,16 @@ def stream_name_hash(path: str) -> int:
     return h
 
 
+def map_stream_hash(directory: str, name: str) -> int:
+    """StreamFileName hash of a stream the map serves from its sounds folder.
+
+    Every stream needs a hash of its own, like the game's (that of the path it opens): with one
+    hash for all of them, a stream of the map that starts silences the one playing (a song of the
+    music box after a split second, voice lines halfway through).
+    """
+    return stream_name_hash((directory + "\\" if directory else "") + name) or 1
+
+
 def _loaded_sound_data(node) -> Optional[Node]:
     data = next((c for c in node.children if (c.extra.get("origin") or ("", "", ""))[1:] == ("snd_asset", "data")), None)
     return data if data is not None and data.data else None
@@ -925,7 +935,7 @@ def sound_hook(conv, asset_type, node, name):
         custom = bool(conv.options.sounds_dir) and os.path.exists(os.path.join(conv.options.sounds_dir, *target.split("/")))
         if custom:
             new_dir = "sounds\\" + directory if directory else "sounds"
-            value = 0
+            value = map_stream_hash(new_dir, stem)
         else:
             new_dir = directory.lower()
             stem = stem.lower()

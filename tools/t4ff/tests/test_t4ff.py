@@ -76,6 +76,18 @@ class EncodingTests(unittest.TestCase):
         self.assertEqual(console_sound_name("sfx/a/b.wav"), "sfx/a/b")
         self.assertEqual(console_sound_name(",b.WAV"), ",b")
 
+    def test_map_stream_hash(self):
+        """The streams a map serves from its sounds folder get the hash of their path, as the game's
+        do: sharing one hash, a stream that starts silences the one playing."""
+        from t4ff.assets import map_stream_hash, stream_name_hash
+
+        songs = {map_stream_hash("sounds\\music_box", name) for name in ("bart2", "ned", "simpsons1")}
+        self.assertEqual(len(songs), 3)
+        self.assertNotIn(0, songs)
+        self.assertEqual(map_stream_hash("sounds\\music_box", "bart2"), stream_name_hash("sounds\\music_box\\bart2"))
+        self.assertEqual(map_stream_hash("Sounds\\Music_Box", "BART2"), map_stream_hash("sounds\\music_box", "bart2"))
+        self.assertEqual(map_stream_hash("", "a"), stream_name_hash("a"))
+
     def test_technique_mapping(self):
         from t4ff.assets import PC_TECHNIQUE_TO_X360, X360_TECHNIQUE_COUNT
 
@@ -1436,13 +1448,20 @@ class SampleZoneTests(unittest.TestCase):
             self.assertEqual(Writer(x360()).write(again), out)
             loaded = [n for n in again.extra_root.walk() if (n.extra.get("origin") or ("",))[0] == "asset" and n.type.name == "LoadedSound"]
             self.assertEqual(len(loaded), 1500)
-            custom = [n for n in again.extra_root.walk() if n.type.name == "SoundFile" and n.data[0] == 2 and struct.unpack_from(">I", n.data, 4)[0] == 0]
+            from t4ff.assets import map_stream_hash
+
+            custom, hashes = [], {}
+            for n in again.extra_root.walk():
+                if n.type.name == "SoundFile" and n.data[0] == 2 and len(n.children) == 2:
+                    directory, name = (bytes(c.data).rstrip(b"\0").decode() for c in n.children)
+                    if directory.startswith("sounds\\"):
+                        custom.append((directory, name))
+                        # a hash of its own: streams sharing one silence each other
+                        self.assertEqual(struct.unpack_from(">I", n.data, 4)[0], map_stream_hash(directory, name))
+                        hashes.setdefault(map_stream_hash(directory, name), set()).add((directory, name))
             self.assertGreaterEqual(len(custom), stats["streamed"])
-            files = set()
-            for n in custom:
-                directory, name = (bytes(c.data).rstrip(b"\0").decode() for c in n.children)
-                self.assertTrue(directory.startswith("sounds\\"))
-                files.add(os.path.join(tmp, *directory.split("\\"), name + ".xma"))
+            self.assertTrue(all(len(v) == 1 for v in hashes.values()))
+            files = {os.path.join(tmp, *directory.split("\\"), name + ".xma") for directory, name in custom}
             self.assertEqual(len(files), stats["streamed"])
             self.assertTrue(all(os.path.exists(f) for f in files))
             with open(next(iter(files)), "rb") as f:

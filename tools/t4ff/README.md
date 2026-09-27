@@ -391,7 +391,9 @@ CoD Xenon's conversion of it, asset by asset:
   chunk. Streamed sounds are XMA2 in an `SDNS` container
   (sample count = XMA frames × 512); their names drop the extension and carry a
   hash (`h = h * 0x1003F + c` from 5381 over `dir\name` in lower case). Sounds
-  of the map are served by CoD Xe from `sounds\`.
+  of the map are served by CoD Xe from `sounds\`, with the hash of that path:
+  streams sharing a hash silence each other (a music box song stopped after a
+  split second, voice lines halfway through).
 - The clip map is stored under the PVS clip map asset type.
 - **Menus** keep per-client state for 4 splitscreen players (`[4]` arrays).
 

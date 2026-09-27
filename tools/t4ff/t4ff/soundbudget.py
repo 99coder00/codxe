@@ -108,6 +108,7 @@ def limit_loaded_sounds(p: Platform, zone: Zone, limit: int, streams: Dict[str, 
     """Bring the loaded sounds of ``zone`` down to ``limit`` (0: no limit) and their memory to
     ``max_bytes`` (0: no limit). ``streams`` gives the XMA2 stream (audio.XmaStream) of each
     converted loaded sound by name, for the ones to stream."""
+    from .assets import map_stream_hash
     from .audio import write_sdns
 
     stats = {"shared": 0, "streamed": 0, "stream_bytes": 0}
@@ -215,7 +216,7 @@ def limit_loaded_sounds(p: Platform, zone: Zone, limit: int, streams: Dict[str, 
             if old.kind in ("follow", "insert"):
                 sf.children = [c for c in sf.children if c is not old.node]
             sf.data[0] = SAT_STREAMED
-            p.u32.pack_into(sf.data, hash_off, 0)  # 0: a file of the map (served from its sounds folder)
+            p.u32.pack_into(sf.data, hash_off, map_stream_hash(directory, stem))
             p.u32.pack_into(sf.data, dir_off, 0xFFFFFFFF)
             p.u32.pack_into(sf.data, name_off, 0xFFFFFFFF)
             p.u32.pack_into(sf.data, prime_off, 0)
