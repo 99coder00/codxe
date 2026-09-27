@@ -14,8 +14,9 @@ namespace
 {
 // Must match the menu (tools/t4ff/t4ff/menu.py): the rows it shows and the dvars it reads and sets.
 const int LIST_ROWS = 13;
-// The Custom Maps menu the Nazi Zombies menu opens; menus made by older t4ff have the rows in the Nazi Zombies menu.
-const char *const LIST_MENUS[] = {"codxe_usermaps", "levels_unlock"};
+// The Custom Maps menu the Nazi Zombies menu opens (t4ff puts it in place of the game's developer level list, since
+// a patch cannot add menus); menus made by older t4ff have the rows in the Nazi Zombies menu itself.
+const char *const LIST_MENUS[] = {"levels_dev", "levels_unlock"};
 const char *const USERMAPS_DIRECTORY = "usermaps";
 
 // ui_codxe_map<row>, ui_codxe_mapcmd<row>: the name and the command of each row ("" hides the row).

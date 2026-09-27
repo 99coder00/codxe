@@ -246,8 +246,11 @@ python -m t4ff menu "<game>/_codxe/t4"      # or Update game menu... in the wind
 
 It keeps CoD Xenon's `zone/patch_ui.ff` as `patch_ui.ff.orig` and rewrites the
 menu's map list: the stock maps stay, and CoD Xenon's own maps become one
-"Custom Maps" entry, which opens a menu of its own (`codxe_usermaps`, with the
-look of the Nazi Zombies menu: its background, a "Custom Maps" title and Back).
+"Custom Maps" entry, which opens a menu of its own (with the look of the Nazi
+Zombies menu: its background, a "Custom Maps" title and Back). The game only
+knows the menus of its own list, and a patch can replace them but not add new
+ones, so this menu takes the place of one nothing opens, the developers' level
+list `levels_dev`.
 There 13 rows show the maps of the `usermaps` folder, sorted by name. The D-pad
 scrolls past the first and last rows, LB / RB move a page, the line under the
 rows tells where you are ("14-26 / 40"), and the right side shows the focused

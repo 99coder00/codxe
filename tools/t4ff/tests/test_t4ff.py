@@ -679,7 +679,7 @@ class MenuTests(unittest.TestCase):
 
     def test_dynamic_map_list(self):
         """The Nazi Zombies map list of CoD Xenon's patch_ui.ff: the stock rows stay, the 13 rows of
-        their maps become one Custom Maps row opening the menu codxe_usermaps: 13 rows showing dvars
+        their maps become one Custom Maps row opening the Custom Maps menu: 13 rows showing dvars
         (CoD Xe fills them from the usermaps folder), with scroll catchers, a counter, the preview of
         the focused map and LB / RB paging."""
         import contextlib

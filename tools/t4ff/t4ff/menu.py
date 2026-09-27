@@ -6,8 +6,8 @@ which runs ``devmap <map>``) and its preview (picture, name and description) on 
 holds 13 custom maps, the screen holds no more.
 
 :func:`make_dynamic` keeps the stock rows and replaces the custom ones by one "Custom Maps" row,
-which opens a menu of its own, ``codxe_usermaps`` (made from a copy of ``levels_unlock``: its
-background and Back button, a title): ``ROWS`` rows whose text and command are dvars, which CoD Xe
+which opens a menu of its own (made from a copy of ``levels_unlock``: its background and Back
+button, a title; named ``levels_dev``, a menu of the game it replaces, see ``USERMAPS_MENU``): ``ROWS`` rows whose text and command are dvars, which CoD Xe
 fills from the usermaps folder (``src/game/t4/sp/components/usermaps.cpp``), and the preview of the
 focused map on the right. The dvars:
 
@@ -44,8 +44,10 @@ PREVIEW_MAGIC = b"CXPV"
 PREVIEW_FILE = "preview.bin"
 KEY_LSHLDR, KEY_RSHLDR = 5, 6
 ROW_HEIGHT = 19.0  # the items of a map row
-# the Custom Maps menu: its name, the list it is in (the game loads it), its title
-USERMAPS_MENU = "codxe_usermaps"
+# The Custom Maps menu takes the place of a menu of the game nothing opens (its developers' level
+# list): the game only has the menus of its ui/menus.txt, a patch replaces some of them (those of
+# ui/patch_menus.txt, as CoD Xenon's levels_unlock) but cannot add new ones.
+USERMAPS_MENU = "levels_dev"
 MENU_LIST = "ui/patch_menus.txt"
 USERMAPS_TITLE = "Custom Maps"
 TITLE_RECT = (22.0, 32.0, 100.0, 100.0)
@@ -355,7 +357,7 @@ def custom_rows(editor: MenuEditor) -> List[dict]:
 
 def make_dynamic(p: Platform, zone: Zone, rows: int = ROWS) -> List[dict]:
     """The Nazi Zombies menu keeps the stock maps; CoD Xenon's rows of converted maps become one
-    "Custom Maps" row, which opens the menu ``codxe_usermaps``: ``rows`` dynamic rows showing the
+    "Custom Maps" row, which opens the Custom Maps menu (``USERMAPS_MENU``): ``rows`` dynamic rows showing the
     maps of the usermaps folder, and the preview of the focused one (see the module). Returns CoD
     Xenon's rows that were there (map, localized name and description keys, preview picture), for
     their description files."""
@@ -375,8 +377,9 @@ def make_dynamic(p: Platform, zone: Zone, rows: int = ROWS) -> List[dict]:
 def not_cod_xenon_menu(p: Platform, zone: Zone) -> Optional[str]:
     """Why ``zone`` is not CoD Xenon's own patch_ui.ff (the menu :func:`make_dynamic` starts from),
     or None when it is."""
-    if any(a.type == "menu" and a.name == USERMAPS_MENU for a in zone.assets):
-        return f"it already has a Custom Maps menu ({USERMAPS_MENU}): it is a CoD Xe menu"
+    made = [a.name for a in zone.assets if a.type == "menu" and a.name in (USERMAPS_MENU, "codxe_usermaps")]
+    if made:
+        return f"it already has a Custom Maps menu ({made[0]}): it is a CoD Xe menu"
     try:
         editor = MenuEditor(p, zone)
     except MenuError as e:
