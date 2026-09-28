@@ -468,6 +468,36 @@ Verify new console layouts with:
 python dev/verify_samples.py path/to/console/*.ff   # updates t4ff/defs/x360_verified.txt
 ```
 
+### Maps tested on the console
+
+| Map | Result |
+| --- | --- |
+| Aztec | plays |
+| Zombie Woods (2008) | plays, with a title card loading screen |
+| The Simpsons (2010) | plays; voices and music box work. Known problems below |
+| Dead Sand (2009) | converts and loads, then crashes after a few seconds |
+
+### Known problems
+
+- **The Simpsons crashes at the first window of the house** at times, with "Tried to use '(null)'
+  when it isn't valid. Material='mc/berlin_window_browirglas', tech='lp_sun_b0c0d0n0s0_dtex_sm3',
+  techType=10". The door model, its material and its technique set convert exactly as in CoD
+  Xenon's maps that have the same door; a texture the renderer supplies itself (model lighting,
+  shadows or the reflection probe) is missing when the glass is drawn in sunlight. Not solved.
+- **The Simpsons skips rounds**, does not use the TV room's barriers, its AI does not always find a
+  way in, dogs die as they spawn, and Moe's cannot be reached. The world's paths and collision
+  convert exactly as on PC; the dogs had none of their animations (fixed) and the rocket barrage
+  failed (fixed). The rest is not solved.
+- **Dead Sand crashes Xenia** ("Overflowed stackpoints!") a few seconds into a game, most likely a
+  script that loops forever (as The Simpsons' zipline setup did before its fix). Not solved.
+- **Stock assets no console fastfile has** stay missing ("Could not load material/fx/xanim" in the
+  console log): the PC game's own zones have them, and t4ff does not read those yet. Maps that use
+  campaign AI or effects (Dead Sand) miss the most.
+- Some streamed sounds of the game a map uses are in none of the PC files given and play silence.
+
+[HANDOFF.md](HANDOFF.md) has the details of each (what was checked, what was ruled out, what to try
+next), the rules the work follows and how to continue it.
+
 ## Tests
 
 ```sh
