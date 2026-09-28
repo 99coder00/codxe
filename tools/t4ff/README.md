@@ -10,7 +10,10 @@ keeps them small enough for the console's memory:
 - **Textures** are rebuilt as tiled Xenos textures with their mip chains.
   Uncompressed textures are DXT compressed. Normal maps become DXN, the format
   of all the console's (the PC keeps x in alpha and y in green, the console's
-  shaders read x and y from DXN's two channels). Each map keeps as much texture
+  shaders read x and y from DXN's two channels). Cube maps (the reflection
+  probes of the map, skies) keep their six faces as the game's own: the
+  probes convert to exactly the textures Treyarch's Aztec has, and like those
+  stay uncompressed up to 64 texels. Each map keeps as much texture
   quality as fits in memory: the texture budget is what a memory target based on
   CoD Xenon's working maps leaves, and only when a map is over it do its largest
   textures lose top mip levels. Stock textures use the console's own versions.
@@ -431,7 +434,7 @@ writes them big endian like every other 16-bit value the console reads.
 | xanim, xmodel, fx, gfxworld, clipmap, comworld, gameworld_sp, map_ents | converted |
 | material | converted (technique slots remapped, state bits filtered by the console technique set) |
 | techset | copied from `--console-zone` fastfiles, name reference otherwise |
-| image | converted from the zone or from `.iwi` files; stock images without pixel data are copied from console fastfiles or referenced. Cube maps become references for now. |
+| image | converted from the zone or from `.iwi` files; stock images without pixel data are copied from console fastfiles or referenced. Cube maps are converted too (the probes in the zone, skies from `.iwi` files); volume maps become references. |
 | sound (aliases) | converted, streamed names follow the console conventions |
 | loaded sounds | encoded to XMA1 (needs `xma2encode`), otherwise copied from console fastfiles or referenced |
 | streamed sounds | encoded to XMA2 `sounds/*.xma` (needs `xma2encode`); the game's own the map uses too, from `--iwd` |

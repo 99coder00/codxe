@@ -35,7 +35,14 @@ D3DFMT_DXT5 = 0x1A200154
 D3DFMT_DXN = 0x1A200171
 D3DFMT_A8R8G8B8 = 0x18280186
 D3DFMT_L8 = 0x28000102
-D3DFMT_A8L8 = 0x2800014A
+D3DFMT_A8L8 = 0x0800014A
+# The swizzle of a D3DFORMAT sits in bits 18 to 29 (the texture header holds it too); older t4ff
+# versions wrote A8L8 textures with another swizzle there.
+D3DFMT_SWIZZLE_SHIFT = 18
+
+# GPUDIMENSION
+GPUDIMENSION_2D = 1
+GPUDIMENSION_CUBEMAP = 3
 
 
 @dataclass(frozen=True)
@@ -49,16 +56,23 @@ class Format:
     swizzle: int  # dword 3 swizzle bits (XYZW)
 
 
-# Swizzle 0x688 = X:0 Y:1 Z:2 W:3, as used by CoD Xenon's converted textures.
+# Swizzles as Treyarch's textures have them (3 bits a channel, 4: 0, 5: 1): 0x688 = X:0 Y:1 Z:2 W:3;
+# 8_8_8_8 (PC BGRA bytes) 0x60A = X:2 Y:1 Z:0 W:3; L8 0xA00 = LLL1; A8L8 0x200 = LLLA.
 FORMATS = {
     "DXT1": Format("DXT1", GPUTEXTUREFORMAT_DXT1, D3DFMT_DXT1, GPUENDIAN_8IN16, 4, 8, 0x688),
     "DXT3": Format("DXT3", GPUTEXTUREFORMAT_DXT2_3, D3DFMT_DXT3, GPUENDIAN_8IN16, 4, 16, 0x688),
     "DXT5": Format("DXT5", GPUTEXTUREFORMAT_DXT4_5, D3DFMT_DXT5, GPUENDIAN_8IN16, 4, 16, 0x688),
     "DXN": Format("DXN", GPUTEXTUREFORMAT_DXN, D3DFMT_DXN, GPUENDIAN_8IN16, 4, 16, 0x688),
-    "A8R8G8B8": Format("A8R8G8B8", GPUTEXTUREFORMAT_8_8_8_8, D3DFMT_A8R8G8B8, GPUENDIAN_8IN32, 1, 4, 0x688),
-    "L8": Format("L8", GPUTEXTUREFORMAT_8, D3DFMT_L8, GPUENDIAN_NONE, 1, 1, 0x000),
+    "A8R8G8B8": Format("A8R8G8B8", GPUTEXTUREFORMAT_8_8_8_8, D3DFMT_A8R8G8B8, GPUENDIAN_8IN32, 1, 4, 0x60A),
+    "L8": Format("L8", GPUTEXTUREFORMAT_8, D3DFMT_L8, GPUENDIAN_NONE, 1, 1, 0xA00),
     "A8L8": Format("A8L8", GPUTEXTUREFORMAT_8_8, D3DFMT_A8L8, GPUENDIAN_8IN16, 1, 2, 0x200),
 }
+
+
+def format_of_d3d(d3d: int) -> Optional[Format]:
+    """The format of a D3DFORMAT value, whatever swizzle it names."""
+    low = d3d & ((1 << D3DFMT_SWIZZLE_SHIFT) - 1)
+    return next((f for f in FORMATS.values() if f.d3d & ((1 << D3DFMT_SWIZZLE_SHIFT) - 1) == low), None)
 
 
 def _align(value: int, alignment: int) -> int:
@@ -156,21 +170,21 @@ def untile_level(tiled: bytes, width: int, height: int, level: int, fmt: Format)
     return data[tiled_offsets(wb, hb, stored_w, bpb)].tobytes()
 
 
-def fetch_constant(width: int, height: int, fmt: Format, levels: int, tiled: bool = True, mip_address: int = 0) -> bytes:
-    """GPU texture fetch constant (6 dwords) for a 2D texture, little endian as stored in T4 zones."""
+def fetch_constant(width: int, height: int, fmt: Format, levels: int, tiled: bool = True, mip_address: int = 0, dimension: int = GPUDIMENSION_2D) -> bytes:
+    """GPU texture fetch constant (6 dwords) for a 2D or cube texture, little endian as stored in T4 zones."""
     pitch = pitch_units(width, fmt)
     dword0 = 2 | (pitch << 22) | (int(tiled) << 31)
     dword1 = fmt.gpu | (fmt.endian << 6)
     dword2 = (width - 1) | ((height - 1) << 13)
     dword3 = fmt.swizzle << 1
     dword4 = ((levels - 1) & 0xF) << 6
-    dword5 = (1 << 9) | ((mip_address & 0xFFFFF) << 12)
+    dword5 = (dimension << 9) | ((mip_address & 0xFFFFF) << 12)
     return struct.pack("<6I", dword0, dword1, dword2, dword3, dword4, dword5)
 
 
-def texture_header(width: int, height: int, fmt: Format, levels: int, mip_address: int = 0) -> bytes:
+def texture_header(width: int, height: int, fmt: Format, levels: int, mip_address: int = 0, dimension: int = GPUDIMENSION_2D) -> bytes:
     """D3DBaseTexture (52 bytes, little endian) as stored in T4 360 zones."""
-    return struct.pack("<7I", 3, 1, 0, 0, 0, 0xFFFF0000, 0xFFFF0000) + fetch_constant(width, height, fmt, levels, True, mip_address)
+    return struct.pack("<7I", 3, 1, 0, 0, 0, 0xFFFF0000, 0xFFFF0000) + fetch_constant(width, height, fmt, levels, True, mip_address, dimension)
 
 
 # ---------------------------------------------------------------------------
@@ -223,13 +237,17 @@ def _tiled_index(xs: np.ndarray, ys: np.ndarray, stored_w: int, bpb: int) -> np.
     return tiled >> log2
 
 
-def mip_chain_layout(width: int, height: int, fmt: Format, levels: int):
+def mip_chain_layout(width: int, height: int, fmt: Format, levels: int, faces: int = 1):
     """Byte offset of every level region and the total size.
 
-    Returns (base size, [(level, region offset, region stored width blocks, x blocks, y blocks)], total size).
-    Levels from the packed mip level on share the region of the packed level.
+    Returns (base size, [(level, region offset, region stored width blocks, x blocks, y blocks,
+    face stride)], total size). Levels from the packed mip level on share the region of the packed
+    level. A cube map (``faces`` 6) holds every level for its faces one after the other, each face
+    4 KiB aligned: the base level of the faces, then each mip level of the faces, then the packed
+    mip tail of the faces (as retail cube maps, e.g. the reflection probes of the maps).
     """
-    base_size = level_layout(width, height, 0, fmt)[4]
+    stride = level_layout(width, height, 0, fmt)[4]
+    base_size = stride * faces
     packed = packed_mip_level(width, height)
     placements = []
     offset = base_size
@@ -238,60 +256,70 @@ def mip_chain_layout(width: int, height: int, fmt: Format, levels: int):
         if packed and level >= packed:
             if region is None:
                 _, _, stored_w, _, size = level_layout(width, height, packed, fmt)
-                region = (offset, stored_w)
-                offset += size
+                region = (offset, stored_w, size)
+                offset += size * faces
             x, y = packed_mip_offset(width, height, level, fmt)
-            placements.append((level, region[0], region[1], x, y))
+            placements.append((level, region[0], region[1], x, y, region[2]))
         else:
             _, _, stored_w, _, size = level_layout(width, height, level, fmt)
-            placements.append((level, offset, stored_w, 0, 0))
-            offset += size
+            placements.append((level, offset, stored_w, 0, 0, size))
+            offset += size * faces
     return base_size, placements, offset
 
 
-def tile_mip_chain(levels: list, width: int, height: int, fmt: Format) -> bytes:
-    """Tile a full mip chain (linear PC data, largest level first). The base level must be larger
-    than 16 texels in both dimensions when more than one level is given."""
-    base_size, placements, total = mip_chain_layout(width, height, fmt, len(levels))
+def _level_blocks(width: int, height: int, level: int, fmt: Format):
+    mw = max(width >> level, 1)
+    mh = max(height >> level, 1)
+    return max(1, (mw + fmt.block - 1) // fmt.block), max(1, (mh + fmt.block - 1) // fmt.block)
+
+
+def tile_mip_chain(levels: list, width: int, height: int, fmt: Format, faces: int = 1) -> bytes:
+    """Tile a mip chain (linear PC data, largest level first; each level holds its ``faces`` one
+    after the other). The base level must be larger than 16 texels in both dimensions when more
+    than one level is given."""
+    base_size, placements, total = mip_chain_layout(width, height, fmt, len(levels), faces)
+    stride = base_size // faces
     out = np.zeros(total, dtype=np.uint8)
-    # tile_level applies the endian swap, undo it: the whole allocation is swapped at the end
-    out[:base_size] = np.frombuffer(endian_swap(tile_level(levels[0], width, height, 0, fmt), fmt.endian), dtype=np.uint8)
     bpb = fmt.bytes_per_block
-    for level, region, stored_w, bx, by in placements:
-        mw = max(width >> level, 1)
-        mh = max(height >> level, 1)
-        wb = max(1, (mw + fmt.block - 1) // fmt.block)
-        hb = max(1, (mh + fmt.block - 1) // fmt.block)
-        src = np.frombuffer(levels[level], dtype=np.uint8)[: wb * hb * bpb].reshape(wb * hb, bpb)
+    wb, hb = _level_blocks(width, height, 0, fmt)
+    for face in range(faces):
+        face_data = levels[0][face * wb * hb * bpb : (face + 1) * wb * hb * bpb]
+        # tile_level applies the endian swap, undo it: the whole allocation is swapped at the end
+        out[face * stride : (face + 1) * stride] = np.frombuffer(endian_swap(tile_level(face_data, width, height, 0, fmt), fmt.endian), dtype=np.uint8)
+    for level, region, stored_w, bx, by, face_stride in placements:
+        wb, hb = _level_blocks(width, height, level, fmt)
         ys, xs = np.meshgrid(np.arange(hb) + by, np.arange(wb) + bx, indexing="ij")
         idx = _tiled_index(xs.reshape(-1), ys.reshape(-1), stored_w, bpb)
-        view = out[region:].reshape(-1, bpb) if (total - region) % bpb == 0 else None
-        view[idx] = src
+        src = np.frombuffer(levels[level], dtype=np.uint8)
+        for face in range(faces):
+            start = region + face * face_stride
+            view = out[start : start + face_stride].reshape(-1, bpb)
+            view[idx] = src[face * wb * hb * bpb : (face + 1) * wb * hb * bpb].reshape(wb * hb, bpb)
     # the GPU endian swap applies to the whole allocation
     return endian_swap(out.tobytes(), fmt.endian)
 
 
-def untile_mip_chain(data: bytes, width: int, height: int, fmt: Format, levels: int) -> list:
-    base_size, placements, total = mip_chain_layout(width, height, fmt, levels)
+def untile_mip_chain(data: bytes, width: int, height: int, fmt: Format, levels: int, faces: int = 1) -> list:
+    base_size, placements, total = mip_chain_layout(width, height, fmt, levels, faces)
+    stride = base_size // faces
     raw = np.frombuffer(endian_swap(data[:total], fmt.endian), dtype=np.uint8)
-    result = [untile_level(endian_swap(raw[:base_size].tobytes(), fmt.endian), width, height, 0, fmt)]
+    result = [b"".join(untile_level(endian_swap(raw[f * stride : (f + 1) * stride].tobytes(), fmt.endian), width, height, 0, fmt) for f in range(faces))]
     bpb = fmt.bytes_per_block
-    for level, region, stored_w, bx, by in placements:
-        mw = max(width >> level, 1)
-        mh = max(height >> level, 1)
-        wb = max(1, (mw + fmt.block - 1) // fmt.block)
-        hb = max(1, (mh + fmt.block - 1) // fmt.block)
+    for level, region, stored_w, bx, by, face_stride in placements:
+        wb, hb = _level_blocks(width, height, level, fmt)
         ys, xs = np.meshgrid(np.arange(hb) + by, np.arange(wb) + bx, indexing="ij")
         idx = _tiled_index(xs.reshape(-1), ys.reshape(-1), stored_w, bpb)
-        result.append(raw[region:].reshape(-1, bpb)[idx].tobytes())
+        result.append(b"".join(raw[region + f * face_stride : region + (f + 1) * face_stride].reshape(-1, bpb)[idx].tobytes() for f in range(faces)))
     return result
 
 
-def texture_header_mips(width: int, height: int, fmt: Format, levels: int) -> bytes:
-    """D3DBaseTexture360 for a texture with a mip chain (mip address relative to the base)."""
-    base_size, placements, _ = mip_chain_layout(width, height, fmt, levels)
-    packed = any(bx or by for _, _, _, bx, by in placements) or (packed_mip_level(width, height) and levels > packed_mip_level(width, height))
-    header = bytearray(texture_header(width, height, fmt, levels, (base_size >> 12) if levels > 1 else 0))
+def texture_header_mips(width: int, height: int, fmt: Format, levels: int, faces: int = 1) -> bytes:
+    """D3DBaseTexture360 for a texture with a mip chain (mip address relative to the base), or a
+    cube map (``faces`` 6)."""
+    base_size, placements, _ = mip_chain_layout(width, height, fmt, levels, faces)
+    packed = any(bx or by for _, _, _, bx, by, _ in placements) or (packed_mip_level(width, height) and levels > packed_mip_level(width, height))
+    dimension = GPUDIMENSION_CUBEMAP if faces == 6 else GPUDIMENSION_2D
+    header = bytearray(texture_header(width, height, fmt, levels, (base_size >> 12) if levels > 1 else 0, dimension))
     if levels > 1 and packed:
         dword5 = struct.unpack_from("<I", header, 28 + 20)[0] | (1 << 11)
         struct.pack_into("<I", header, 28 + 20, dword5)

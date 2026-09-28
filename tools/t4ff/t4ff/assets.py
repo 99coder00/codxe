@@ -246,8 +246,14 @@ def image_hook(conv, asset_type, node, name):
     if kind == "library" and conv.image_drop_levels.get(name):
         source = console_image(conv, name)  # a console library texture reduced by the budget
 
-    if source is None or map_type != 3:
-        reason = "cube/volume image" if map_type != 3 else "no pixel data found (add the .iwd that contains it)"
+    faces = 6 if map_type == MAPTYPE_CUBE else 1
+    if source is None or map_type not in (MAPTYPE_2D, MAPTYPE_CUBE) or source.faces != faces:
+        if source is None:
+            reason = "no pixel data found (add the .iwd that contains it)"
+        elif map_type not in (MAPTYPE_2D, MAPTYPE_CUBE):
+            reason = "volume image"
+        else:
+            reason = f"{'cube map without' if faces == 6 else '2D image with'} six faces"
         if conv.options.reference_missing_images:
             new = _reference(conv, asset_type, node, name)
             if not new.extra.get("library") and not in_game_zones(conv, "GfxImage", name):
@@ -267,6 +273,11 @@ def image_hook(conv, asset_type, node, name):
     conv.node_map[id(node)] = new
     conv.offset_maps[id(node)] = lambda off: off
     return new
+
+
+# GfxImage.mapType
+MAPTYPE_2D = 3
+MAPTYPE_CUBE = 5
 
 
 def _pc_normal_map(source: img.ImageData, semantic: int) -> bool:
@@ -368,7 +379,8 @@ def _decode_console_image(p, node: Node, name: str) -> Optional[img.ImageData]:
         f = find_field(rec_, fname)
         return struct.unpack_from(p.endian + {1: "B", 2: "H", 4: "I"}[f.type.size], data, f.offset)[0]
 
-    if get(rec, node.data, "mapType") != 3:
+    map_type = get(rec, node.data, "mapType")
+    if map_type not in (MAPTYPE_2D, MAPTYPE_CUBE):
         return None
     load_def = next((c for c in node.walk() if c.type.kind == "record" and c.type.name == "GfxImageLoadDef"), None)
     pixels = next((c for c in node.children if c.extra.get("delayed") or (c.extra.get("origin") or ("", "", ""))[1:] == ("GfxImage", "pixels")), None)
@@ -378,15 +390,19 @@ def _decode_console_image(p, node: Node, name: str) -> Optional[img.ImageData]:
     levels = load_def.data[find_field(ld, "levelCount").offset]
     flags = load_def.data[find_field(ld, "flags").offset]
     d3d = struct.unpack_from(p.endian + "I", load_def.data, find_field(ld, "format").offset)[0]
-    fmt = next((f for f in xenos.FORMATS.values() if f.d3d == d3d), None)
+    fmt = xenos.format_of_d3d(d3d)
     width, height = get(rec, node.data, "width"), get(rec, node.data, "height")
     if fmt is None or not width or not height:
         return None
     levels = max(levels, 1)
-    if xenos.mip_chain_layout(width, height, fmt, levels)[2] > len(pixels.data):
+    faces = 6 if map_type == MAPTYPE_CUBE else 1
+    if xenos.mip_chain_layout(width, height, fmt, levels, faces)[2] > len(pixels.data):
         return None
-    linear = xenos.untile_mip_chain(bytes(pixels.data), width, height, fmt, levels) if levels > 1 else [xenos.untile_level(bytes(pixels.data), width, height, 0, fmt)]
-    return img.ImageData(name, fmt.name, width, height, linear, flags, "console")
+    if levels > 1 or faces > 1:
+        linear = xenos.untile_mip_chain(bytes(pixels.data), width, height, fmt, levels, faces)
+    else:
+        linear = [xenos.untile_level(bytes(pixels.data), width, height, 0, fmt)]
+    return img.ImageData(name, fmt.name, width, height, linear, flags, "console", faces)
 
 
 def plan_textures(conv, root: Node):
@@ -412,8 +428,8 @@ def plan_textures_shared(convs):
                 if not name:
                     continue
                 plain = name.lstrip(",")
-                if plain in sources or (not name.startswith(",") and node.data[map_type] != 3):
-                    continue  # cube and volume maps (reflection probes) are converted as they are
+                if plain in sources or (not name.startswith(",") and node.data[map_type] not in (MAPTYPE_2D, MAPTYPE_CUBE)):
+                    continue  # volume maps are left to the console
                 if name.startswith(","):
                     kind = "game" if in_game_zones(conv, "GfxImage", plain) else "library"
                     src = None
@@ -547,6 +563,16 @@ def _image_from_load_def(p, name: str, load_def: Node) -> Optional[img.ImageData
     if fmt is None:
         raise img.ImageError(f"{name}: unsupported PC texture format {fmt_value:#x}")
     data = bytes(load_def.data[find_field(rec, "data").offset :])
+    if flags & img.IWI_FLAG_CUBEMAP:
+        # a cube map (reflection probe) holds the whole mip chain of each face after the other;
+        # its level count is 0 for a full chain
+        count = level_count or img.mip_count(width, height)
+        sizes = [img.level_size(fmt, max(width >> i, 1), max(height >> i, 1)) for i in range(count)]
+        if sum(sizes) * 6 > len(data):
+            raise img.ImageError(f"{name}: truncated cube map ({len(data)} < {sum(sizes) * 6})")
+        chain = sum(sizes)
+        faces = [img.ImageData(name, fmt, width, height, [data[f * chain + sum(sizes[:i]) : f * chain + sum(sizes[: i + 1])] for i in range(count)], flags, "zone") for f in range(6)]
+        return img.join_faces(faces)
     levels = []
     w, h = width, height
     pos = 0
@@ -575,7 +601,7 @@ def build_console_image(conv, name: str, tex: img.ConsoleTexture, semantic: int,
         fmt = {1: "B", 2: "H", 4: "I"}[f.type.size if f.type.kind != "array" else f.type.elem.size]
         struct.pack_into(E + fmt, d, base + f.offset, value)
 
-    put("mapType", 3)
+    put("mapType", MAPTYPE_CUBE if tex.faces == 6 else MAPTYPE_2D)
     put("semantic", semantic)
     put("cardMemory", len(tex.pixels))
     put("width", tex.width)
@@ -583,7 +609,7 @@ def build_console_image(conv, name: str, tex: img.ConsoleTexture, semantic: int,
     put("depth", 1)
     put("category", category)
     put("delayLoadPixels", 1)
-    put("baseSize", len(tex.pixels))
+    put("baseSize", tex.base_size or len(tex.pixels))  # the base level, as the game's own images
     put("streamSlot", 0xFFFF)
     put("streaming", 0)
 
@@ -600,7 +626,8 @@ def build_console_image(conv, name: str, tex: img.ConsoleTexture, semantic: int,
     load_def.extra["align"] = ld_rec.align
     load_def.extra["origin"] = ("member", "GfxTexture", "loadDef")
     load_def.data = bytearray(ld_rec.size)
-    struct.pack_into(E + "BB3HI", load_def.data, 0, tex.levels, _load_def_flags(iwi_flags), tex.width, tex.height, 1, tex.format.d3d)
+    flags = _load_def_flags(iwi_flags) | (img.IWI_FLAG_CUBEMAP if tex.faces == 6 else 0)
+    struct.pack_into(E + "BB3HI", load_def.data, 0, tex.levels, flags, tex.width, tex.height, 1, tex.format.d3d)
     load_def.segments.append((ld_type, 1, ld_rec.size, False))
     texture_field = find_field(rec, "texture").offset
     _follow(image, texture_field, load_def)

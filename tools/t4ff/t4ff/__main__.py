@@ -272,8 +272,9 @@ def cmd_convert(args):
 
     # the map's name in the Nazi Zombies map list (CoD Xe reads the first line of description.txt)
     from .loadscreen import map_title
+    from .menu import localized_strings
 
-    title = args.name.strip() or map_title(map_files, name)
+    title = args.name.strip() or map_title(map_files, name, localized_strings(x360(), main_zone))
     description = os.path.join(out_dir, "description.txt")
     if args.name.strip() or not os.path.exists(description) or _bare_description(description, name):
         with open(description, "w", encoding="latin-1", errors="replace", newline="\r\n") as f:

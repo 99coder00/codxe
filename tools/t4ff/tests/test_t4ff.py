@@ -554,6 +554,11 @@ class LoadScreenTests(unittest.TestCase):
                 f.write('{\n\tmap "mak"\n\tlongname "MENU_LEVEL_MAK"\n}\n{\n\tmap "simpsons"\n\tlongname "simpsons"\n}\n')
             self.assertEqual(map_title(IwdLibrary([tmp]), "simpsons"), "Simpsons")  # the file name again: written like the others
             self.assertEqual(map_title(IwdLibrary([tmp]), "other_map"), "Other Map")
+            # a localization key (Dead Sand's): the text of the map's localized string
+            with open(os.path.join(tmp, "mod.arena"), "w") as f:
+                f.write('{\n\tmap "nazi_zombie_dead_sand"\n\tlongname "MOD_LEVEL_ZOMBIE_DEAD_SAND"\n}\n')
+            self.assertEqual(map_title(IwdLibrary([tmp]), "nazi_zombie_dead_sand"), "Nazi Zombie Dead Sand")
+            self.assertEqual(map_title(IwdLibrary([tmp]), "nazi_zombie_dead_sand", {"MOD_LEVEL_ZOMBIE_DEAD_SAND": "^3Dead Sand"}), "Dead Sand")
 
     def test_load_zone_from_cod_xenon_template(self):
         """The load zone of a map is CoD Xenon's with the map's picture and names."""
@@ -970,6 +975,32 @@ class IwiTests(unittest.TestCase):
         texture = images.build_console_texture(alpha, compress=True)
         self.assertEqual(texture.format.name, "A8L8")
 
+    def test_cube_maps(self):
+        """Cube IWIs (skies) store the six faces of every level, smallest level first; the console
+        stores the base level of every face, then every mip level of every face, each 4 KiB aligned."""
+        import struct
+
+        rng = np.random.default_rng(3)
+        w = 128
+        sizes = [images.level_size("DXT1", w >> i, w >> i) * 6 for i in range(images.mip_count(w, w))]
+        levels = [rng.integers(0, 256, size, dtype=np.uint8).tobytes() for size in sizes]
+        data = b"IWi\x06" + bytes([0x0B, images.IWI_FLAG_CUBEMAP]) + struct.pack("<3H", w, w, 1) + bytes(16) + b"".join(reversed(levels))
+        cube = images.parse_iwi("sky_ft", data)
+        self.assertEqual((cube.faces, cube.levels), (6, levels))
+        self.assertEqual(cube.face(2).levels[1], levels[1][len(levels[1]) // 6 * 2 : len(levels[1]) // 6 * 3])
+
+        tex = images.build_console_texture(cube)
+        self.assertEqual((tex.faces, tex.format.name, tex.levels), (6, "DXT1", 6))  # down to 4x4
+        fetch = struct.unpack_from("<6I", tex.header, 28)
+        self.assertEqual((fetch[5] >> 9) & 3, xenos.GPUDIMENSION_CUBEMAP)
+        self.assertEqual(fetch[5] >> 12, tex.base_size >> 12)  # the mips follow the six base levels
+        self.assertEqual(tex.base_size, 6 * xenos.level_layout(w, w, 0, tex.format)[4])
+        self.assertEqual(len(tex.pixels), images.console_texture_size(cube))
+        self.assertEqual(xenos.untile_mip_chain(tex.pixels, w, w, tex.format, tex.levels, 6), levels[: tex.levels])
+        # small ones (reflection probes) stay uncompressed, as the game's own
+        probe = images.ImageData("*reflection_probe0", "A8R8G8B8", 64, 64, [bytes(64 * 64 * 4 * 6)], faces=6)
+        self.assertEqual(images.build_console_texture(probe).format.name, "A8R8G8B8")
+
     def test_normal_maps_become_dxn(self):
         """PC normal maps keep x in alpha and y in green (DXT5: a grey colour block); the console's
         are DXN, x then y, which its shaders read."""
@@ -1033,6 +1064,17 @@ class XenosTests(unittest.TestCase):
             lw, lh = lw >> 1, lh >> 1
         tiled = xenos.tile_mip_chain(levels, w, h, fmt)
         self.assertEqual(xenos.untile_mip_chain(tiled, w, h, fmt, len(levels)), levels)
+
+    def test_swizzles_as_the_games_textures(self):
+        """Fetch constant swizzles (and D3DFORMATs, which hold them in bits 18-29) of Treyarch's
+        textures: 8_8_8_8 reads PC BGRA bytes, L8 has an opaque alpha."""
+        import struct
+
+        for name, word3, d3d in [("DXT1", 0xD10, 0x1A200152), ("A8R8G8B8", 0xC14, 0x18280186), ("L8", 0x1400, 0x28000102), ("A8L8", 0x400, 0x0800014A)]:
+            fmt = xenos.FORMATS[name]
+            self.assertEqual(struct.unpack_from("<I", xenos.texture_header(64, 64, fmt, 1), 28 + 12)[0], word3, name)
+            self.assertEqual((fmt.d3d, fmt.d3d >> xenos.D3DFMT_SWIZZLE_SHIFT), (d3d, word3 >> 1), name)
+        self.assertEqual(xenos.format_of_d3d(0x2800014A).name, "A8L8")  # as older t4ff versions wrote it
 
 
 def xma2_packets(lengths, block_packets=2, seed=1):
@@ -1345,6 +1387,34 @@ class SampleZoneTests(unittest.TestCase):
 
     def test_pc_roundtrip(self):
         self.roundtrip("pc", "nazi_zombie_aztec_patch.ff")
+
+    def test_reflection_probes_as_the_game(self):
+        """The map's reflection probes (cube maps the PC zone holds, face after face) convert to the
+        console's: the same image, load def, texture header and pixels as Treyarch's Aztec."""
+        from t4ff.convert import ConvertOptions, ZoneConverter
+        from t4ff.fastfile import read_fastfile
+        from t4ff.platforms import pc, x360
+        from t4ff.zone import Reader, Writer, asset_name
+
+        def images_of(zone):
+            return {asset_name(x360(), n): n for n in zone.extra_root.walk() if n.type.name == "GfxImage" and (n.extra.get("origin") or ("",))[0] == "asset"}
+
+        def parts(image):
+            load_def = next(c for c in image.walk() if c.type.name == "GfxImageLoadDef")
+            header = next(c for c in image.walk() if c.type.name == "D3DBaseTexture360")
+            pixels = next(c for c in image.walk() if c.extra.get("delayed"))
+            # the image without its pointers: the load def is loaded here (retail inserts it)
+            return bytes(image.data[:4] + image.data[8:24] + image.data[28:36]), bytes(load_def.data[:12]), bytes(header.data), bytes(pixels.data)
+
+        _, _, data = read_fastfile(sample("pc", "nazi_zombie_aztec.ff"))
+        zone = ZoneConverter(Reader(pc(), data).load(), pc(), x360(), ConvertOptions(log=lambda msg: None)).convert()
+        converted = images_of(Reader(x360(), Writer(x360()).write(zone)).load())
+        _, _, data = read_fastfile(sample("x360", "nazi_zombie_aztec.ff"))
+        retail = images_of(Reader(x360(), data).load())
+        probes = [n for n in retail if n.startswith("*reflection_probe")]
+        self.assertTrue(probes)
+        for name in probes:
+            self.assertEqual(parts(converted[name]), parts(retail[name]), name)
 
     def test_pointer_into_a_string_of_a_referenced_asset(self):
         """The PC linker stores equal strings once: napalmbloblight's display name points into

@@ -22,7 +22,7 @@ import os
 import shutil
 import struct
 import subprocess
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -349,9 +349,10 @@ def _glyph(c: str) -> np.ndarray:
     return np.array([[ch == "#" for ch in row] for row in rows], dtype=bool)
 
 
-def map_title(map_files, map_name: str) -> str:
+def map_title(map_files, map_name: str, localized: Optional[Dict[str, str]] = None) -> str:
     """The map's name for its title card: the longname of its entry in its .arena file (which can
-    list other maps too, with localization keys such as MENU_LEVEL_MAK), else from ``map_name``."""
+    list other maps too, with localization keys such as MENU_LEVEL_MAK: ``localized``, the map's
+    localized strings, give their text), else from ``map_name``."""
     import re
 
     for rel in [n for n in (map_files.names("") if map_files is not None else []) if n.endswith(".arena")]:
@@ -361,7 +362,10 @@ def map_title(map_files, map_name: str) -> str:
             found = re.search(r'longname\s+"([^"]+)"', block, re.I)
             if not found or (entry_map and entry_map.group(1).lower() != map_name.lower()):
                 continue
-            title = re.sub(r"\^.", "", found.group(1)).strip()
+            title = found.group(1).strip()
+            if re.fullmatch(r"@?[A-Z0-9_]+", title):
+                title = (localized or {}).get(title.lstrip("@"), "")
+            title = re.sub(r"\^.", "", title).strip()
             # a localization key is no name, and a bare file name is written like the others
             if title and not re.fullmatch(r"[A-Z0-9_]+", title) and title.lower() != map_name.lower():
                 return title

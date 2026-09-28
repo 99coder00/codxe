@@ -45,7 +45,8 @@ PC_D3D_FORMATS = {
 
 @dataclass
 class ImageData:
-    """A 2D texture with its mip chain (largest first), linear PC layout."""
+    """A 2D texture or a cube map with its mip chain (largest first), linear PC layout. Each
+    level of a cube map holds its six faces one after the other (+X, -X, +Y, -Y, +Z, -Z)."""
 
     name: str
     format: str
@@ -54,10 +55,34 @@ class ImageData:
     levels: List[bytes]
     flags: int = 0
     source: str = ""
+    faces: int = 1
 
     @property
     def mipped(self) -> bool:
         return len(self.levels) > 1
+
+    def face(self, index: int) -> "ImageData":
+        """One face of a cube map, as a 2D texture."""
+        levels, w, h = [], self.width, self.height
+        for level in self.levels:
+            size = level_size(self.format, w, h)
+            levels.append(level[index * size : (index + 1) * size])
+            w, h = max(w >> 1, 1), max(h >> 1, 1)
+        return ImageData(self.name, self.format, self.width, self.height, levels, self.flags, self.source)
+
+
+def join_faces(faces: List[ImageData]) -> ImageData:
+    """A cube map of the faces (2D textures of one format, size and level count)."""
+    first = faces[0]
+    levels = [b"".join(face.levels[i] for face in faces) for i in range(len(first.levels))]
+    return ImageData(first.name, first.format, first.width, first.height, levels, first.flags, first.source, len(faces))
+
+
+def _each_face(image: "ImageData", fn) -> "ImageData":
+    """``fn`` applied to every face of a cube map (to the image itself when it is 2D)."""
+    if image.faces == 1:
+        return fn(image)
+    return join_faces([fn(image.face(i)) for i in range(image.faces)])
 
 
 class ImageError(Exception):
@@ -93,21 +118,23 @@ def parse_iwi(name: str, data: bytes) -> ImageData:
     fmt = IWI_FORMATS.get(fmt_code)
     if fmt is None:
         raise ImageError(f"{name}: unsupported IWI format {fmt_code:#x}")
-    if flags & (IWI_FLAG_CUBEMAP | IWI_FLAG_VOLMAP):
-        raise ImageError(f"{name}: cube and volume maps are not supported yet")
+    if flags & IWI_FLAG_VOLMAP:
+        raise ImageError(f"{name}: volume maps are not supported yet")
+    # a cube map stores its six faces one after the other in every level
+    faces = 6 if flags & IWI_FLAG_CUBEMAP else 1
 
     count = 1 if flags & IWI_FLAG_NOMIPMAPS else mip_count(width, height)
     sizes = []
     w, h = width, height
     for _ in range(count):
-        sizes.append(level_size(fmt, w, h))
+        sizes.append(level_size(fmt, w, h) * faces)
         w, h = max(w >> 1, 1), max(h >> 1, 1)
 
     payload = data[28:]
     if len(payload) < sum(sizes):
         # Some IWIs only carry the base level
         if len(payload) >= sizes[0]:
-            return ImageData(name, fmt, width, height, [payload[: sizes[0]]], flags, "iwi")
+            return ImageData(name, fmt, width, height, [payload[: sizes[0]]], flags, "iwi", faces)
         raise ImageError(f"{name}: truncated IWI ({len(payload)} < {sum(sizes)})")
 
     # IWI files store the mip chain from the smallest level to the largest.
@@ -116,7 +143,7 @@ def parse_iwi(name: str, data: bytes) -> ImageData:
     for size in sizes:
         levels.append(payload[end - size : end])
         end -= size
-    return ImageData(name, fmt, width, height, levels, flags, "iwi")
+    return ImageData(name, fmt, width, height, levels, flags, "iwi", faces)
 
 
 class IwdLibrary:
@@ -181,6 +208,8 @@ class ConsoleTexture:
     header: bytes  # D3DBaseTexture360
     pixels: bytes  # tiled data, base level followed by the mip levels
     dropped_levels: int = 0
+    faces: int = 1
+    base_size: int = 0  # bytes of the base level (of all faces)
 
 
 def to_console_format(fmt: str) -> Optional[str]:
@@ -307,18 +336,21 @@ def build_console_texture(image: ImageData, max_size: int = 0, keep_mips: bool =
     ``max_size`` limits the base level dimensions and ``drop_levels`` removes additional top
     levels. Uncompressed colour textures are compressed to DXT when ``compress`` is set.
     ``normal_map``: a PC normal map, made DXN (see :func:`normal_map_to_dxn`).
+    Cube maps up to 64 texels (the maps' reflection probes, small skies) stay uncompressed, as the
+    game's own.
     """
 
-    if normal_map:
+    faces = image.faces
+    if normal_map and faces == 1:
         image = normal_map_to_dxn(image)
-    if compress:
-        image = compress_image(image)
+    if compress and _compresses(image):
+        image = _each_face(image, compress_image)
     if image.format == "R8G8B8":
-        image = convert_rgb24(image)
+        image = _each_face(image, convert_rgb24)
     if image.format == "A8":
-        image = expand_a8(image)
+        image = _each_face(image, expand_a8)
     if image.format == "X8R8G8B8":
-        image = ImageData(image.name, "A8R8G8B8", image.width, image.height, image.levels, image.flags, image.source)
+        image = ImageData(image.name, "A8R8G8B8", image.width, image.height, image.levels, image.flags, image.source, faces)
     cfmt_name = to_console_format(image.format)
     if cfmt_name is None:
         raise ImageError(f"{image.name}: no console equivalent for {image.format}")
@@ -326,7 +358,7 @@ def build_console_texture(image: ImageData, max_size: int = 0, keep_mips: bool =
 
     drop = _drop_count(image, max_size, drop_levels)
     if drop:
-        image = reduce_image(image, drop)
+        image = _each_face(image, lambda face: reduce_image(face, drop))
     width, height = image.width, image.height
 
     levels = [image.levels[0]]
@@ -339,21 +371,27 @@ def build_console_texture(image: ImageData, max_size: int = 0, keep_mips: bool =
                 break
             levels.append(level)
 
-    if len(levels) > 1:
-        pixels = xenos.tile_mip_chain(levels, width, height, fmt)
-        header = xenos.texture_header_mips(width, height, fmt, len(levels))
+    if len(levels) > 1 or faces > 1:
+        pixels = xenos.tile_mip_chain(levels, width, height, fmt, faces)
+        header = xenos.texture_header_mips(width, height, fmt, len(levels), faces)
     else:
         pixels = xenos.tile_level(levels[0], width, height, 0, fmt)
         header = xenos.texture_header(width, height, fmt, 1)
-    return ConsoleTexture(fmt, width, height, len(levels), header, pixels, drop)
+    base_size = xenos.mip_chain_layout(width, height, fmt, 1, faces)[0]
+    return ConsoleTexture(fmt, width, height, len(levels), header, pixels, drop, faces, base_size)
+
+
+def _compresses(image: ImageData) -> bool:
+    """Whether ``compress`` makes ``image`` DXT: cube maps up to 64 texels stay uncompressed."""
+    return image.faces == 1 or max(image.width, image.height) > 64
 
 
 def console_texture_size(image: ImageData, max_size: int = 0, keep_mips: bool = True, drop_levels: int = 0, compress: bool = True, normal_map: bool = False) -> int:
     """Size of the console texture :func:`build_console_texture` would produce (without tiling)."""
     fmt_name = image.format
-    if normal_map and fmt_name in ("DXT5", "A8R8G8B8"):
+    if normal_map and image.faces == 1 and fmt_name in ("DXT5", "A8R8G8B8"):
         fmt_name = "DXN"
-    if compress and fmt_name in ("A8R8G8B8", "X8R8G8B8", "R8G8B8"):
+    if compress and _compresses(image) and fmt_name in ("A8R8G8B8", "X8R8G8B8", "R8G8B8"):
         fmt_name = "DXT5"  # upper bound, DXT1 when opaque
     fmt_name = {"R8G8B8": "A8R8G8B8", "X8R8G8B8": "A8R8G8B8", "A8": "A8L8"}.get(fmt_name, fmt_name)
     cfmt = to_console_format(fmt_name)
@@ -371,4 +409,4 @@ def console_texture_size(image: ImageData, max_size: int = 0, keep_mips: bool = 
             if min(w, h) < fmt.block:
                 break
             count += 1
-    return xenos.mip_chain_layout(width, height, fmt, count)[2]
+    return xenos.mip_chain_layout(width, height, fmt, count, image.faces)[2]
