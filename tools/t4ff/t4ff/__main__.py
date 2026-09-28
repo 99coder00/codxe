@@ -447,7 +447,7 @@ def cmd_menu(args):
     if pictures:
         print(f"map list pictures (preview.bin) from the loading screens of {', '.join(pictures)}")
     # the streamed sounds of the maps (CoD Xenon's, older conversions) in the game's layout
-    if os.path.isdir(usermaps):
+    if os.path.isdir(usermaps) and not args.no_streams:
         upgrade_map_streams(usermaps)
     return 0
 
@@ -456,6 +456,7 @@ def upgrade_map_streams(folder: str) -> int:
     """Rewrite the streamed sounds (.xma) under ``folder`` in the game's layout, reporting it."""
     from .audio import upgrade_stream_files
 
+    print(f"streamed sounds: checking the .xma files in {folder}")
     stats = upgrade_stream_files(folder)
     if stats["upgraded"]:
         print(
@@ -541,6 +542,7 @@ def main(argv=None):
     p = sub.add_parser("menu", help="make the Nazi Zombies map list of CoD Xenon's patch_ui.ff show every map of the usermaps folder (needs the CoD Xe build with the usermaps list)")
     p.add_argument("folder", help="the _codxe\\t4 folder the game reads (with zone\\patch_ui.ff and usermaps)")
     p.add_argument("--rows", type=int, default=13, help="rows the list shows at a time (default 13, as CoD Xenon's)")
+    p.add_argument("--no-streams", action="store_true", help="do not check the streamed sounds (.xma) of the maps in usermaps (see the streams command)")
     p.set_defaults(func=cmd_menu)
 
     p = sub.add_parser("streams", help="rewrite the streamed sounds (.xma) of converted maps in the game's layout: those of older conversions and of CoD Xenon's maps stop after a split second")

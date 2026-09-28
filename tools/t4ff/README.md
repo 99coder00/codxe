@@ -281,7 +281,9 @@ maps converted before need `menu` run once more, for the slot.
 `menu` also rewrites the streamed sounds (`.xma`) of the maps in `usermaps`
 that do not have the layout of the game's streams (CoD Xenon's maps, maps
 converted before t4ff wrote it): theirs play a split second, then stop. The
-`streams` command does only that, for any folder.
+first time takes seconds (about 6 for 1850 files, 230 MiB), later ones less
+than a second; `--no-streams` leaves them. The `streams` command does only that,
+for any folder.
 
 ### Loading screen
 

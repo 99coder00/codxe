@@ -358,25 +358,24 @@ def upgrade_sdns(data: bytes) -> Optional[bytes]:
 
 def upgrade_stream_files(folder: str, log=print) -> dict:
     """Rewrite the .xma stream files under ``folder`` that do not have the game's layout."""
-    stats = {"files": 0, "upgraded": 0, "failed": 0}
-    for root, _, files in os.walk(folder):
-        for name in files:
-            if not name.lower().endswith(".xma"):
-                continue
-            path = os.path.join(root, name)
-            stats["files"] += 1
+    paths = sorted(os.path.join(root, name) for root, _, files in os.walk(folder) for name in files if name.lower().endswith(".xma"))
+    stats = {"files": len(paths), "upgraded": 0, "failed": 0}
+    label = "Checking streamed sounds"
+    for done, path in enumerate(paths):
+        progress.step(label, done, len(paths))
+        try:
             with open(path, "rb") as f:
                 data = f.read()
-            try:
-                new = upgrade_sdns(data)
-            except AudioError as e:
-                log(f"warning: {path}: {e}")
-                stats["failed"] += 1
-                continue
+            new = upgrade_sdns(data)
             if new is not None:
                 with open(path, "wb") as f:
                     f.write(new)
                 stats["upgraded"] += 1
+        except (AudioError, OSError) as e:
+            log(f"warning: {path}: {e}")
+            stats["failed"] += 1
+    if paths:
+        progress.step(label, len(paths), len(paths))
     return stats
 
 
@@ -641,12 +640,13 @@ def xma_frames(data: bytes) -> List[Tuple[int, int]]:
         return []
     payload_bits = (XMA_PACKET_SIZE - 4) * 8
     payload = b"".join(data[i * XMA_PACKET_SIZE + 4 : (i + 1) * XMA_PACKET_SIZE] for i in range(packets))
-    value = int.from_bytes(payload, "big")
     total = len(payload) * 8
     offsets = [(struct.unpack_from(">I", data, i * XMA_PACKET_SIZE)[0] >> 11) & 0x7FFF for i in range(packets)]
 
     def bits(pos, count):
-        return (value >> (total - pos - count)) & ((1 << count) - 1)
+        # only the bytes holding them: a stream of megabytes has thousands of frames
+        first, last = pos >> 3, (pos + count + 7) >> 3
+        return (int.from_bytes(payload[first:last], "big") >> (last * 8 - pos - count)) & ((1 << count) - 1)
 
     def first_frame(packet):
         """Payload bit position of the first frame starting in ``packet`` or a later one."""
