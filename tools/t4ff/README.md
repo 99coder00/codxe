@@ -26,7 +26,8 @@ keeps them small enough for the console's memory:
   own zones (`common.ff`, ...) already load stays a name reference when those
   zones are among the fastfiles given.
 - **Assets the game looks up by name** that a PC map lacks (player body
-  animations, shellshock files) are added from the Xbox 360 fastfiles given.
+  animations, the animations of its anim trees such as the dogs', shellshock
+  files) are added from the Xbox 360 fastfiles given.
 - **One fastfile per map**, as in CoD Xenon's converted maps: `mod.ff` (the
   console has no mod zone) and `<map>_patch.ff` are merged into `<map>.ff`.
   Scripts of later zones win (`_patch` over the map, `mod.ff` over both), and
@@ -225,7 +226,13 @@ game's own zones, loaded before any map, which makes the conversion better:
   `scriptevent` block are left out), and the shellshock files the scripts name
   (`shock/zombie_death.shock`: the zombie scripts play it when a player dies,
   but most maps lack it, and the game then prints "'0' is not a valid value for
-  dvar 'bg_shock_viewKickPeriod'"; CoD Xenon's `nazi_zombie_derberg` has it).
+  dvar 'bg_shock_viewKickPeriod'"; CoD Xenon's `nazi_zombie_derberg` has it),
+  and the animations of the anim trees the scripts use (`animtrees/*.atr`):
+  the game loads them by name, and the PC game's own zones have the dogs'
+  (`german_shepherd_run`, window jumps, pain), so PC maps with dog rounds have
+  none of them. Without them the dogs cannot run, jump through windows or feel
+  pain (The Simpsons, "Could not load xanim german_shepherd_run"); CoD Xenon's
+  `zm_tranzit` has them all.
 
 With `patch_ui.ff` or `ui.ff` among them, the mod's own versions of the
 console's menus are left out: PC mods ship restyled main menus and lobbies

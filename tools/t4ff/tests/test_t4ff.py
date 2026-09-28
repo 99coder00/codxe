@@ -279,6 +279,32 @@ init()
         )
         self.assertEqual(script_references("clientscripts/x.csc", b"#include clientscripts\\_utility;"), {"clientscripts/_utility.csc"})
 
+    def test_anim_tree_parsing(self):
+        from t4ff.named import anim_tree_animations, anim_trees_used
+
+        tree = b"""attack_player : nonloopsync
+{
+\tgerman_shepherd_attack_player
+}
+german_shepherd_idle // a comment
+german_shepherd_look_2 : additive
+{
+\tgerman_shepherd_look_down
+}
+/* german_shepherd_commented_out */
+knob
+{
+\tinner : nonloopsync
+\t{
+\t\tLeaf_A
+\t}
+\tleaf_b
+}
+"""
+        self.assertEqual(anim_tree_animations(tree), ["german_shepherd_attack_player", "german_shepherd_idle", "german_shepherd_look_down", "leaf_a", "leaf_b"])
+        scripts = [("maps/_zombiemode_dogs.gsc", b'#using_animtree( "dog" );\n// #using_animtree("commented");'), ("x.gsc", b'#using_animtree("zombie_cymbal_monkey");')]
+        self.assertEqual(anim_trees_used(scripts), ["animtrees/dog.atr", "animtrees/zombie_cymbal_monkey.atr"])
+
     def test_named_assets(self):
         """What the game looks up by name: the animations of the player animation script and the
         shellshock files the scripts may name."""
@@ -1766,6 +1792,36 @@ class SampleZoneTests(unittest.TestCase):
             self.assertEqual(pcm.rate, wanted[name])
             self.assertLessEqual(abs(pcm.frames - expected), audio.XWMA_LENGTH_TOLERANCE, name)
             self.assertGreater(int(np.abs(pcm.samples.astype(np.int32)).max()), 1000, name)
+
+    def test_anim_tree_animations(self):
+        """The dogs' animations are named only by the dog anim tree (the PC game's own zones have
+        them): they are added from the console fastfiles, those the map has are kept."""
+        from t4ff.fastfile import read_fastfile
+        from t4ff.library import ConsoleLibrary
+        from t4ff.named import named_assets_zone
+        from t4ff.platforms import x360
+        from t4ff.scripts import _rawfiles, make_rawfile, zone_of_assets
+        from t4ff.zone import Reader, asset_name
+
+        tranzit = sample("v020", "_codxe", "t4", "usermaps", "zm_tranzit", "zm_tranzit.ff")
+        library = ConsoleLibrary(x360(), [tranzit], log=lambda msg: None)
+        _, _, data = read_fastfile(tranzit)
+        template = next(node for name, node in _rawfiles(x360(), Reader(x360(), data).load()) if not name.startswith(","))
+        tree = b"""attack_player_late : nonloopsync
+{
+\tgerman_shepherd_attack_player_late
+}
+german_shepherd_run // the run cycle
+german_shepherd_traverse_up_40
+not_an_animation_anywhere
+"""
+        zone = zone_of_assets(x360(), [("rawfile", "animtrees/dog.atr", make_rawfile(x360(), template, "animtrees/dog.atr", tree))])
+        logs = []
+        extra = named_assets_zone(x360(), zone, [], library, log=logs.append)
+        added = sorted(asset_name(x360(), n) for n in extra.extra_root.walk() if n.type.name == "XAnimParts" and (n.extra.get("origin") or ("",))[0] == "asset")
+        self.assertEqual(added, ["german_shepherd_attack_player_late", "german_shepherd_run", "german_shepherd_traverse_up_40"])
+        self.assertTrue(any("of animtrees/dog.atr" in line for line in logs), logs)
+        self.assertTrue(any("not_an_animation_anywhere" in line for line in logs), logs)
 
     def test_zombie_engine_scripts(self):
         """A zombie map made with the first mod tools (Dead Sand) has neither the client scripts the
