@@ -575,6 +575,42 @@ static_assert(offsetof(itemDef_s, dvar) == 0x160, "");
 static_assert(offsetof(itemDef_s, typeData) == 0x190, "");
 static_assert(sizeof(itemDef_s) == 0x1D8, "");
 
+struct menuDef_t
+{
+    windowDef_t window;
+    const char *font;
+    int fullScreen;
+    int itemCount;
+    int fontIndex;
+    int cursorItem[4];
+    int fadeCycle;
+    float fadeClamp;
+    float fadeAmount;
+    float fadeInAmount;
+    float blurRadius;
+    const char *onOpen;
+    const char *onFocus;
+    const char *onClose;
+    const char *onESC;
+    ItemKeyHandler *onKey;
+    statement_s visibleExp;
+    const char *allowedBinding;
+    const char *soundName;
+    int imageTrack;
+    float focusColor[4];
+    float disableColor[4];
+    statement_s rectXExp;
+    statement_s rectYExp;
+    itemDef_s **items;
+};
+static_assert(offsetof(menuDef_t, itemCount) == 0xB0, "");
+static_assert(offsetof(menuDef_t, cursorItem) == 0xB8, "");
+static_assert(offsetof(menuDef_t, items) == 0x134, "");
+static_assert(sizeof(menuDef_t) == 0x138, "");
+
+// windowDef_t::dynamicFlags (per local client)
+const int WINDOW_HASFOCUS = 0x2;
+
 struct ScreenPlacement
 {
     float scaleVirtualToReal[2];

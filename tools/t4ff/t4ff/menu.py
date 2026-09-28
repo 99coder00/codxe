@@ -18,6 +18,10 @@ focused map on the right. The dvars:
 - ``ui_codxe_maptitle``, ``ui_codxe_mapdesc``, ``ui_codxe_mapimage``: the preview of the focused map;
 - the menu sets ``ui_codxe_focus`` (the focused row) and ``ui_codxe_scroll`` (rows to scroll: the
   catchers +-1, LB / RB a page), which CoD Xe reads back.
+
+A catcher gives the focus back to its row with ``setfocus``, which does not move the menu's cursor
+(the D-pad moves on from the cursor): CoD Xe puts the cursor back on the focused item, and past
+the ends of the list (the menu wrapping to the catcher at its other end) goes to the other end.
 """
 
 from __future__ import annotations

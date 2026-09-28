@@ -61,7 +61,8 @@ std::vector<UsermapEntry> usermaps;
 int listOffset = 0;
 int focusedRow = -1;
 bool dvarsCreated = false;
-std::string previewInSlot; // the map whose preview.bin the slot holds
+menuDef_t *listMenu = nullptr; // the menu showing the list (see SyncMenuCursor)
+std::string previewInSlot;     // the map whose preview.bin the slot holds
 
 std::string Trim(const std::string &text)
 {
@@ -318,6 +319,26 @@ void PublishRows()
     dvarsCreated = true;
 }
 
+// The list scrolls through two items above and below the rows: when the D-pad moves onto one, its script sets
+// ui_codxe_scroll and gives the focus back to the row with "setfocus". setfocus moves the focus but not the menu's
+// cursor, which the D-pad moves on from: the next press would start from that item and wrap to the other end of the
+// menu. The cursor follows the focused item instead.
+void SyncMenuCursor()
+{
+    if (!listMenu || !listMenu->items)
+        return;
+
+    for (int i = 0; i < listMenu->itemCount; ++i)
+    {
+        const itemDef_s *item = listMenu->items[i];
+        if (item && (item->window.dynamicFlags[0] & WINDOW_HASFOCUS))
+        {
+            listMenu->cursorItem[0] = i;
+            return;
+        }
+    }
+}
+
 void Scroll(int delta)
 {
     int offset = listOffset + delta;
@@ -336,11 +357,13 @@ void Scroll(int delta)
 
 void UsermapList::OnMenuOpen(const char *menuName)
 {
-    bool listMenu = false;
+    bool isListMenu = false;
     for (size_t i = 0; menuName && i < ARRAYSIZE(LIST_MENUS); ++i)
-        listMenu = listMenu || _stricmp(menuName, LIST_MENUS[i]) == 0;
-    if (!listMenu)
+        isListMenu = isListMenu || _stricmp(menuName, LIST_MENUS[i]) == 0;
+    if (!isListMenu)
         return;
+
+    listMenu = static_cast<menuDef_t *>(DB_FindXAssetHeader(ASSET_TYPE_MENU, menuName, false, 0).data);
 
     // Maps copied onto the drive since the last visit show up without restarting.
     ScanUsermaps();
@@ -359,14 +382,23 @@ void UsermapList::OnUIRefresh()
 
     const char *scroll = Dvar_GetVariantString(DVAR_SCROLL);
     const int delta = scroll ? std::atoi(scroll) : 0;
+    const char *focus = Dvar_GetVariantString(DVAR_FOCUS);
+    const int row = focus && *focus ? std::atoi(focus) : -1;
     if (delta)
     {
         Dvar_SetFromStringByName(DVAR_SCROLL, "0");
-        Scroll(delta);
-    }
 
-    const char *focus = Dvar_GetVariantString(DVAR_FOCUS);
-    const int row = focus && *focus ? std::atoi(focus) : -1;
+        // Past the ends of the list the menu wraps to the item at its other end: up on the first map (the item below
+        // the rows, the focus on the last row) goes to the last map, down on the last map to the first one.
+        if (delta == 1 && focusedRow == 0 && row == LIST_ROWS - 1)
+            Scroll(MaxOffset() - listOffset);
+        else if (delta == -1 && focusedRow == LIST_ROWS - 1 && row == 0)
+            Scroll(-listOffset);
+        else
+            Scroll(delta);
+    }
+    SyncMenuCursor();
+
     if (row != focusedRow)
     {
         focusedRow = row;
@@ -381,6 +413,7 @@ UsermapList::UsermapList()
     listOffset = 0;
     focusedRow = -1;
     dvarsCreated = false;
+    listMenu = nullptr;
     previewInSlot.clear();
 }
 
