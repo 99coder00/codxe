@@ -1346,6 +1346,47 @@ class SampleZoneTests(unittest.TestCase):
     def test_pc_roundtrip(self):
         self.roundtrip("pc", "nazi_zombie_aztec_patch.ff")
 
+    def test_pointer_into_a_string_of_a_referenced_asset(self):
+        """The PC linker stores equal strings once: napalmbloblight's display name points into
+        napalmblob's. With napalmblob replaced by a reference (as assets the console has, or a cube
+        map, are), napalmbloblight gets a copy of the string, loaded where its pointer is. The models
+        and materials napalmblob loaded, that later weapons alias, load at the first of them."""
+        from t4ff.convert import ConvertOptions, ZoneConverter
+        from t4ff.fastfile import read_fastfile
+        from t4ff.platforms import pc, x360
+        from t4ff.zone import Reader, Writer, asset_name
+
+        _, _, data = read_fastfile(sample("pc", "nazi_zombie_aztec.ff"))
+        conv = ZoneConverter(Reader(pc(), data).load(), pc(), x360(), ConvertOptions(log=lambda msg: None))
+        weapon_hook = conv.hooks.get("weapon")
+
+        def hook(c, asset_type, node, name):
+            if name == "napalmblob":
+                return c.reference_asset(asset_type, node, name)
+            return weapon_hook(c, asset_type, node, name) if weapon_hook else None
+
+        conv.hooks["weapon"] = hook
+        zone = conv.convert()
+        weapons = {asset_name(x360(), n): n for n in zone.extra_root.walk() if n.type.name == "WeaponDef" and (n.extra.get("origin") or ("",))[0] == "asset"}
+        light = weapons["napalmbloblight"]
+        copies = [p.node for p in light.relocs.values() if p.kind == "follow" and p.node.string and bytes(p.node.data) == b"WEAPON_FIREBLOB\0"]
+        self.assertEqual(len(copies), 1)
+        # every string of it loads in the order of its pointers
+        loaded = [light.relocs[off].node for off in sorted(light.relocs) if light.relocs[off].kind in ("follow", "insert")]
+        self.assertEqual([c for c in light.children if c in loaded], loaded)
+        inserted = {light.relocs[off].node.type.name for off in light.relocs if light.relocs[off].kind == "insert"}
+        self.assertEqual(inserted, {"XModel", "Material"})
+        # nothing points to data the zone does not load
+        live = {id(n) for n in zone.extra_root.walk()}
+        for n in zone.extra_root.walk():
+            for p in n.relocs.values():
+                if p.kind == "alias":
+                    self.assertIn(id(p.slot.owner), live)
+                elif p.kind in ("follow", "insert", "ref"):
+                    self.assertIn(id(p.node), live)
+        out = Writer(x360()).write(zone)
+        self.assertEqual(Writer(x360()).write(Reader(x360(), out).load()), out)
+
     def test_console_roundtrip(self):
         self.roundtrip("x360", "patch.ff")
         self.roundtrip("x360", "patch_ui.ff")

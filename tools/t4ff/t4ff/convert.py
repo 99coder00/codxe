@@ -842,7 +842,7 @@ class ZoneConverter:
             else:
                 new_root.children.append(self.convert_node(child))
 
-        self.fix_pointers()
+        self.fix_pointers(new_root)
         from .assets import apply_string_edits
 
         apply_string_edits(self, new_root)
@@ -883,8 +883,24 @@ class ZoneConverter:
         progress.step(label, len(node.children), len(node.children))
         return new
 
-    def fix_pointers(self):
+    def fix_pointers(self, root: Optional[Node] = None):
+        orphans = self.map_pointers(0)
+        if root is not None:
+            self.adopt_orphans(root, orphans)
+        elif orphans:
+            ptr, owner = next(iter(orphans.values()))
+            raise ConvertError(f"reference to unconverted node {ptr.node!r} (from {owner!r} at {ptr.offset:#x})")
+        # follow/insert pointers of converted asset hooks that were built directly
         for ptr, owner in self.ptrs:
+            if ptr.kind == "insert" and ptr.node is not None:
+                ptr.node.insert = True
+                ptr.node.extra["ptr"] = ptr
+
+    def map_pointers(self, start: int) -> Dict[int, tuple]:
+        """Point the pointers of converted data, from ``self.ptrs[start]`` on, to converted data.
+        Returns the references to data nothing converted (by pointer id)."""
+        orphans = {}
+        for ptr, owner in self.ptrs[start:]:
             ptr.owner = owner
             if ptr.kind in ("follow", "insert"):
                 target = self.node_map.get(id(ptr.node))
@@ -895,18 +911,123 @@ class ZoneConverter:
                     target.extra["ptr"] = ptr
             elif ptr.kind == "ref":
                 src_target = ptr.node
-                target = self.node_map.get(id(src_target))
-                if target is None:
-                    raise ConvertError(f"reference to unconverted node {src_target!r}")
+                if id(src_target) not in self.node_map:
+                    orphans[id(ptr)] = (ptr, owner)
+                    continue
                 src_off = ptr.index * src_target.elem_size + ptr.inner
-                ptr.node = target
+                ptr.node = self.node_map[id(src_target)]
                 ptr.index = 0
                 ptr.inner = self.offset_maps[id(src_target)](src_off)
-        # follow/insert pointers of converted asset hooks that were built directly
-        for ptr, owner in self.ptrs:
-            if ptr.kind == "insert" and ptr.node is not None:
-                ptr.node.insert = True
-                ptr.node.extra["ptr"] = ptr
+        return orphans
+
+    def adopt_orphans(self, root: Node, orphans: Dict[int, tuple]):
+        """The PC linker stores equal data once. An asset that was not converted but replaced by a
+        reference to the console's (as the game's own assets, or a cube map, are) can hold data other
+        assets use: strings, sound names, or models and materials it loads that later assets alias.
+        The first pointer to such data, in load order, loads a copy of it; later ones use that copy."""
+        live = {id(n) for n in root.walk()}
+        if not orphans and all(id(p.slot.owner) in live for n in root.walk() for p in n.relocs.values() if p.kind == "alias" and p.slot is not None):
+            return
+        loaders = {}  # id of a slot nothing converted -> the pointer that now loads its asset
+
+        def adopt(ptr: Ptr, owner: Node, child: Node, kind: str):
+            load_here(ptr, owner, child, kind)
+            live.update(id(n) for n in child.walk())
+
+        for ptr, owner in pointers_in_load_order(root):
+            if id(ptr) in orphans:
+                source = ptr.node
+                if id(source) not in self.node_map:
+                    if source.string and not source.relocs and (ptr.index or ptr.inner):
+                        adopt(ptr, owner, string_copy(ptr, source), "follow")
+                        continue
+                    if ptr.index or ptr.inner:
+                        raise ConvertError(f"reference to unconverted node {source!r} (from {owner!r} at {ptr.offset:#x})")
+                    count = len(self.ptrs)
+                    copy = self.convert_child(source)
+                    orphans.update(self.map_pointers(count))
+                    adopt(ptr, owner, copy, "follow")
+                    continue
+                src_off = ptr.index * source.elem_size + ptr.inner
+                ptr.node = self.node_map[id(source)]
+                ptr.index = 0
+                ptr.inner = self.offset_maps[id(source)](src_off)
+            elif ptr.kind == "alias" and ptr.slot is not None:
+                slot = ptr.slot
+                while slot.kind == "alias" and slot.slot is not None and id(slot.owner) not in live:
+                    ptr.slot, ptr.index = slot.slot, slot.index  # the same pointer, through its slot
+                    slot = slot.slot
+                if id(slot.owner) in live:
+                    continue
+                if id(slot) in loaders:
+                    ptr.slot, ptr.index = loaders[id(slot)], 1
+                    continue
+                if slot.kind not in ("follow", "insert") or slot.node is None:
+                    raise ConvertError(f"alias to a pointer of unconverted data {slot.owner!r} (from {owner!r} at {ptr.offset:#x})")
+                source = slot.node
+                if id(source) in self.node_map:
+                    raise ConvertError(f"alias to an asset loaded by unconverted data {slot.owner!r} (from {owner!r} at {ptr.offset:#x})")
+                # this pointer loads the asset now (and assets copied from the library alias it)
+                ptr.kind, ptr.slot, ptr.index = "insert", None, 0
+                source.extra["ptr"] = ptr
+                loaders[id(slot)] = ptr
+                count = len(self.ptrs)
+                copy = self.convert_child(source)
+                orphans.update(self.map_pointers(count))
+                adopt(ptr, owner, copy, "insert")
+                copy.insert = True
+                copy.extra["ptr"] = ptr
+
+
+def pointers_in_load_order(root: Node):
+    """The pointers of ``root`` and all it loads, in the order the game loads them: the data a
+    pointer loads comes right after it, before the next pointer of its owner. Data loaded while
+    walking (``load_here``) is walked as well."""
+    visited = set()
+    stack = [(root, None)]
+    while stack:
+        node, relocs = stack[-1]
+        if relocs is None:
+            visited.add(id(node))
+            relocs = iter(list(node.relocs.items()))
+            stack[-1] = (node, relocs)
+        entry = next(relocs, None)
+        if entry is not None:
+            ptr = entry[1]
+            yield ptr, node
+            if ptr.kind in ("follow", "insert") and ptr.node is not None and ptr.owner is node and id(ptr.node) not in visited:
+                stack.append((ptr.node, None))
+            continue
+        # data no pointer of its owner loads (e.g. the root's)
+        rest = [c for c in node.children if id(c) not in visited]
+        if rest:
+            stack.append((rest[0], None))
+            continue
+        stack.pop()
+
+
+def string_copy(ptr: Ptr, source: Node) -> Node:
+    """A copy of the string ``ptr`` points into, from where it points."""
+    start = ptr.index * source.elem_size + ptr.inner
+    copy = Node(source.type, 0, source.block)
+    copy.string = True
+    copy.data = bytearray(source.data[start:])
+    if not copy.data.endswith(b"\0"):
+        copy.data += b"\0"
+    copy.count = len(copy.data)
+    copy.segments = [(copy.type, copy.count, copy.count, False)]
+    copy.extra["align"] = source.extra.get("align", 1)
+    return copy
+
+
+def load_here(ptr: Ptr, owner: Node, child: Node, kind: str = "follow"):
+    """Make ``ptr`` of ``owner`` load ``child``: among the data ``owner`` loads, in the order of their
+    pointers."""
+    loaded_at = {id(p.node): off for off, p in owner.relocs.items() if p.kind in ("follow", "insert") and p.node is not None}
+    position = next((i for i, c in enumerate(owner.children) if loaded_at.get(id(c), -1) > ptr.offset), len(owner.children))
+    owner.children.insert(position, child)
+    ptr.kind, ptr.node, ptr.slot, ptr.index, ptr.inner = kind, child, None, 0, 0
+    ptr.owner = owner
 
 
 class _ArrayMap:
