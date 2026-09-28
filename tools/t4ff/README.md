@@ -259,6 +259,14 @@ zipline setup loops forever (the console kills the thread, "potential infinite
 loop in script"; Xenia crashes with "Overflowed stackpoints!"). The converted
 `modderHelp()` says a missing entity is missing also without `developer`.
 
+The PC game spawns `script_struct` entities from scripts
+(`spawn("script_struct", origin)`), the console's does not ("script_struct
+cannot be spawned dynamically", then the script error "unable to spawn
+"script_struct" entity" ends the thread): The Simpsons' rocket barrage links one
+to each rocket for its explosion sounds, so on the console its rockets flew
+nowhere and hurt no one. The converted scripts spawn a `script_origin`, the
+entity made for that (`linkTo`, `playSound`).
+
 Some errors in the console log come from the PC map itself and are harmless:
 PC Aztec's zombie type names a `walther` sidearm zombies never draw, and
 `collision_geo_32x32x128` is precached but never used.

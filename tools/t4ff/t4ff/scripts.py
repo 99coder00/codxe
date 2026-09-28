@@ -156,6 +156,32 @@ def fix_modder_help(p: Platform, zone: Zone, log=print) -> List[str]:
     return changed
 
 
+# The PC game spawns script_struct entities (spawn("script_struct", origin)): The Simpsons' rocket
+# barrage links one to each rocket to play its explosion sounds. The console's refuses ("script_struct
+# cannot be spawned dynamically", "unable to spawn "script_struct" entity"), which ends the thread:
+# the rockets fly nowhere and hurt no one. A script_origin is the entity for that (linkTo, playSound).
+_SPAWN_STRUCT = re.compile(rb'(\bspawn\s*\(\s*)"script_struct"', re.I)
+
+
+def spawn_script_origins(p: Platform, zone: Zone, log=print) -> List[str]:
+    """Scripts spawning script_struct entities spawn script_origin ones (see above). Returns the
+    names of the scripts changed."""
+    changed = []
+    for name, node in _rawfiles(p, zone):
+        if name.startswith(",") or not name.lower().endswith(SCRIPT_EXTENSIONS) or _buffer(node) is None:
+            continue
+        text = rawfile_text(node)
+        if b"script_struct" not in text:
+            continue
+        new, count = _SPAWN_STRUCT.subn(rb'\1"script_origin"', text)
+        if count:
+            set_rawfile_text(p, node, new)
+            changed.append(normalize(name))
+    if changed:
+        log(f"scripts: script_struct entities, which the console cannot spawn, are spawned as script_origin ({', '.join(changed)})")
+    return changed
+
+
 def _pointer(kind: str, owner: Node, offset: int, node: Node) -> Ptr:
     ptr = Ptr(kind, node)
     ptr.owner = owner

@@ -353,12 +353,13 @@ def _convert_map(args, paths, options, map_files, out_dir):
         drop_frontend_menus(x360(), main_zone, convs[0].console_library.is_stock_menu)
     # PC script menus (a music box) and hints name keyboard keys: the controller's buttons instead
     from .menu import gamepad_script_menus
-    from .scripts import fix_modder_help, use_key_hints
+    from .scripts import fix_modder_help, spawn_script_origins, use_key_hints
 
     gamepad_script_menus(x360(), main_zone)
     use_key_hints(x360(), main_zone)
     # the modding kits' setups stop at missing entities, as their authors meant (see scripts.py)
     fix_modder_help(x360(), main_zone)
+    spawn_script_origins(x360(), main_zone)
     prune_references(x360(), main_zone)
     if args.max_loaded_sounds or args.loaded_sound_memory:
         from .audio import LoadedXma

@@ -415,6 +415,33 @@ death
         self.assertEqual(text.count(b"modderHelp"), kit.count(b"modderHelp"))  # the calls are left alone
         self.assertEqual(rawfile_text(other), b'init()\n{\n\tif( modderHelp( trig, "Missing." ) )\n\t\treturn;\n}\n')
 
+    def test_script_structs_spawn_as_script_origins(self):
+        """The console cannot spawn script_struct entities (The Simpsons' rocket barrage links one to
+        each rocket): they are spawned as script_origin; structs made otherwise are left alone."""
+        from unittest import mock
+
+        from t4ff.layout import TypeRef
+        from t4ff.platforms import x360
+        from t4ff.scripts import make_rawfile, rawfile_text, spawn_script_origins
+        from t4ff.zone import BLOCK_VIRTUAL, Node, Ptr
+
+        p = x360()
+        template = Node(TypeRef("record", "RawFile", p.record("RawFile").size), 1, BLOCK_VIRTUAL)
+        template.data = bytearray(p.record("RawFile").size)
+        buffer = Node(TypeRef("scalar", "char", 1, 1), 1, BLOCK_VIRTUAL)
+        buffer.extra["origin"] = ("member", "RawFile", "buffer")
+        buffer.segments = [(buffer.type, 1, 1, False)]
+        template.relocs[8] = Ptr("follow", buffer)
+        template.children = [buffer]
+        rocket = make_rawfile(p, template, "maps/artillery.gsc", b'fire_rocket()\r\n{\r\n\tsound_struct = spawn("script_struct", self.origin);\r\n\ts = Spawn( "script_struct",o );\r\n\tsound_struct linkTo (self);\r\n}\r\n')
+        other = make_rawfile(p, template, "maps/_utility.gsc", b'f()\n{\n\tstruct = spawnStruct();\n\tstructs = getstructarray("script_struct", "classname");\n}\n')
+        files = [("maps/artillery.gsc", rocket), ("maps/_utility.gsc", other)]
+        with mock.patch("t4ff.scripts._rawfiles", lambda p, z: files):
+            self.assertEqual(spawn_script_origins(p, None, log=lambda msg: None), ["maps/artillery.gsc"])
+            self.assertEqual(spawn_script_origins(p, None, log=lambda msg: None), [])
+        self.assertEqual(rawfile_text(rocket), b'fire_rocket()\r\n{\r\n\tsound_struct = spawn("script_origin", self.origin);\r\n\ts = Spawn( "script_origin",o );\r\n\tsound_struct linkTo (self);\r\n}\r\n')
+        self.assertIn(b'getstructarray("script_struct", "classname")', rawfile_text(other))
+
 
 class UsermapTests(unittest.TestCase):
     def test_find_usermap(self):
