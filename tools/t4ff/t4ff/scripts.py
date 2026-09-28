@@ -24,6 +24,13 @@ from .zone import Node, Platform, Ptr, Zone, ZoneAsset, asset_name
 
 SCRIPT_EXTENSIONS = (".gsc", ".csc")
 
+# Client scripts the game loads by name for a zombie map, which no script names: it calls
+# clientscripts/_callbacks::sound_notify and loads clientscripts/_zombie_mode. The console's own
+# _callbacks.csc has no sound_notify and none of its zones used by usermaps has _zombie_mode.csc, so
+# every map of CoD Xenon's carries both; PC maps made with the first mod tools (Dead Sand) have
+# neither, as the PC game's own zones had them ("Could not find script 'clientscripts/_zombie_mode'").
+ZOMBIE_ENGINE_SCRIPTS = ("clientscripts/_callbacks.csc", "clientscripts/_zombie_mode.csc")
+
 _COMMENTS = re.compile(r"/\*.*?\*/|//[^\n]*", re.S)
 _INCLUDE = re.compile(r"#include\s+([\w\\/]+)\s*;")
 _CALL = re.compile(r"\b([A-Za-z_]\w*(?:[\\/]\w+)+)\s*::")
@@ -243,6 +250,19 @@ def missing_scripts_zone(p: Platform, zone: Zone, sources: List, console_library
     unknown: Dict[str, str] = {}
     finder = RawfileFinder(p, template, sources, console_library)
     queue = list(texts.items())
+    engine: Dict[str, str] = {}  # scripts the game loads by name, and where they came from
+    if is_zombie_map(texts):
+        for ref in ZOMBIE_ENGINE_SCRIPTS:
+            if defined.get(ref) is not None:
+                continue  # the map's own
+            node, origin = finder.find(ref)  # even when the game's own zones have one: not this one
+            if node is None:
+                unknown[ref] = "the game"
+                continue
+            engine[ref] = origin
+            defined[ref] = node
+            added.append(("rawfile", asset_name(p, node), node))
+            queue.append((ref, rawfile_text(node)))
     while queue:
         user, text = queue.pop()
         for ref in sorted(script_references(user, text)):
@@ -259,14 +279,25 @@ def missing_scripts_zone(p: Platform, zone: Zone, sources: List, console_library
             defined[ref] = node
             added.append(("rawfile", asset_name(p, node), node))
             queue.append((ref, rawfile_text(node)))
+    for ref, source in sorted(engine.items()):
+        log(f"scripts: added {ref} (the game loads it for zombie maps, the map has none) from the {source}")
     for ref, source in sorted(origins.items()):
         log(f"scripts: added {ref} (used by the map's scripts, not in its fastfiles) from the {source}")
+    for ref in ZOMBIE_ENGINE_SCRIPTS:
+        if unknown.get(ref) == "the game":
+            del unknown[ref]
+            log(f"warning: {ref}, which the game loads for zombie maps, is in none of the map's files nor the console fastfiles given: give a map converted by CoD Xenon among them (--console-zone)")
     if unknown:
         log(
             f"scripts: {len(unknown)} scripts the map uses are left to the game's own zones (e.g. {', '.join(sorted(unknown)[:6])}). "
             "Should the console stop with \"Could not find script\", add the Xbox 360 fastfile that has it."
         )
     return zone_of_assets(p, added, finder.strings) if added else None
+
+
+def is_zombie_map(texts: Dict[str, bytes]) -> bool:
+    """Whether the scripts (normalized name -> text) are those of a zombie map."""
+    return any(name.startswith("maps/_zombiemode") or b"_zombiemode" in text.lower() for name, text in texts.items())
 
 
 class RawfileFinder:

@@ -336,8 +336,8 @@ def build_console_texture(image: ImageData, max_size: int = 0, keep_mips: bool =
     ``max_size`` limits the base level dimensions and ``drop_levels`` removes additional top
     levels. Uncompressed colour textures are compressed to DXT when ``compress`` is set.
     ``normal_map``: a PC normal map, made DXN (see :func:`normal_map_to_dxn`).
-    Cube maps up to 64 texels (the maps' reflection probes, small skies) stay uncompressed, as the
-    game's own.
+    Cube maps up to 64 texels (the maps' reflection probes, small skies) stay uncompressed, as CoD
+    Xenon's.
     """
 
     faces = image.faces

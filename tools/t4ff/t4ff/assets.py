@@ -609,7 +609,7 @@ def build_console_image(conv, name: str, tex: img.ConsoleTexture, semantic: int,
     put("depth", 1)
     put("category", category)
     put("delayLoadPixels", 1)
-    put("baseSize", tex.base_size or len(tex.pixels))  # the base level, as the game's own images
+    put("baseSize", tex.base_size or len(tex.pixels))  # the base level, as CoD Xenon's Aztec images
     put("streamSlot", 0xFFFF)
     put("streaming", 0)
 

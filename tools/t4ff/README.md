@@ -11,9 +11,9 @@ keeps them small enough for the console's memory:
   Uncompressed textures are DXT compressed. Normal maps become DXN, the format
   of all the console's (the PC keeps x in alpha and y in green, the console's
   shaders read x and y from DXN's two channels). Cube maps (the reflection
-  probes of the map, skies) keep their six faces as the game's own: the
-  probes convert to exactly the textures Treyarch's Aztec has, and like those
-  stay uncompressed up to 64 texels. Each map keeps as much texture
+  probes of the map, skies) keep their six faces: the probes of PC Aztec
+  convert to exactly the textures of CoD Xenon's Aztec, and like those stay
+  uncompressed up to 64 texels. Each map keeps as much texture
   quality as fits in memory: the texture budget is what a memory target based on
   CoD Xenon's working maps leaves, and only when a map is over it do its largest
   textures lose top mip levels. Stock textures use the console's own versions.
@@ -188,6 +188,14 @@ folder (also its `raw` folder). PC Aztec calls
 load for a usermap ("Could not find script"); it comes from CoD Xenon's Aztec
 when that is given with `--console-zone`. Scripts found nowhere are left to the
 game's own zones, and the log lists them.
+
+Zombie maps also get the two client scripts the game loads by name for them,
+which no script names: `clientscripts/_zombie_mode.csc` and the zombie
+`clientscripts/_callbacks.csc` (with `sound_notify`). The console's own zones
+have neither (every map of CoD Xenon's carries both); maps made with the first
+mod tools, such as Dead Sand, lack them, because the PC game's zones had them.
+They come from the Xbox 360 fastfiles given, so give at least one map converted
+by CoD Xenon with `--console-zone`.
 
 ### Console fastfiles
 

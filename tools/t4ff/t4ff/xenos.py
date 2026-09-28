@@ -56,8 +56,9 @@ class Format:
     swizzle: int  # dword 3 swizzle bits (XYZW)
 
 
-# Swizzles as Treyarch's textures have them (3 bits a channel, 4: 0, 5: 1): 0x688 = X:0 Y:1 Z:2 W:3;
-# 8_8_8_8 (PC BGRA bytes) 0x60A = X:2 Y:1 Z:0 W:3; L8 0xA00 = LLL1; A8L8 0x200 = LLLA.
+# Swizzles as the SDK's D3DFORMATs hold them (bits 18-29; CoD Xenon's textures have them too; 3 bits a
+# channel, 4: 0, 5: 1): 0x688 = X:0 Y:1 Z:2 W:3; 8_8_8_8 (PC BGRA bytes) 0x60A = X:2 Y:1 Z:0 W:3;
+# L8 0xA00 = LLL1; A8L8 0x200 = LLLA.
 FORMATS = {
     "DXT1": Format("DXT1", GPUTEXTUREFORMAT_DXT1, D3DFMT_DXT1, GPUENDIAN_8IN16, 4, 8, 0x688),
     "DXT3": Format("DXT3", GPUTEXTUREFORMAT_DXT2_3, D3DFMT_DXT3, GPUENDIAN_8IN16, 4, 16, 0x688),

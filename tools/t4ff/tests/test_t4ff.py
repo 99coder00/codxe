@@ -1066,8 +1066,8 @@ class XenosTests(unittest.TestCase):
         self.assertEqual(xenos.untile_mip_chain(tiled, w, h, fmt, len(levels)), levels)
 
     def test_swizzles_as_the_games_textures(self):
-        """Fetch constant swizzles (and D3DFORMATs, which hold them in bits 18-29) of Treyarch's
-        textures: 8_8_8_8 reads PC BGRA bytes, L8 has an opaque alpha."""
+        """Fetch constant swizzles as the SDK's D3DFORMATs hold them in bits 18-29 (and CoD Xenon's
+        textures have them): 8_8_8_8 reads PC BGRA bytes, L8 has an opaque alpha."""
         import struct
 
         for name, word3, d3d in [("DXT1", 0xD10, 0x1A200152), ("A8R8G8B8", 0xC14, 0x18280186), ("L8", 0x1400, 0x28000102), ("A8L8", 0x400, 0x0800014A)]:
@@ -1390,7 +1390,7 @@ class SampleZoneTests(unittest.TestCase):
 
     def test_reflection_probes_as_the_game(self):
         """The map's reflection probes (cube maps the PC zone holds, face after face) convert to the
-        console's: the same image, load def, texture header and pixels as Treyarch's Aztec."""
+        console's: the same image, load def, texture header and pixels as CoD Xenon's Aztec."""
         from t4ff.convert import ConvertOptions, ZoneConverter
         from t4ff.fastfile import read_fastfile
         from t4ff.platforms import pc, x360
@@ -1766,6 +1766,35 @@ class SampleZoneTests(unittest.TestCase):
             self.assertEqual(pcm.rate, wanted[name])
             self.assertLessEqual(abs(pcm.frames - expected), audio.XWMA_LENGTH_TOLERANCE, name)
             self.assertGreater(int(np.abs(pcm.samples.astype(np.int32)).max()), 1000, name)
+
+    def test_zombie_engine_scripts(self):
+        """A zombie map made with the first mod tools (Dead Sand) has neither the client scripts the
+        game loads by name for zombie maps: they are added, from the console fastfiles, even though no
+        script names them; a map that has them keeps its own."""
+        from t4ff.fastfile import read_fastfile
+        from t4ff.library import ConsoleLibrary
+        from t4ff.platforms import x360
+        from t4ff.scripts import ZOMBIE_ENGINE_SCRIPTS, _rawfiles, make_rawfile, missing_scripts_zone, rawfile_text, zone_of_assets
+        from t4ff.zone import Reader
+
+        library = ConsoleLibrary(x360(), [sample("x360", "nazi_zombie_aztec.ff")], log=lambda msg: None)
+        _, _, data = read_fastfile(sample("x360", "nazi_zombie_aztec.ff"))
+        template = next(node for name, node in _rawfiles(x360(), Reader(x360(), data).load()) if not name.startswith(","))
+
+        def zone(*names):
+            return zone_of_assets(x360(), [("rawfile", n, make_rawfile(x360(), template, n, b"main() { maps\\_zombiemode_utility::init(); }")) for n in names])
+
+        logs = []
+        extra = missing_scripts_zone(x360(), zone("maps/dead_sand_zombiemode.gsc", "maps/_zombiemode_utility.gsc"), [], library, log=logs.append)
+        added = {name: node for name, node in _rawfiles(x360(), extra)}
+        self.assertTrue(set(ZOMBIE_ENGINE_SCRIPTS) <= set(added), logs)
+        self.assertIn(b"sound_notify", rawfile_text(added["clientscripts/_callbacks.csc"]))
+        self.assertTrue(any("the game loads it for zombie maps" in line for line in logs))
+        # the map's own are kept; a map that is no zombie map gets none
+        extra = missing_scripts_zone(x360(), zone("maps/_zombiemode_utility.gsc", *ZOMBIE_ENGINE_SCRIPTS), [], library, log=lambda msg: None)
+        kept = {name for name, _ in _rawfiles(x360(), extra)} if extra is not None else set()
+        self.assertFalse(set(ZOMBIE_ENGINE_SCRIPTS) & kept)
+        self.assertIsNone(missing_scripts_zone(x360(), zone_of_assets(x360(), [("rawfile", "maps/mak.gsc", make_rawfile(x360(), template, "maps/mak.gsc", b"main() {}"))]), [], library, log=lambda msg: None))
 
     def test_convert_map(self):
         """The whole usermap (map + patch + mod, merged) converts to a zone the console loader reads,
