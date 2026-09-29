@@ -10,7 +10,9 @@ only, and does not load Shi No Numa's zone for a usermap. So, as CoD Xenon's Azt
    scripts (CoD Xenon's ``_zombiemode.gsc`` is the one of the .iwd, not of the fastfiles);
 2. :func:`missing_scripts_zone`: scripts the map's scripts include or call but no zone of the map
    has are taken from the map's files or from the Xbox 360 fastfiles given (``--console-zone``),
-   and those they use in turn.
+   and those they use in turn;
+3. :func:`keep_mod_scripts`: scripts of the mod that the game's own zones have too get names of
+   their own, so that the console runs the mod's, as the PC does.
 """
 
 from __future__ import annotations
@@ -180,6 +182,137 @@ def spawn_script_origins(p: Platform, zone: Zone, log=print) -> List[str]:
     if changed:
         log(f"scripts: script_struct entities, which the console cannot spawn, are spawned as script_origin ({', '.join(changed)})")
     return changed
+
+
+# The game runs the first script of a name it loads, and the console loads its own zones (common.ff,
+# patch.ff, ...) before the map: a script both have is the game's there. On PC, with the map's mod
+# active, the mod's scripts (its mod.ff, its .iwd and loose files) win over the game's instead. The
+# console's patch.ff has Der Riese's maps/_zombiemode_zone_manager.gsc, and the DLC3 modding kit
+# ships a changed one in the mod: when no enabled zone has a player in it, the kit's makes the map's
+# first zone active, Der Riese's its "receiver_zone", which other maps have not. With the game's, a
+# player of The Simpsons in the room with the TV (a zone its doors never enable) leaves no zone
+# active, so no spawner: every round ends as it starts, five at a time, and dogs stay where they
+# spawn until the failsafe kills them.
+# So the mod's copy gets a name of its own, and the map's scripts call it by that name. Not when a
+# script of the game's that the map runs calls it too (the game's maps/_load.gsc calls
+# maps/_laststand.gsc): both copies would run, each with its own idea of the state they share. And
+# not for scripts the engine runs by name (animscripts, client scripts, the callbacks).
+MOD_SCRIPT_SUFFIX = "_mod"
+_ENGINE_RUN_SCRIPTS = ("animscripts/", "clientscripts/", "character/", "aitype/", "mptype/", "xmodelalias/",
+                       "maps/_callbacksetup.gsc", "maps/_callbackglobal.gsc")  # fmt: skip
+_SPACE = re.compile(rb"\s+")
+
+
+def keep_mod_scripts(p: Platform, zone: Zone, mod_scripts: Set[str], console_library, level_script: str, log=print) -> Dict[str, str]:
+    """Scripts of the mod (``mod_scripts``: normalized names) that the game's own zones among
+    ``console_library`` have too, and that differ, get a name of their own, and the map's scripts
+    that include or call them use it (see above). ``level_script``: the map's level script
+    (``maps/<map>.gsc``). Returns {old name: new name}."""
+    if console_library is None:
+        return {}
+    nodes = {normalize(name): node for name, node in _rawfiles(p, zone) if not name.startswith(",") and _buffer(node) is not None}
+    texts = {name: rawfile_text(node) for name, node in nodes.items() if name.endswith(".gsc")}
+    game_texts: Dict[str, Optional[bytes]] = {}
+
+    def game(name: str) -> Optional[bytes]:
+        if name not in game_texts:
+            found = console_library.find_in_game_zones("RawFile", name)
+            game_texts[name] = rawfile_text(found[1]) if found is not None else None
+        return game_texts[name]
+
+    shadowed = [
+        name for name in sorted(texts)
+        if name in mod_scripts and game(name) is not None and _SPACE.sub(b"", game(name)) != _SPACE.sub(b"", texts[name])
+    ]  # fmt: skip
+    if not shadowed:
+        return {}
+
+    # the scripts the map runs, as the console has them: the game's copy of those both have
+    runs_game_copy: Dict[str, bool] = {}
+    calls: Dict[str, Set[str]] = {}
+    queue = [level_script.lower(), "maps/_callbacksetup.gsc"]
+    while queue:
+        name = queue.pop()
+        if name in calls:
+            continue
+        text = game(name)
+        runs_game_copy[name] = text is not None
+        if text is None:
+            text = texts.get(name)
+        calls[name] = script_references(name, text) if text is not None else set()
+        queue.extend(calls[name] - set(calls))
+
+    renamed: Dict[str, str] = {}
+    for name in shadowed:
+        if name not in calls:
+            continue  # nothing the map runs uses it
+        if name.startswith(_ENGINE_RUN_SCRIPTS):
+            log(f"warning: {name} of the mod is not the one the console runs: the engine runs it by name, and the game's own zones have one")
+            continue
+        game_callers = sorted(caller for caller, refs in calls.items() if name in refs and runs_game_copy[caller] and caller != name)
+        if game_callers:
+            log(f"warning: {name} of the mod is not the one the console runs: the game's own zones have one, which their {game_callers[0]} calls too")
+            continue
+        new = _free_name(name[: -len(".gsc")] + MOD_SCRIPT_SUFFIX, ".gsc", set(nodes) | set(calls), game)
+        if not _rename_rawfile(p, zone, nodes[name], new):
+            log(f"warning: {name} of the mod is not the one the console runs: its name is shared with other data of the zone")
+            continue
+        renamed[name] = new
+    if not renamed:
+        return {}
+    for name, node in nodes.items():
+        if not name.endswith(".gsc"):
+            continue
+        text = new_text = rawfile_text(node)
+        for old, new in renamed.items():
+            path = new[: -len(".gsc")].replace("/", "\\").encode("latin-1")
+            new_text = _script_path(old).sub(lambda m, path=path: path, new_text)
+        if new_text != text:
+            set_rawfile_text(p, node, new_text)
+    for old, new in renamed.items():
+        log(f"scripts: {old} of the mod runs as {new}: the game's own zones have one too, which the console would run instead (the PC runs the mod's)")
+    return renamed
+
+
+def _script_path(name: str):
+    """A regex for the script ``name`` (normalized) where scripts include or call it."""
+    parts = name[: -len(".gsc")].split("/")
+    return re.compile(rb"(?i)(?<![\w\\/])" + rb"[\\/]".join(re.escape(part.encode("latin-1")) for part in parts) + rb"(?=\s*(?:::|;))")
+
+
+def _free_name(stem: str, ext: str, taken: Set[str], game) -> str:
+    name, i = stem + ext, 2
+    while name in taken or game(name) is not None:
+        name, i = f"{stem}{i}{ext}", i + 1
+    return name
+
+
+def _rename_rawfile(p: Platform, zone: Zone, node: Node, name: str) -> bool:
+    """Give the RawFile asset ``node`` the name ``name`` (False when its name string is shared)."""
+    off = find_field(p.record("RawFile"), "name").offset
+    old = node.relocs.get(off)
+    old_string = old.target() if old is not None else None
+    if old_string is not None:
+        for other in zone.extra_root.walk():
+            for ptr in other.relocs.values():
+                if ptr is not old and ptr.target() is old_string:
+                    return False
+    string = Node(TypeRef("scalar", "char", 1, 1), 0, old_string.block if old_string is not None else _buffer(node).block)
+    string.string = True
+    string.data = bytearray(name.encode("latin-1") + b"\0")
+    string.count = len(string.data)
+    string.segments = [(string.type, string.count, string.count, False)]
+    string.extra["align"] = 1
+    index = next((i for i, child in enumerate(node.children) if child is old_string), None)
+    if index is not None:
+        node.children[index] = string
+    else:
+        node.children.insert(0, string)  # the name is loaded before the buffer
+    node.relocs[off] = _pointer("follow", node, off, string)
+    for asset in zone.assets:
+        if asset.node is node:
+            asset.name = name
+    return True
 
 
 def _pointer(kind: str, owner: Node, offset: int, node: Node) -> Ptr:

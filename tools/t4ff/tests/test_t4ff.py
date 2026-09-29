@@ -415,6 +415,64 @@ death
         self.assertEqual(text.count(b"modderHelp"), kit.count(b"modderHelp"))  # the calls are left alone
         self.assertEqual(rawfile_text(other), b'init()\n{\n\tif( modderHelp( trig, "Missing." ) )\n\t\treturn;\n}\n')
 
+    def test_mod_scripts_over_the_games(self):
+        """The console runs the game's own copy of a script over the map's, the PC the mod's: the
+        mod's zone manager (the DLC3 kit's) gets a name of its own and the map calls it by that
+        name, not Der Riese's of the console's patch.ff. A script the game's own scripts call too
+        (maps/_load.gsc calls maps/_laststand.gsc) and a script the engine runs stay the game's."""
+        from t4ff.layout import TypeRef
+        from t4ff.platforms import x360
+        from t4ff.scripts import _rawfiles, keep_mod_scripts, make_rawfile, normalize, rawfile_text, zone_of_assets
+        from t4ff.zone import BLOCK_VIRTUAL, Node, Ptr, Reader, Writer
+
+        p = x360()
+        template = Node(TypeRef("record", "RawFile", p.record("RawFile").size), 1, BLOCK_VIRTUAL)
+        template.data = bytearray(p.record("RawFile").size)
+        buffer = Node(TypeRef("scalar", "char", 1, 1), 1, BLOCK_VIRTUAL)
+        buffer.extra["origin"] = ("member", "RawFile", "buffer")
+        buffer.segments = [(buffer.type, 1, 1, False)]
+        template.relocs[8] = Ptr("follow", buffer)
+        template.children = [buffer]
+        game = {
+            "maps/_zombiemode_zone_manager.gsc": b'manage_zones(z)\n{\n\tlevel.zones["receiver_zone"].is_active = true;\n}\n',
+            "maps/_load.gsc": b"main()\n{\n\tmaps\\_laststand::init();\n}\n",
+            "maps/_laststand.gsc": b"init()\n{\n}\n",
+            "animscripts/death.gsc": b"main()\n{\n}\n",
+            "maps/_mgturret.gsc": b"init()\n{\n}\n",
+        }
+
+        class Library:
+            def find_in_game_zones(self, rec_name, name):
+                return (None, make_rawfile(p, template, name, game[name])) if name in game else None
+
+        level = (b"#include maps\\_zombiemode_zone_manager;\nmain()\n{\n\tmaps\\_load::main();\n\tmaps\\_mgturret::init();\n"
+                 b'\tlevel thread maps\\_zombiemode_zone_manager::manage_zones("start_zone");\n'
+                 b'\tlevel thread Maps/_Zombiemode_Zone_Manager ::manage_zones("start_zone");\n'
+                 b"\tlevel thread maps\\_zombiemode_zone_manager_other::f();\n\tanimscripts\\death::main();\n}\n")
+        scripts = {
+            "maps/testmap.gsc": level,
+            "maps/_zombiemode_zone_manager.gsc": b"manage_zones(z)\n{\n\tlevel.zones[z].is_active = true;\n}\n",
+            "maps/_laststand.gsc": b"init()\n{\n\tlevel.mod = 1;\n}\n",
+            "animscripts/death.gsc": b"main()\n{\n\tmod();\n}\n",
+            "maps/_mgturret.gsc": b"init()\r\n{\r\n}\r\n",  # the same apart from white space
+        }
+        zone = zone_of_assets(p, [("rawfile", name, make_rawfile(p, template, name, text)) for name, text in scripts.items()])
+        logs = []
+        renamed = keep_mod_scripts(p, zone, set(scripts) - {"maps/testmap.gsc"}, Library(), "maps/testmap.gsc", log=logs.append)
+        self.assertEqual(renamed, {"maps/_zombiemode_zone_manager.gsc": "maps/_zombiemode_zone_manager_mod.gsc"})
+        texts = {normalize(name): rawfile_text(node) for name, node in _rawfiles(p, Reader(p, Writer(p).write(zone)).load())}
+        self.assertEqual(sorted(texts), sorted(set(scripts) - {"maps/_zombiemode_zone_manager.gsc"} | {"maps/_zombiemode_zone_manager_mod.gsc"}))
+        self.assertEqual(texts["maps/_zombiemode_zone_manager_mod.gsc"], scripts["maps/_zombiemode_zone_manager.gsc"])
+        self.assertEqual(texts["maps/testmap.gsc"], level.replace(b"maps\\_zombiemode_zone_manager;", b"maps\\_zombiemode_zone_manager_mod;")
+                         .replace(b"maps\\_zombiemode_zone_manager::", b"maps\\_zombiemode_zone_manager_mod::")
+                         .replace(b"Maps/_Zombiemode_Zone_Manager ::", b"maps\\_zombiemode_zone_manager_mod ::"))
+        self.assertEqual(texts["maps/_laststand.gsc"], scripts["maps/_laststand.gsc"])
+        self.assertEqual(len(logs), 3, logs)
+        self.assertTrue(any("maps/_laststand.gsc" in line and "maps/_load.gsc" in line for line in logs), logs)
+        self.assertTrue(any("animscripts/death.gsc" in line and "engine" in line for line in logs), logs)
+        # nothing else to do the second time
+        self.assertEqual(keep_mod_scripts(p, zone, set(scripts), Library(), "maps/testmap.gsc", log=lambda msg: None), {})
+
     def test_script_structs_spawn_as_script_origins(self):
         """The console cannot spawn script_struct entities (The Simpsons' rocket barrage links one to
         each rocket): they are spawned as script_origin; structs made otherwise are left alone."""
@@ -509,6 +567,50 @@ class LibraryTests(unittest.TestCase):
             os.remove(os.path.join(simpsons, T4FF_MARKER))  # converted before the marker: the output folder
             self.assertEqual(short(library_files([t4], "simpsons", [simpsons + os.sep])), everything)
             self.assertEqual(short(library_files([t4], "simpsons"))[0], "usermaps/simpsons/simpsons.ff")  # what the marker prevents
+
+
+class TechsetTests(unittest.TestCase):
+    # the sun lit pass of mc_l_sm_b0c0d0n0s0 in CoD Xenon's maps (type, dest, value), and the
+    # counts of its sections: the dynamic shadow texture (code sampler 0x12) is a stable argument
+    XENON_LIT_SUN = [
+        (3, 0x4, 0x6B0004), (3, 0x8, 0x3B0001),
+        (3, 0x0, 0x7B0004), (3, 0x11, 0x350001), (3, 0x12, 0x360001),
+        (2, 0x7, 0x34ECCCB3), (2, 0x6, 0x59D30D0F), (2, 0x0, 0xA0AB1041), (2, 0x8, 0xEB529B4D), (3, 0x15, 0x2A0001),
+        (3, 0x3E, 0x5E0001), (4, 0x4, 0x3), (4, 0x5, 0x12), (5, 0x0, 0x2B0001), (5, 0x5, 0x270001), (5, 0x11, 0x240001),
+        (5, 0x12, 0x250001), (5, 0x13, 0x260001), (6, 0x7, 0x8D36A09), (6, 0x6, 0x3D9994DC),
+    ]  # fmt: skip
+
+    def test_dynamic_shadow_texture_per_object(self):
+        """The game sets the dynamic shadow texture before the per object arguments of the models
+        and surfaces it draws lit, and nowhere else: its own sun lit passes read it per object
+        (the same pass of mc_l_sm_b0c0d0n0s0_sco on the disc: 2, 4 and 14 arguments, the texture
+        last of the per object ones). Stable, it is read before any object set it (The Simpsons'
+        "Tried to use '(null)' when it isn't valid" at a window)."""
+        from t4ff.platforms import x360
+        from t4ff.techsets import sort_sections
+
+        p = x360()
+        args = [struct.pack(">HHI", *a) for a in self.XENON_LIT_SUN]
+        new_args, counts = sort_sections(p, args, (2, 3, 15))
+        self.assertEqual(counts, (2, 4, 14))
+        game = self.XENON_LIT_SUN[:5] + [(4, 0x5, 0x12)] + self.XENON_LIT_SUN[5:12] + self.XENON_LIT_SUN[13:]
+        self.assertEqual([struct.unpack(">HHI", a) for a in new_args], game)
+        # as the game has it: nothing to move
+        self.assertIsNone(sort_sections(p, new_args, counts))
+
+    def test_sections_of_copied_technique_sets(self):
+        """Every pass of CoD Xenon's Aztec reads its code arguments where the game's technique sets do."""
+        from t4ff.fastfile import read_fastfile
+        from t4ff.platforms import x360
+        from t4ff.techsets import fix_argument_sections
+        from t4ff.zone import Reader, Writer
+
+        p = x360()
+        _, _, data = read_fastfile(sample("x360", "nazi_zombie_aztec.ff"))
+        zone = Reader(p, data).load()
+        self.assertEqual(fix_argument_sections(p, zone, log=lambda msg: None), 8)
+        self.assertEqual(fix_argument_sections(p, zone, log=lambda msg: None), 0)
+        Reader(p, Writer(p).write(zone)).load()
 
 
 class WorldTests(unittest.TestCase):

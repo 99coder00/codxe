@@ -49,7 +49,8 @@ CoD Xe mod `mod_menu` stays enabled in all tests.
   what is only likely. The console `nazi_zombie_aztec.ff` used as a reference is CoD Xenon's
   conversion of a community map, not a Treyarch zone.
 - **Tests.** `python -m unittest discover -s tests` in `tools/t4ff`, with `T4FF_SAMPLES` set for
-  the sample based tests (layout below). Run them before every push; 67 pass as of this writing.
+  the sample based tests (layout below). Run them before every push; 70 as of this writing, of
+  which two fail on Windows only (see Open problems, 6).
 
 ## Environment
 
@@ -104,7 +105,10 @@ fastfiles read and write back byte for byte. A window (`t4ff_gui.pyw`) and a CLI
 
 **Assets the console lacks.** Technique sets are copied from the console fastfiles given (they
 cannot be converted), with stock images, sounds and models the PC map expects from the game.
-Assets the game's own zones load stay references when those zones are given.
+Assets the game's own zones load stay references when those zones are given. The code arguments of
+the copied passes are moved to the sections (per primitive, per object, stable) the game's own
+technique sets have them in (`techsets.py`): CoD Xenon's read the dynamic shadow texture as a
+stable argument (see Open problems, 1).
 
 **Textures.** Tiled Xenos textures with mip chains, DXT compression, a per map texture budget from
 a memory target. Normal maps become DXN. Cube maps (reflection probes, skies) are converted: the
@@ -127,7 +131,10 @@ lacks are added (from its files, the console fastfiles, the PC files). Script fi
 - hints naming the PC's use key show the console's button; PC script menus (Tom_bmx's music box)
   get controller buttons;
 - zombie maps get `clientscripts/_zombie_mode.csc` and the zombie `clientscripts/_callbacks.csc`
-  (with `sound_notify`), which the game loads by name and maps from the first mod tools lack.
+  (with `sound_notify`), which the game loads by name and maps from the first mod tools lack;
+- scripts of the mod that the console's own zones have too (which the console would run instead)
+  get names of their own when only the map's scripts call them (`keep_mod_scripts`): The Simpsons'
+  zone manager (see Open problems, 2).
 
 **Assets the game looks up by name.** Player body animations of the player animation script,
 shellshock files the scripts name, and the animations of the anim trees (`animtrees/*.atr`): the
@@ -143,8 +150,8 @@ fixed "reference to unconverted node" on Dead Sand. Maps converted by t4ff (mark
 **Loading screen and map list.** A load zone like CoD Xenon's with the map's picture, a given one or
 a title card; map names from `.arena` (localized keys resolved). CoD Xe lists the whole `usermaps`
 folder in a "Custom Maps" menu (`t4ff menu` patches CoD Xenon's `patch_ui.ff`), with pictures, 13
-rows, paging, and scrolling (the cursor fix is in `src/game/t4/sp/components/usermaps.cpp`; not
-yet confirmed on the maintainer's build).
+rows, paging, and scrolling (the cursor fix is in `src/game/t4/sp/components/usermaps.cpp`;
+confirmed in Xenia with CoD Xe r422: up from the first row goes to the last, 7-19 of 19).
 
 **CoD Xe (T4 SP).** `log_console` (console and script errors to the debug output), `thread_watch`
 (where a stuck thread is), the dynamic usermaps list, a mod menu entry for music boxes, VS2010
@@ -156,73 +163,72 @@ build script.
 | --- | --- |
 | Aztec (`nazi_zombie_aztec`) | converts and plays; the reference map |
 | Zombie Woods (`nazi_zombie_wh`, 2008) | converts and plays; title card loading screen |
-| The Simpsons (`simpsons`, 2010, mod heavy) | converts and plays; voices and music box fixed. Open: a crash at a window (1), round skips and AI problems (2). Airstrike and dog fixes not yet retested |
+| The Simpsons (`simpsons`, 2010, mod heavy) | converts and plays; voices, music box, airstrike (tester), rounds and dog rounds (Xenia) work. The window crash (1) is fixed but awaits a console test; Moe's (2) not looked into |
 | Dead Sand (`nazi_zombie_dead_sand`, 2009) | converts; loads and is playable for a few seconds, then crashes (3) |
 
 ## Open problems
 
-### 1. The Simpsons: crash at the first window in the house
+### 1. The Simpsons: crash at the first window in the house (fixed, awaits a console test)
 
-A tester got, near the first window of the house (repairing a barrier, or zombies coming in there;
-not every time):
+A tester got, near the first window of the house (after an airstrike, repairing a barrier, or
+zombies coming in there; not every time):
 
 ```
 Tried to use '(null)' when it isn't valid.
 Material='mc/berlin_window_browirglas', tech='lp_sun_b0c0d0n0s0_dtex_sm3', techType=10
 ```
 
-That build was made before the cube map and dog animation fixes. What is known:
+Cause, from the game's code (IDA database of the disc's `default.xex`, not TU7) and data:
 
-- The material belongs to one model, `prefab_berlin_asylum_dbldoor_dr` (a double door). CoD Xenon's
-  `zm_terminus` and `nazi_zombie_hijacked` have the same model. Their door and ours are byte
-  identical except that ours keeps the PC physics geometry and the PC's placeholder high mip bounds
-  (±131072) where theirs has real bounds. The material (texture table, constants, state bits) and
-  its technique set `mc_l_sm_b0c0d0n0s0` (copied from CoD Xenon's fastfiles) are identical to
-  theirs too. So the conversion does not damage what the error names.
-- techType 10 is `TECHNIQUE_LIT_SUN`. Its one pass has a vertex declaration, the vertex shaders for
-  `VERTDECL_PACKED` and `VERTDECL_WORLD` (slots 1 and 2 of 16; the others are empty in all of
-  CoD Xenon's copies), a pixel shader, precompiled index 1, and custom sampler flags 1 (the
-  reflection probe). Its arguments sample the material's 4 textures and two code textures,
-  `0x3` (model lighting) and `0x12` (dynamic shadows in the private fork's enum; `FLOATZ` in the
-  PC enum, which cannot be right for a pass without the floatz flag).
-- The message is most likely the renderer's error for an unset code texture: its name table has no
-  name for the index, hence `(null)`. So one of the engine-supplied textures (model lighting,
-  `0x12`, or the reflection probe) was not set when the door glass was drawn lit by the sun.
-- Not the reflection probes: older conversions took all 27 of The Simpsons' probes from other
-  maps of CoD Xenon's by name (valid cube maps). Now the map's own are converted.
-- A Watson run on a newer build ended in `Sys_Error` without its text in the log (the text is only
-  on screen): it may or may not be this crash.
+- The error is the renderer's for an unset code texture (`sub_82432080` in the disc build; its name
+  table has no name for the index, hence `(null)`). Both argument setters check it: the stable one
+  (`sub_824376E8`, called when a pass is set up, `sub_82437A90`) and the per object one
+  (`sub_82437138`). Code textures are `source + 0xF90 + 4 * index`.
+- The dynamic shadow texture (code sampler `0x12`, sampled by the sun lit techniques) is written
+  (`source + 0xFD8`) only by the 8 functions that draw models and world surfaces for the lit pass,
+  right before their per object arguments.
+- The game's own technique sets (21 SP zones of the disc, ~4000 techniques) always have `0x12` among
+  the per object arguments of a pass; CoD Xenon's (all 17 of their maps, 352 passes, e.g.
+  `mc_l_sm_b0c0d0n0s0`) among the stable ones, read before any object set it. No other code
+  argument is in another section than the game's.
+- The door (`prefab_berlin_asylum_dbldoor_dr`) is a script model (`door4` at -370 474 1517, next
+  to the first window `pf329`); `techsets.py` now moves every copied pass's code arguments to the
+  game's sections (48 passes in The Simpsons), after which CoD Xenon's pass is byte identical to the
+  game's.
 
-Next: get the on-screen text of each fatal error; find what sets the code textures `0x3` and `0x12`
-in the game (and when it leaves them unset: sun, primary lights, the model's lighting for entities
-vs static models); check how the door is placed in the map (script model, brush model, static
-model) and whether CoD Xenon's maps with the door ever draw it in sunlight; log `Com_Error` text
-from CoD Xe (needs the address of `Com_Error` in title update 7; only `Com_PrintMessage`
-(0x8224F6A8) and `Scr_Error` (0x823489A8) are known).
+Xenia: the fixed map ran ~15 minutes around that window and door, zombies coming in through it,
+without the error. The error was not reproduced on the old build (not tried long): the proof is
+the code and data above; a console test after an airstrike and barrier repairs would settle it.
 
-### 2. The Simpsons: round skips, AI and dogs
+### 2. The Simpsons: round skips, AI and dogs (fixed); Moe's
 
 Reported by a tester: rounds skip (5 at a time in the TV room, 1 or 2 outside), the TV room's
 barriers are never used, the AI does not always find its way in, dogs sometimes do not spawn or die
-right away, and Moe's cannot be reached. Not seen on PC (the map is well known). The developer of
-the private fork fixed the round skips in his conversion by adding a spawner where the player was
-"too far from any spawner"; a general fix is wanted instead.
+right away, and Moe's cannot be reached. The developer of the private fork says he did not change
+scripts for this (only for FNAF, which uses the UGX mod).
 
-Checked and identical to PC: all 675 path nodes (type, `targetname`, `script_noteworthy`, `target`,
-`animscript`, origin, link count), the clip map's brushes, BSP nodes, leaf brush trees and the 191
-brush submodels (zone volumes and triggers). 14 path nodes are reported "in solid" at load; the same
-brushes contain those points in the PC map, so that comes from the map. Found and fixed since: the
-dogs had none of their animations (run, walk, turns, window jumps, pain), and the airstrike's
-rockets never flew. One Watson log also shows "AI (entity 484, origin -408.7 452.1 1522.9) couldn't
-find path to goal" inside the house.
+Cause, reproduced in Xenia with logging copies of the map's scripts (see the toolbox): the
+console's `patch.ff` (the title update's) has Der Riese's `maps/_zombiemode_zone_manager.gsc`; the
+DLC3 modding kit's changed one comes in The Simpsons' `mod.ff`. The game runs the first script of a
+name it loads, so the console ran Der Riese's; the PC runs the mod's (mod zone and files win). When
+no enabled zone has a player in it, the kit's makes `level.DLC3.initialZones[0]` active, Der
+Riese's `receiver_zone`. The Simpsons' door into the TV room (`door5`) sets `enter_zone4`, which no
+zone waits for (the map's zone setup connects `zone4` with `enter_zone3`: a mapper's slip, the same
+on PC), so a player there left no zone active, no spawner (`round_spawning` returns without setting
+`zombie_total`), and each round ended 11 seconds after it started; dog rounds had no dog locations,
+the dogs stayed at their spawner (64 56 1512) until the 30 second failsafe killed them.
+`keep_mod_scripts` (scripts.py) gives such a script of the mod a name of its own
+(`..._mod.gsc`) and the map's scripts call it by that name. After the fix, the same scenario:
+`initial_zone` active, 14 spawners, rounds of 60-80 seconds, a dog round with the dogs reaching the
+player.
 
-Next: retest with a map converted after `92dc353`; with `log_console` on, collect the log of a game
-where rounds skip; read the map's spawning scripts (`maps/_zombiemode.gsc`, `_zombiemode_spawner_tom.gsc`
-in its `.iwd`, the zone manager if any) for what kills zombies or ends a round without kills (the
-failsafe that kills zombies that do not move for 30 seconds is a suspect); check that zones become
-active when the player enters them (`info_volume` touching) and that the TV room's entrance nodes
-and windows are linked; compare what the console's own versions of the stock scripts they call do
-(`wall_hop.gsc` is taken from the game's zones: 16 of the map's traverse nodes use it).
+Ruled out on the way: path nodes and their links, the path visibility table and node tree
+(identical to PC, as they are between PC Aztec and CoD Xenon's), zone volumes (`IsTouching` finds
+the player in all 20), the traversal animations. The mod's `_laststand.gsc`, `_loadout.gsc` and
+`_debug.gsc` stay the game's (the game's own `_load.gsc` or `_arcademode.gsc` calls them): what the
+mapper changed in them is lost on the console, not looked into.
+
+Next: Moe's (not looked into); a console test of rounds in the TV room and of dog rounds.
 
 ### 3. Dead Sand: crash a few seconds into the game
 
@@ -278,15 +284,19 @@ the map's alias use the game's own stream from the disc.
 - The image load def is loaded with a follow pointer (-1) where the game's own zones use insert
   (-2); harmless so far.
 - Volume maps are still references.
-- The scrolling fix of the Custom Maps menu (`d21e503`) awaits a test on the maintainer's build.
+- Two tests fail on Windows only, before and after this work: `test_encoder_pipeline_matches_cod_xenon`
+  runs a fake encoder script Windows cannot start (WinError 193), and
+  `test_install_from_zip_in_downloads` finds the installed Xbox 360 SDK's `xma2encode.exe` first.
 
 ## Next steps
 
-1. Reconvert The Simpsons and Dead Sand with the branch as it is; test with `log_console` on.
-2. Dead Sand on the console with xbWatson: find and fix the looping script (3).
-3. The Simpsons: the window crash (1) and the round skips (2), with logs from the new build.
-4. Stock assets: named materials, then the PC game's fastfiles as a source (4).
-5. A known complex map next, once these are done.
+1. The Simpsons on a console: the window crash (1) after an airstrike and barrier repairs, rounds
+   in the TV room and dog rounds (2); then Moe's (2).
+2. Dead Sand in Xenia with `log_console` and `thread_watch` (the logging copies of the toolbox can
+   find the looping script): find and fix the looping script (3). Its scripts may be shadowed by
+   the game's zones too (the conversion now warns about the mod's).
+3. Stock assets: named materials, then the PC game's fastfiles as a source (4).
+4. A known complex map next, once these are done.
 
 ## Investigation toolbox
 
@@ -323,6 +333,27 @@ How the checks above were made, to repeat them:
 - **Logs.** The Xenia log and xbWatson carry the game's console with `log_console`; script
   errors are prefixed `[codxe][T4 SP] script error:`; "Could not load <type> "<name>"" lists
   assets looked up by name that no zone has.
+- **Logging what scripts do, in game.** CoD Xe loads any script from the active mod's folder
+  (`_codxe\t4\mods\mod_menu\maps\...`) instead of the zones' (the log says "GSCLoader: Loaded
+  override script"). A copy of a map's script (from `rawfile_text` of the converted zone) with
+  `setDvar("t4ff_dbg", ...)` lines added logs to the Xenia log, which records every dvar change
+  ("dvar set t4ff_dbg ..."); the mod's `maps\_music.gsc` (`music_init`, which every SP map runs)
+  can start a test script (teleports with `setOrigin`, `player.god = true`, killing zombies near the
+  player as a player would). An override replaces the script for every map: remove them after.
+  This found the round skips (zone states, spawner count and the failsafe kills per round).
+- **Driving Xenia.** Xenia takes its settings as arguments (`--keyboard_mode=1
+  --keyboard_user_index=1 --log_file=...`): with a controller plugged in, the keyboard on the
+  second slot presses START, which makes it the game's controller. Keys (the config's `[HID.Key]`):
+  A `;`, B `'`, X `L` (use), START `X`, left stick W/A/S/D (the menus follow it; the D-pad needs
+  Caps Lock), right stick the arrows; hold keys ~0.3 s and wait ~1.2 s between menu moves. A
+  script sending keys (`keybd_event`) and grabbing the window (PIL `ImageGrab`) got from the title
+  screen to a loaded map unattended; the test script's log lines tell it when to press use (to buy
+  a door). Shift + ` opens the game's console in keyboard mode 2 (passthrough) only.
+- **The game's code.** An IDA database of the disc's `default.xex` (not TU7: addresses differ from
+  CoD Xe's) is next to it (`default.xex.id0` ...). `idat.exe -A -S"script.py args" default.xex.i64`
+  on a copy runs IDAPython in batch (Hex-Rays for PPC is there): find a string's function, its
+  callers, decompile, or scan instructions for a structure offset (how the dynamic shadow texture's
+  writers were found).
 
 Format facts learned in this work that are not in the README:
 
@@ -333,7 +364,14 @@ Format facts learned in this work that are not in the README:
   (1 lit model, 2 unlit model). A technique set copied from another map only has the shaders of the
   vertex declarations that map used. `worldVertFormat` of the set picks the world declaration.
 - **Code textures**: the PC and the private fork number them differently after `0xB`; do not trust
-  either for the console without checking a technique's use.
+  either for the console without checking a technique's use. On the console `0x3` is model
+  lighting, `0x7` the sun shadow map, `0x8` the spot shadow map, `0x11` the light attenuation
+  cookie and `0x12` the dynamic shadow texture (the sun lit techniques' shadow; per object).
+  `techsets.SECTIONS` lists the section of every code argument the game's technique sets use.
+- **Scripts the game's zones shadow**: the console's `common.ff` has 24 scripts The Simpsons carries
+  (the PC mod tools' copies of stock scripts in its `_patch.ff`, all different, all the game's on
+  the console as on PC), `patch.ff` has the stock zombie maps' level scripts and Der Riese's zone
+  manager.
 - **Alias pointers** point to a pointer slot (index 1: the insert slot of an asset loaded inline);
   an asset the PC map loads inline in one asset is aliased by later ones. When the first one is
   replaced by a reference, the first alias in load order must load it (`adopt_orphans`).

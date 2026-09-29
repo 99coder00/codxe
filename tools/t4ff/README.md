@@ -267,6 +267,23 @@ to each rocket for its explosion sounds, so on the console its rockets flew
 nowhere and hurt no one. The converted scripts spawn a `script_origin`, the
 entity made for that (`linkTo`, `playSound`).
 
+The game runs the first script of a name it loads, and the console loads its
+own zones before the map, so a script both have is the game's there; on PC, with
+the map's mod active, the mod's scripts (its `mod.ff`, its own files) win
+instead. The console's `patch.ff` has Der Riese's
+`maps/_zombiemode_zone_manager.gsc`, and maps made with the DLC3 modding kit
+ship a changed one in the mod: when no enabled zone has a player in it, the
+kit's makes the map's first zone active, Der Riese's its `receiver_zone`, which
+other maps have not. With the game's, a player of The Simpsons in the room with
+the TV (its door enables no zone) left no zone active, so no spawner: the rounds
+ended as they started, five at a time, and the dogs stayed where they spawned
+until the failsafe killed them. A script of the mod that the game's zones have
+too gets a name of its own (`maps/_zombiemode_zone_manager_mod.gsc`), and the
+map's scripts call it by that name. Not when a script of the game's that the map
+runs calls it too (the game's `maps/_load.gsc` calls `maps/_laststand.gsc`), nor
+for scripts the engine runs by name (animscripts, client scripts): the
+conversion warns about those, which stay the game's.
+
 Some errors in the console log come from the PC map itself and are harmless:
 PC Aztec's zombie type names a `walther` sidearm zombies never draw, and
 `collision_geo_32x32x128` is precached but never used.
@@ -392,7 +409,15 @@ CoD Xenon's conversion of it, asset by asset:
   encoding; the table only keeps the entries of the console technique set's
   techniques. Technique sets carry console shaders (a cached part and a
   32-byte-aligned physical part; a pass holds one vertex shader per vertex
-  format), so they come from console fastfiles.
+  format), so they come from console fastfiles. A pass lists its shader
+  arguments per primitive, per object, then stable (set once when the pass is
+  set up); the game's own technique sets always put a code argument in the same
+  section. CoD Xenon's have the dynamic shadow texture (code sampler 0x12, which
+  the sun lit techniques sample) among the stable arguments, but the game only
+  sets that texture before the per object arguments of what it draws lit: read
+  earlier, it can still be unset, and the game stops with "Tried to use '(null)'
+  when it isn't valid ... techType=10" (The Simpsons, at a window of the house).
+  Copied technique sets get their code arguments moved to the game's sections.
 - **Animations** have 12 part types: 7 rotation types (the full quaternion
   types exist in a 32-bit and a precise 48-bit variant), 4 translation types
   and all. Quaternions are packed as "smallest components": sign and index of
@@ -474,20 +499,21 @@ python dev/verify_samples.py path/to/console/*.ff   # updates t4ff/defs/x360_ver
 | --- | --- |
 | Aztec | plays |
 | Zombie Woods (2008) | plays, with a title card loading screen |
-| The Simpsons (2010) | plays; voices and music box work. Known problems below |
+| The Simpsons (2010) | plays; voices, music box, rounds and dog rounds work. Known problems below |
 | Dead Sand (2009) | converts and loads, then crashes after a few seconds |
 
 ### Known problems
 
-- **The Simpsons crashes at the first window of the house** at times, with "Tried to use '(null)'
-  when it isn't valid. Material='mc/berlin_window_browirglas', tech='lp_sun_b0c0d0n0s0_dtex_sm3',
-  techType=10". The door model, its material and its technique set convert exactly as in CoD
-  Xenon's maps that have the same door; a texture the renderer supplies itself (model lighting,
-  shadows or the reflection probe) is missing when the glass is drawn in sunlight. Not solved.
-- **The Simpsons skips rounds**, does not use the TV room's barriers, its AI does not always find a
-  way in, dogs die as they spawn, and Moe's cannot be reached. The world's paths and collision
-  convert exactly as on PC; the dogs had none of their animations (fixed) and the rocket barrage
-  failed (fixed). The rest is not solved.
+- **The Simpsons' crash at the first window of the house** ("Tried to use '(null)' when it isn't
+  valid. Material='mc/berlin_window_browirglas', tech='lp_sun_b0c0d0n0s0_dtex_sm3',
+  techType=10") came from CoD Xenon's technique sets reading the dynamic shadow texture before the
+  game sets it (fixed, see the technique sets above). Not seen again in Xenia, but not reproduced
+  before the fix either: to confirm on a console.
+- **The Simpsons' round skips** in the room with the TV, the zombies that did not find a way in and
+  the dogs that died where they spawned came from Der Riese's zone manager of the console's
+  `patch.ff` running instead of the mod's (fixed, see the scripts above; checked in Xenia). Moe's
+  cannot be reached: not looked into yet. The mod's `_laststand.gsc`, `_loadout.gsc` and
+  `_debug.gsc` stay the game's (the conversion warns).
 - **Dead Sand crashes Xenia** ("Overflowed stackpoints!") a few seconds into a game, most likely a
   script that loops forever (as The Simpsons' zipline setup did before its fix). Not solved.
 - **Stock assets no console fastfile has** stay missing ("Could not load material/fx/xanim" in the

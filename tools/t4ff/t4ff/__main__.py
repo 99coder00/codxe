@@ -326,6 +326,15 @@ def _convert_map(args, paths, options, map_files, out_dir):
     from .scripts import missing_scripts_zone, override_scripts
 
     override_scripts(pc(), [c.zone for c in convs], map_files)
+    # scripts the PC game takes from the mod (its mod.ff, its own files) over the game's own
+    from .scripts import _rawfiles, normalize
+
+    mod_scripts = set()
+    for path, conv in zip(paths, convs):
+        for script, _ in _rawfiles(pc(), conv.zone):
+            key = normalize(script)
+            if not script.startswith(",") and (os.path.basename(path).lower() == "mod.ff" or map_files.read(key) is not None):
+                mod_scripts.add(key)
     # streamed sounds of the game's own the console's disc does not have (Der Riese's...): from the
     # PC game's files, before the aliases are converted (they point to the files found next to the map)
     if options.xma_encoder is not None and getattr(options.xma_encoder, "available", False) and options.sounds_dir:
@@ -347,6 +356,10 @@ def _convert_map(args, paths, options, map_files, out_dir):
     extra = named_assets_zone(x360(), main_zone, [map_files, IwdLibrary(args.iwd)], convs[0].console_library)
     if extra is not None:
         main_zone = merge_zones(x360(), [main_zone, extra], log=lambda msg: None)
+    # the mod's scripts that the game's own zones have too run under their own names (see scripts.py)
+    from .scripts import keep_mod_scripts
+
+    keep_mod_scripts(x360(), main_zone, mod_scripts, convs[0].console_library, f"maps/{options.map_name}.gsc")
     if convs[0].console_library is not None:
         from .merge import drop_frontend_menus
 
@@ -360,6 +373,10 @@ def _convert_map(args, paths, options, map_files, out_dir):
     # the modding kits' setups stop at missing entities, as their authors meant (see scripts.py)
     fix_modder_help(x360(), main_zone)
     spawn_script_origins(x360(), main_zone)
+    # technique sets copied from CoD Xenon's maps read the dynamic shadow texture before it is set
+    from .techsets import fix_argument_sections
+
+    fix_argument_sections(x360(), main_zone)
     prune_references(x360(), main_zone)
     if args.max_loaded_sounds or args.loaded_sound_memory:
         from .audio import LoadedXma
