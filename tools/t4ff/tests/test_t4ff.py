@@ -527,6 +527,39 @@ death
             write_usermap_scripts({}, out, log=lambda msg: None)
             self.assertFalse(os.path.exists(os.path.join(out, "scripts")))
 
+    def test_options_asked_in_game(self):
+        """The map's options are asked as the level starts: the level script precaches their menus
+        and the restart menu first thing, starts the thread asking them, and gets its functions; a
+        second run changes nothing."""
+        from unittest import mock
+
+        from t4ff.scripts import make_rawfile, options_script, rawfile_text
+
+        p, template = self._rawfile_template()
+        level = b"#include maps\\_utility;\r\nmain()\r\n{\r\n\tmaps\\_zombiemode::main();\r\n}\r\nloadout()\r\n{\r\n\tself OpenMenu(\"loadout\");\r\n}\r\n"
+        briefing = b'connect()\n{\n\tself openMenu( "briefing" );\n\tself closeMenu( "briefing" );\n}\n'
+        files = [("maps/mymap.gsc", make_rawfile(p, template, "maps/mymap.gsc", level)),
+                 ("maps/_callbackglobal.gsc", make_rawfile(p, template, "maps/_callbackglobal.gsc", briefing))]
+        options = [{"dvar": "philmod_gamemode", "label": "Difficulty", "default": "2", "choices": [("0", "Easy"), ("2", "Default")]}]
+        menus = ["t4ff_option0", "t4ff_options_restart"]
+        with mock.patch("t4ff.scripts._rawfiles", lambda p, z: files):
+            self.assertTrue(options_script(p, None, "maps/mymap.gsc", options, menus, log=lambda msg: None))
+            self.assertFalse(options_script(p, None, "maps/mymap.gsc", options, menus, log=lambda msg: None))
+            self.assertFalse(options_script(p, None, "maps/mymap.gsc", options, menus[:1], log=lambda msg: None))
+        text = rawfile_text(files[0][1])
+        self.assertTrue(text.startswith(b"#include maps\\_utility;\r\nmain()\r\n{\r\n\t// t4ff: the map's options: asked as the level starts (t4ff_options)\r\n"
+                                        b'\tPrecacheMenu( "t4ff_option0" );\r\n\tPrecacheMenu( "t4ff_options_restart" );\r\n'
+                                        b'\tlevel.t4ff_asking = GetDvar( "t4ff_options_restart" ) != "1";\r\n'
+                                        b"\tlevel thread t4ff_options();\r\n\r\n\tmaps\\_zombiemode::main();\r\n}\r\n"))
+        # the map's menus wait for the options: they open through t4ff_open_menu
+        self.assertIn(b'\tself t4ff_open_menu("loadout");\r\n', text)
+        # other scripts keep theirs (a call into the level script is one more script reference)
+        self.assertEqual(rawfile_text(files[1][1]), briefing)
+        self.assertIn(b"\tplayer OpenMenu( menu_name );\r\n", text)  # the options' own menus open at once
+        self.assertIn(b'\tif( t4ff_ask( player, "t4ff_option0", "philmod_gamemode" ) )\r\n\t\tchanged = true;\r\n', text)
+        self.assertIn(b'\t\tplayer OpenMenu( "t4ff_options_restart" );\r\n', text)
+        self.assertNotIn(b"\r\r", text)
+
     def test_menu_dvar_defaults(self):
         """PhilMod's main menu sets its difficulty (philmod_gamemode 2) before the map loads; the
         console shows the game's menus, so the level script sets it when nothing did. Dvars set to
@@ -1275,6 +1308,85 @@ class MenuTests(unittest.TestCase):
         self.assertIsNone(text(items[0], focus_off))
         # a menu the scripts do not name
         self.assertIsNone(other_items[0].relocs.get(key_off))
+
+    def test_mod_options_for_the_custom_maps_menu(self):
+        """PhilMod's main menu chooses its difficulty (a multiple choice item bound to philmod_gamemode,
+        which the level script reads; the menu sets 2 on open): options.txt lists it for CoD Xe's
+        Custom Maps menu, with the label of its row in another menu ("Difficulty:"). Choices bound to
+        dvars no script reads are left out."""
+        import os
+        import struct
+        import tempfile
+
+        from t4ff.commands import find_field
+        from t4ff.layout import TypeRef
+        from t4ff.menu import menu_options, write_options
+        from t4ff.platforms import pc
+        from t4ff.zone import BLOCK_VIRTUAL, Node, Ptr, Zone
+
+        p = pc()
+        mrec, irec, wrec, mdef = p.record("menuDef_t"), p.record("itemDef_s"), p.record("windowDef_t"), p.record("multiDef_s")
+        rect_off = find_field(irec, "window").offset + find_field(wrec, "rect").offset
+
+        def record(name):
+            node = Node(TypeRef("record", name, p.record(name).size), 1, BLOCK_VIRTUAL)
+            node.data = bytearray(p.record(name).size)
+            return node
+
+        def string(text):
+            node = Node(TypeRef("scalar", "char", 1, 1), len(text) + 1, BLOCK_VIRTUAL)
+            node.string = True
+            node.data = bytearray(text.encode("latin-1") + b"\0")
+            return node
+
+        def point(owner, off, target):
+            owner.relocs[off] = Ptr("follow", target)
+            owner.children.append(target)
+
+        def item(item_type, y, text=None, dvar=None, choices=()):
+            it = record("itemDef_s")
+            struct.pack_into("<i", it.data, find_field(irec, "type").offset, item_type)
+            struct.pack_into("<4f", it.data, rect_off, 30, y, 200, 22)
+            if text:
+                point(it, find_field(irec, "text").offset, string(text))
+            if dvar:
+                point(it, find_field(irec, "dvar").offset, string(dvar))
+            if choices:
+                multi = record("multiDef_s")
+                for k, (name, value) in enumerate(choices):
+                    point(multi, find_field(mdef, "dvarList").offset + 4 * k, string(name))
+                    struct.pack_into("<f", multi.data, find_field(mdef, "dvarValue").offset + 4 * k, value)
+                struct.pack_into("<i", multi.data, find_field(mdef, "count").offset, len(choices))
+                point(it, find_field(irec, "typeData").offset, multi)
+            return it
+
+        def menu(items):
+            m = record("menuDef_t")
+            array = Node(TypeRef("pointer", "itemDef_s", 4, 4), len(items), BLOCK_VIRTUAL)
+            array.data = bytearray(4 * len(items))
+            for i, it in enumerate(items):
+                point(array, 4 * i, it)
+            point(m, find_field(mrec, "items").offset, array)
+            struct.pack_into("<i", m.data, find_field(mrec, "itemCount").offset, len(items))
+            return m
+
+        difficulty = [("Easy", 0), ("Medium", 1), ("Default", 2), ("Insane", 3), ("Overkill", 4)]
+        main = menu([item(12, 138, dvar="philmod_gamemode", choices=difficulty), item(12, 170, dvar="unread_option", choices=[("A", 0), ("B", 1)])])
+        lobby = menu([item(0, 300, text="Difficulty:"), item(12, 300, dvar="philmod_gamemode", choices=difficulty), item(0, 340, text="Other:")])
+        root = Node(TypeRef("record", "MenuList"), 1, BLOCK_VIRTUAL)
+        root.children = [main, lobby]
+        zone = Zone(p.name, [], [], [], 0, 0, None, None)
+        zone.extra_root = root
+        options = menu_options(p, [zone], {"philmod_gamemode"}, {"philmod_gamemode": {"2"}})
+        self.assertEqual(options, [{"dvar": "philmod_gamemode", "label": "Difficulty", "default": "2",
+                                    "choices": [("0", "Easy"), ("1", "Medium"), ("2", "Default"), ("3", "Insane"), ("4", "Overkill")]}])
+        with tempfile.TemporaryDirectory() as out:
+            path = write_options(options, out, log=lambda msg: None)
+            with open(path, encoding="latin-1") as f:
+                self.assertEqual(f.read(), "option philmod_gamemode 2 Difficulty\nchoice 0 Easy\nchoice 1 Medium\nchoice 2 Default\n"
+                                           "choice 3 Insane\nchoice 4 Overkill\n")
+            self.assertIsNone(write_options([], out, log=lambda msg: None))  # none: an earlier one goes
+            self.assertFalse(os.path.exists(path))
 
     def test_dynamic_map_list(self):
         """The Nazi Zombies map list of CoD Xenon's patch_ui.ff: the stock rows stay, the 13 rows of

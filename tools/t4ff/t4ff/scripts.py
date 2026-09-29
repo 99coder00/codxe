@@ -370,6 +370,15 @@ _GETDVAR = re.compile(rb'\bgetdvar(?:int|float)?\s*\(\s*"(\w+)"\s*\)', re.I)
 _MENU_DVAR_MARK = b"// t4ff: the options the map's own menus set on PC, which the console does not show"
 
 
+def script_dvars(p: Platform, zone: Zone) -> Set[str]:
+    """The dvars the zone's scripts read by name (GetDvar( "name" ), lowercase)."""
+    read = set()
+    for name, node in _rawfiles(p, zone):
+        if not name.startswith(",") and name.lower().endswith(SCRIPT_EXTENSIONS) and _buffer(node) is not None:
+            read.update(m.group(1).decode("latin-1").lower() for m in _GETDVAR.finditer(_blank_comments(rawfile_text(node))))
+    return read
+
+
 def menu_dvar_values(zone: Zone) -> Dict[str, Set[str]]:
     """{dvar: values} the menus' scripts (every string of ``zone``) set with literal values."""
     values: Dict[str, Set[str]] = {}
@@ -416,6 +425,101 @@ def menu_dvar_defaults(p: Platform, zone: Zone, menu_values: Dict[str, Set[str]]
     set_rawfile_text(p, nodes[level_script], level_text[: body[0]] + insert + level_text[body[0] :])
     log(f"scripts: dvars the map's own menus set on PC get their value when unset ({', '.join(f'{d} {v}' for d, v in defaults.items())})")
     return defaults
+
+
+# The map's options asked in game (menu.py, add_options_menus): the level script precaches their
+# menus and, on a fresh start, asks each one as the player connects. A script opening a menu replaces
+# the one open, so the level script's own start menus (PhilMod's weapon choice, which opens as the
+# player connects too) wait for the answers: it opens menus through t4ff_open_menu(), which waits
+# while the options are asked. A changed choice restarts the level with it (the restart asks
+# nothing, and the map's menus open as usual); B keeps the choice.
+_OPTIONS_MARK = b"// t4ff: the map's options"
+_OPEN_MENU = re.compile(rb"(?<![\w:])OpenMenu(?=\s*\()", re.I)
+_OPTIONS_FUNCTIONS = rb"""
+// t4ff: the map's options, which the menus of its mod choose on PC, asked as it starts
+t4ff_options()
+{
+	if( GetDvar( "t4ff_options_restart" ) == "1" )
+	{
+		SetDvar( "t4ff_options_restart", "0" );
+		return;
+	}
+	players = GetPlayers();
+	while( players.size == 0 )
+	{
+		wait( 0.05 );
+		players = GetPlayers();
+	}
+	player = players[0];
+	changed = false;
+%(questions)s	if( changed )
+	{
+		SetDvar( "t4ff_options_restart", "1" );
+		player OpenMenu( "%(restart)s" );
+		return;
+	}
+	level.t4ff_asking = false;
+}
+
+t4ff_ask( player, menu_name, dvar )
+{
+	player OpenMenu( menu_name );
+	for( ;; )
+	{
+		player waittill( "menuresponse", menu, response );
+		if( menu == menu_name )
+			break;
+	}
+	player CloseMenu( menu_name );
+	if( response == "keep" || response == GetDvar( dvar ) )
+		return false;
+	SetDvar( dvar, response );
+	return true;
+}
+
+// t4ff: the map's scripts open their menus once the options are asked
+t4ff_open_menu( menu_name )
+{
+	while( IsDefined( level.t4ff_asking ) && level.t4ff_asking )
+		wait( 0.05 );
+	self OpenMenu( menu_name );
+}
+"""
+
+
+def options_script(p: Platform, zone: Zone, level_script: str, options: Sequence[dict], menus: Sequence[str], log=print) -> bool:
+    """The level script asks the map's options in game, and the map's scripts open their menus once
+    they are asked (see above): ``menus`` are the options' menus, in their order, and the restart
+    menu last (menu.add_options_menus)."""
+    nodes = {normalize(name): node for name, node in _rawfiles(p, zone) if not name.startswith(",") and _buffer(node) is not None}
+    level_script = level_script.lower()
+    if level_script not in nodes or len(menus) != len(options) + 1:
+        return False
+    text = rawfile_text(nodes[level_script])
+    body = _function_body(text, "main")
+    if _OPTIONS_MARK in text or body is None:
+        return False
+    # the menus the level script opens wait for the options (a call of its own: a call from other
+    # scripts into the level script is one more of the compiler's script references, whose number is
+    # limited, "MAX_PRECACHE_ENTRIES exceeded": PhilMod's scripts are close to it)
+    waiting = len(_OPEN_MENU.findall(_blank_comments(text)))
+    text = _OPEN_MENU.sub(b"t4ff_open_menu", text)
+    body = _function_body(text, "main")
+    newline = b"\r\n" if b"\r\n" in text else b"\n"
+    start = [b"\t" + _OPTIONS_MARK + b": asked as the level starts (t4ff_options)"]
+    start += [f'\tPrecacheMenu( "{menu}" );'.encode("latin-1") for menu in menus]
+    start.append(b'\tlevel.t4ff_asking = GetDvar( "t4ff_options_restart" ) != "1";')
+    start.append(b"\tlevel thread t4ff_options();")
+    questions = b"".join(f'\tif( t4ff_ask( player, "{menu}", "{option["dvar"]}" ) )\n\t\tchanged = true;\n'.encode("latin-1")
+                         for menu, option in zip(menus, options))  # fmt: skip
+    functions = _OPTIONS_FUNCTIONS % {b"questions": questions, b"restart": menus[-1].encode("latin-1")}
+    text = text[: body[0]] + newline + newline.join(start) + newline + text[body[0] :]
+    if not text.endswith(b"\n"):
+        text += newline
+    set_rawfile_text(p, nodes[level_script], text + functions.replace(b"\n", newline))
+    log(f"scripts: {level_script} asks the map's options as it starts ({', '.join(o['label'] for o in options)}); "
+        f"the {waiting} menus it opens wait for them")
+    return True
 
 
 # Treyarch's first zombie scripts (Nacht, and maps made with the first mod tools) hurry the last

@@ -414,6 +414,25 @@ def _convert_map(args, paths, options, map_files, out_dir):
     # which CoD Xe loads in place of the game's (after the fixes above, which they have too)
     from .scripts import usermap_scripts, write_usermap_scripts
 
+    # options the mod's own front end menus choose (PhilMod's difficulty): the Custom Maps menu shows them
+    from .menu import menu_options, write_options
+    from .scripts import script_dvars
+
+    pc_values = {}
+    for conv in convs:
+        for dvar, values in menu_dvar_values(conv.zone).items():
+            pc_values.setdefault(dvar, set()).update(values)
+    map_options = menu_options(pc(), [c.zone for c in convs], script_dvars(x360(), main_zone), pc_values)
+    write_options(map_options, out_dir)
+    # and asked in game as the level starts, for players without that menu (before the scripts
+    # folder is written: the menus its scripts open wait for the options too)
+    if map_options:
+        from .menu import add_options_menus
+        from .scripts import options_script
+
+        menus = add_options_menus(x360(), main_zone, convs[0].console_library, map_options)
+        if menus:
+            options_script(x360(), main_zone, f"maps/{options.map_name}.gsc", map_options, menus)
     write_usermap_scripts(usermap_scripts(x360(), main_zone, mod_scripts, convs[0].console_library, renamed), out_dir)
     return main_zone, getattr(convs[0], "planned_texture_bytes", 0)
 

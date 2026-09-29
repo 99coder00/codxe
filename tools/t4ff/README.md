@@ -278,9 +278,26 @@ their action runs when the focus arrives, and A on one confirms it. A sends one
 answer only: a script waiting for them in a loop gets one per frame.
 
 Mods choose their options in their own front end menus (PhilMod's difficulty,
-`philmod_gamemode`), which the console does not show: a dvar the map's scripts
-read that the map's menus set to one value gets it at the start of the level
-script when unset (Mini-Labor plays on "Default", not "Easy").
+`philmod_gamemode`), which the console does not show. The multiple choice items
+of the mod's menus bound to dvars the map's scripts read go to the map's
+`options.txt` (the choices, the value the menus set as the default, the label of
+the item's row): CoD Xe's Custom Maps menu shows them for the focused map
+("Difficulty: Default (X)"), X and Y change them, and the map's row sets them
+before loading it. The map also asks them in game, whatever menu started it: a
+copy of the game's own difficulty list (`popmenu_difficulty` of `common.ff`,
+always loaded; `t4ff_option0`, ... in a menu list of the map) opens as the player
+connects, its rows the option's choices, the current one focused. A script
+opening a menu replaces the one open, so the menus the level script opens
+(PhilMod's weapon choice) wait for the answers (`t4ff_open_menu`); only the level
+script's: a call from another script into the level script is one more of the
+script compiler's references, whose number is limited ("MAX_PRECACHE_ENTRIES
+exceeded", which PhilMod's scripts are close to). B keeps the current choice.
+The level script reads the options once, as it starts, so a changed choice
+restarts the level with it: a second menu runs `fast_restart` as it opens, as the
+pause menu's Restart Level does (the game's scripts have no `map_restart`), and
+the restarted level asks nothing. Until a choice, a dvar the map's scripts read
+that the map's menus set to one value gets it at the start of the level script
+when unset (Mini-Labor starts on "Default", not "Easy").
 
 Maps made with Sparks' DLC2 / DLC3 modding kits check their entities with
 `modderHelp()`, whose setups are meant to stop when one is missing, but it only

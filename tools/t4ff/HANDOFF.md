@@ -167,7 +167,7 @@ confirmed in Xenia with CoD Xe r422: up from the first row goes to the last, 7-1
 **CoD Xe (T4 SP).** `log_console` (console and script errors to the debug output), `thread_watch`
 (where a stuck thread is), `startup_command` (a console command run once the main menu is up, e.g.
 `devmap <map>`), a usermap's own versions of the game's scripts (`usermaps/<map>/scripts/`, loaded in
-place of the zones' copies), the dynamic usermaps list, a mod menu entry for music boxes, VS2010
+place of the zones' copies), a usermap's options in the Custom Maps menu (`options.txt`), the dynamic usermaps list, a mod menu entry for music boxes, VS2010
 build script.
 
 ## Maps tested in game
@@ -342,7 +342,23 @@ ballistic knife, crossbow, traps, an objective ending, five difficulties). Fixed
   centre within its height) and to the left, left only when it is; down/right likewise with the
   next item (`sub_82263908`). Item_HandleKey is `sub_822619E8`.
 - **Blurry menus**: the texture budget reduces 2D materials' images last (`_ui_images`, assets.py).
-- **Easy instead of Default**: `menu_dvar_defaults` (scripts.py).
+- **Easy instead of Default**, and no difficulty choice: PhilMod's main menu chooses it (a multiple
+  choice item, `philmod_gamemode` 0 to 4). `menu_options` (menu.py) writes the map's `options.txt`
+  from the PC menus; CoD Xe's Custom Maps menu shows the focused map's options (X / Y change them,
+  usermaps.cpp) and its row sets them before `devmap` (the Custom Maps menu is built on CoD Xenon's
+  `patch_ui.ff`, not released without its author's permission). The map also asks them in game
+  (`add_options_menus`, menu.py; `options_script`, scripts.py): a copy of the game's
+  `popmenu_difficulty` (common.ff) opens over the weapon choice; a changed choice sets the dvar and
+  opens a menu running `fast_restart` (single player scripts have no `map_restart`: "unknown
+  function"), and the restarted level asks nothing (`t4ff_options_restart`). Checked in Xenia:
+  Insane chosen, the level restarts, PhilMod's game mode 3, the weapon choice follows. First opened
+  2 seconds in, it replaced the weapon choice (a script's OpenMenu closes the open script menu):
+  PhilMod waited for an ACCEPT that could not come, no gun, no round (tester). It now opens as the
+  player connects and the level script's own OpenMenu calls wait for it (`t4ff_open_menu`). Waiting
+  in PhilMod's `_callbackglobal` and music box too (calls into the level script) overflowed the
+  script compiler's 1024 references ("MAX_PRECACHE_ENTRIES exceeded", `sub_82315AE8`): the level
+  script's calls only. Tester: works.
+  `menu_dvar_defaults` (scripts.py) still gives the menus' default when nothing set it.
 - **Mario's loading screen once the map had loaded**: the mod's menus name `$levelbriefing`, and the
   console library found it in CoD Xenon's `mario_load.ff`; the library now leaves load zones out
   (library.py). Xenia also shows the previous map's loading picture when maps are loaded one after

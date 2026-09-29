@@ -40,6 +40,7 @@ STOCK_MAPS = ("nazi_zombie_prototype", "nazi_zombie_asylum", "nazi_zombie_sumpf"
 FIRST_HIGHLIGHT = 100  # ui_highlight of the dynamic rows (the stock ones use 2 to 5)
 PREVIEW = "image_codxe_map"
 COUNTER_DX = 280.0  # the counter, right of the rows (250 wide)
+OPTIONS_DY = 120.0  # the focused map's options, under its description
 
 # The picture of the focused map when the menu zone has none of its own: CoD Xe copies the map's
 # preview.bin (a 512x288 DXT1 texture, tiled for the console) into this image, which the menu shows.
@@ -501,6 +502,14 @@ def usermaps_menu(editor: MenuEditor, rows: int = ROWS) -> List[Node]:
             tokens = editor.expression(item, "textExp")
             is_title = len(tokens) == 1 and tokens[0] == ("str", template["title"])
             editor.set_expression(copy, "textExp", _dvar_string("ui_codxe_maptitle" if is_title else "ui_codxe_mapdesc"))
+            if not is_title:
+                # the focused map's options (its options.txt: "Difficulty: Default (X)"), under its description
+                options = clone(copy)
+                editor.move(options, OPTIONS_DY)
+                editor.set_expression(options, "textExp", _dvar_string("ui_codxe_mapoptions"))
+                editor.set_expression(options, "visibleExp", _not_empty("ui_codxe_mapoptions"))
+                new_items.append(copy)
+                copy = options
         new_items.append(copy)
 
     dropped = [item for item in items if item not in new_items]
@@ -521,6 +530,9 @@ def usermaps_menu(editor: MenuEditor, rows: int = ROWS) -> List[Node]:
     key_owner = next((item for item in frame if editor.key_handlers(item)), new_items[0])
     editor.add_key_handler(key_owner, KEY_LSHLDR, f'"setdvar" "ui_codxe_scroll" "-{rows}" ; ')
     editor.add_key_handler(key_owner, KEY_RSHLDR, f'"setdvar" "ui_codxe_scroll" "{rows}" ; ')
+    # X / Y: the focused map's next choice of its first / second option (CoD Xe changes it)
+    editor.add_key_handler(key_owner, KEY_BUTTON_X, '"setdvar" "ui_codxe_option" "1" ; ')
+    editor.add_key_handler(key_owner, KEY_BUTTON_Y, '"setdvar" "ui_codxe_option" "2" ; ')
     return dropped
 
 
@@ -1037,3 +1049,244 @@ def controller_navigation(p: Platform, zone: Zone, log=print, script_menus: Opti
     if changed:
         log(f"menus: the D-pad moves between buttons as they are laid out ({', '.join(f'{n} {c}' for n, c in sorted(changed.items()))})")
     return changed
+
+
+# Options a mod chooses in its own front end menus: a multiple choice item bound to a dvar the map's
+# scripts read (PhilMod's difficulty: philmod_gamemode, Easy 0 to Overkill 4, main menu default 2).
+# The console shows its own menus, so they go to the map's options.txt, which CoD Xe's Custom Maps
+# menu shows for the focused map (X / Y change them) and sets before loading the map:
+#   option <dvar> <default value> <label>
+#   choice <value> <name>
+ITEM_TYPE_TEXT, ITEM_TYPE_MULTI = 0, 12
+OPTIONS_FILE = "options.txt"
+
+
+def _format_value(value: float) -> str:
+    return str(int(value)) if value == int(value) else f"{value:g}"
+
+
+def menu_options(p: Platform, zones: List[Zone], read_dvars: Set[str], menu_values: Dict[str, Set[str]]) -> List[dict]:
+    """The options of the PC ``zones``' menus (see above) whose dvars the map's scripts read
+    (``read_dvars``, lowercase): [{dvar, label, default, choices: [(value, name)]}]."""
+    mrec, irec, wrec, mdef = p.record("menuDef_t"), p.record("itemDef_s"), p.record("windowDef_t"), p.record("multiDef_s")
+    items_off, count_off = find_field(mrec, "items").offset, find_field(mrec, "itemCount").offset
+    window = find_field(irec, "window").offset
+    rect_off = window + find_field(wrec, "rect").offset
+    type_off, text_off, dvar_off, data_off = (find_field(irec, f).offset for f in ("type", "text", "dvar", "typeData"))
+    names_off, strs_off, values_off = (find_field(mdef, f).offset for f in ("dvarList", "dvarStr", "dvarValue"))
+    count_off_m, strdef_off = find_field(mdef, "count").offset, find_field(mdef, "strDef").offset
+    options: Dict[str, dict] = {}
+    labels: Dict[str, str] = {}
+    for zone in zones:
+        for menu in zone.extra_root.walk():
+            if menu.type.name != "menuDef_t":
+                continue
+            ptr = menu.relocs.get(items_off)
+            array = ptr.target() if ptr is not None and ptr.kind != "null" else None
+            count = p.u32.unpack_from(menu.data, count_off)[0] if array is not None else 0
+            items = [array.relocs[4 * i].target() for i in range(count) if array.relocs.get(4 * i) is not None and array.relocs[4 * i].kind != "null"]
+            texts = [(item, _text_of(item, text_off)) for item in items if p.u32.unpack_from(item.data, type_off)[0] == ITEM_TYPE_TEXT]
+            for item in items:
+                if p.u32.unpack_from(item.data, type_off)[0] != ITEM_TYPE_MULTI:
+                    continue
+                dvar = (_text_of(item, dvar_off) or "").lower()
+                ptr = item.relocs.get(data_off)
+                multi = ptr.target() if ptr is not None and ptr.kind != "null" else None
+                if dvar not in read_dvars or multi is None:
+                    continue
+                n = p.u32.unpack_from(multi.data, count_off_m)[0]
+                strings = p.u32.unpack_from(multi.data, strdef_off)[0] != 0
+                choices = []
+                for k in range(min(n, 32)):
+                    name = _text_of(multi, names_off + 4 * k)
+                    if strings:
+                        value = _text_of(multi, strs_off + 4 * k)
+                    else:
+                        value = _format_value(struct.unpack_from(p.endian + "f", multi.data, values_off + 4 * k)[0])
+                    if name and value is not None and re.fullmatch(r"[\w.\-]{1,63}", value):
+                        choices.append((value, name))
+                if dvar not in options and len(choices) >= 2:
+                    options[dvar] = {"dvar": dvar, "choices": choices}
+                # its label: a text of the same row ending with ":" ("Difficulty:")
+                y, h = struct.unpack_from(p.endian + "f", item.data, rect_off + 4)[0], struct.unpack_from(p.endian + "f", item.data, rect_off + 12)[0]
+                for other, text in texts:
+                    oy = struct.unpack_from(p.endian + "f", other.data, rect_off + 4)[0]
+                    if text and text.rstrip().endswith(":") and not text.startswith("@") and abs(oy - y) <= max(h, 1.0):
+                        labels.setdefault(dvar, text.rstrip()[:-1].strip())
+    result = []
+    for dvar, option in sorted(options.items()):
+        values = [v for v, _ in option["choices"]]
+        set_by_menus = [v for v in menu_values.get(dvar, ()) if v in values]
+        option["default"] = set_by_menus[0] if len(set_by_menus) == 1 else values[0]
+        option["label"] = labels.get(dvar) or dvar.replace("_", " ").title()
+        result.append(option)
+    return result
+
+
+def write_options(options: List[dict], out_dir: str, log=print) -> Optional[str]:
+    """``out_dir``/options.txt for CoD Xe's Custom Maps menu (see above); an earlier one goes when
+    there are none."""
+    import os
+
+    path = os.path.join(out_dir, OPTIONS_FILE)
+    if not options:
+        if os.path.exists(path):
+            os.remove(path)
+        return None
+    lines = []
+    for option in options:
+        lines.append(f"option {option['dvar']} {option['default']} {option['label']}")
+        lines += [f"choice {value} {name}" for value, name in option["choices"]]
+    with open(path, "w", encoding="latin-1", newline="\n") as f:
+        f.write("\n".join(lines) + "\n")
+    for option in options:
+        names = ", ".join(name for _, name in option["choices"])
+        default = next(name for value, name in option["choices"] if value == option["default"])
+        log(f"options: {option['label']} ({option['dvar']}: {names}; {default} by default) in the Custom Maps menu, X to change")
+    return path
+
+
+# The same options in game, for the maps' players without that menu: a menu of the map (t4ff_option<n>)
+# asks for each at the start, over the map's own start menus, and when a choice changes, the level
+# restarts with it (t4ff_options_restart, whose opening runs fast_restart as the pause menu's
+# Restart Level does: the level script reads the options once, as it starts, and the game's scripts
+# have no map_restart). The menus are the game's own difficulty list (common.ff, always loaded), its
+# rows one per choice.
+OPTIONS_TEMPLATE = "popmenu_difficulty"
+OPTIONS_MENU = "t4ff_option{}"
+OPTIONS_RESTART_MENU = "t4ff_options_restart"
+OPTIONS_ROW_STEP = 24.0  # the rows of the game's difficulty list
+
+
+def _options_template_copy(p: Platform, zone: Zone, library):
+    """A copy of the game's difficulty list for ``zone``, its nested assets name references."""
+    import types
+
+    from .assets import build_reference
+    from .library import Cloner
+    from .zone import ASSET_RECORDS
+
+    found = library.find_in_game_zones("menuDef_t", OPTIONS_TEMPLATE) if library is not None else None
+    if found is None:
+        return None
+    records = {rec: asset_type for asset_type, rec in ASSET_RECORDS.items()}
+    conv = types.SimpleNamespace(dst=p, src=p)
+
+    def reference(rec_name: str, name: str, node: Node):
+        asset_type = records.get(rec_name)
+        return build_reference(conv, asset_type, node, "," + name.lstrip(",")) if asset_type else None
+
+    return Cloner(p, zone.script_strings, reference).copy_asset(found[0], found[1])
+
+
+def _menu_lists_with_inline_menus(p: Platform, zone: Zone) -> List[Node]:
+    rec = p.record("MenuList")
+    lists = []
+    for asset in zone.assets:
+        if asset.type != "menulist" or asset.ptr is None or asset.ptr.kind not in ("follow", "insert"):
+            continue
+        node = asset.ptr.node
+        ptr = node.relocs.get(find_field(rec, "menus").offset)
+        array = ptr.node if ptr is not None and ptr.kind == "follow" else None
+        if array is not None and any(r.kind == "follow" for r in array.relocs.values()):
+            lists.append(node)
+    return lists
+
+
+def _dealias(menu: Node):
+    """Pointers of ``menu`` to asset slots (the rows copied from one row alias its materials) load
+    their own copy of the asset instead: the items holding the slots may be gone. The copies are the
+    game's assets by name only."""
+    for node in list(menu.walk()):
+        changed = False
+        for off, ptr in list(node.relocs.items()):
+            if ptr.kind == "alias" and ptr.slot is not None and ptr.slot.node is not None:
+                copy = clone(ptr.slot.node)
+                node.relocs[off] = _ptr("follow", node, off, copy)
+                copy.extra["ptr"] = node.relocs[off]
+                struct.pack_into(">I", node.data, off, 0xFFFFFFFF)
+                changed = True
+        if changed:
+            _rebuild_children(node)
+
+
+def _append_menu(p: Platform, menu_list: Node, menu: Node):
+    """Load ``menu`` inline in ``menu_list``, after its menus."""
+    rec = p.record("MenuList")
+    array = menu_list.relocs[find_field(rec, "menus").offset].node
+    offset = len(array.data)
+    array.data += b"\xff\xff\xff\xff"
+    array.count += 1
+    array.segments = [(array.segments[0][0], array.count, len(array.data), False)]
+    array.relocs[offset] = _ptr("follow", array, offset, menu)
+    _rebuild_children(array)
+    struct.pack_into(">i", menu_list.data, find_field(rec, "menuCount").offset, array.count)
+
+
+def add_options_menus(p: Platform, zone: Zone, library, options: List[dict], log=print) -> List[str]:
+    """The in game menus of the map's options (see above), in a menu list of the zone. Returns the
+    names of the menus, the restart menu last; none when the zone has no menu list to hold them or
+    the game's difficulty list is not among the console fastfiles."""
+    lists = _menu_lists_with_inline_menus(p, zone)
+    if not options or not lists:
+        return []
+    names = []
+    for index, option in enumerate(options):
+        menu = _options_template_copy(p, zone, library)
+        if menu is None:
+            return []
+        editor = MenuEditor(p, zone, OPTIONS_TEMPLATE, menu=menu)
+        items = editor.items
+        first_button = next((i for i, item in enumerate(items) if editor.string(item, "action")), None)
+        if first_button is None or first_button < 3:
+            raise MenuError(f"unexpected layout of {OPTIONS_TEMPLATE}")
+        row = items[first_button - 3 : first_button + 1]  # backing, highlight, select button hint, button
+        highlight, hint, button = row[1], row[2], row[3]
+        # the frame and title; the descriptions and pictures of the game's difficulties go
+        frame = [item for item in items[: first_button - 3]
+                 if not any(t[0] == "str" for t in editor.expression(item, "visibleExp") + editor.expression(item, "materialExp"))]  # fmt: skip
+        for item in frame:
+            tokens = editor.expression(item, "textExp")
+            if tokens:
+                editor.set_expression(item, "textExp", [(kind, option["label"].upper() if kind == "str" else value) for kind, value in tokens])
+        new_items = list(frame)
+        default = 0
+        for k, (value, name) in enumerate(option["choices"]):
+            copies = [clone(item) for item in row]
+            for copy in copies:
+                editor.move(copy, OPTIONS_ROW_STEP * k)
+            for copy, source in ((copies[1], highlight), (copies[2], hint)):
+                editor.set_expression(copy, "visibleExp", _replace_int(editor.expression(source, "visibleExp"), 1, k + 1))
+            b = copies[3]
+            editor.set_string(b, "window.name", f"t4ff_choice{k}")
+            editor.set_expression(b, "textExp", [(kind, name if kind == "str" else v) for kind, v in editor.expression(button, "textExp")])
+            editor.set_string(b, "action", f'"play" "mouse_click" ; "scriptMenuResponse" "{value}" ; ')
+            focus = re.sub(r'("setLocalVarInt"\s+"ui_highlight"\s+)\d+', rf"\g<1>{k + 1}", editor.string(button, "onFocus") or "")
+            editor.set_string(b, "onFocus", focus)
+            editor.set_string(b, "dvarTest", option["dvar"])
+            editor.set_string(b, "enableDvar", f"{value} ")
+            if value == option["default"]:
+                default = k
+            new_items += copies
+        editor.set_items(new_items)
+        name = OPTIONS_MENU.format(index)
+        editor.set_menu_string("window.name", name)
+        editor.set_menu_string("onOpen", f'"setLocalVarBool" "ui_centerPopup" 1 ; "setfocus" "t4ff_choice{default}" ; "setfocusbydvar" "{option["dvar"]}" ; ')
+        # B keeps the choice (the level script closes the menu, and the map's menus wait for the answer)
+        editor.set_menu_string("onESC", '"scriptMenuResponse" "keep" ; ')
+        _dealias(menu)
+        _append_menu(p, lists[0], menu)
+        names.append(name)
+    # the restart: the frame alone, which runs fast_restart when it opens
+    menu = _options_template_copy(p, zone, library)
+    editor = MenuEditor(p, zone, OPTIONS_TEMPLATE, menu=menu)
+    editor.set_items([item for item in editor.items[:3]])
+    editor.set_menu_string("window.name", OPTIONS_RESTART_MENU)
+    editor.set_menu_string("onOpen", '"exec" "fast_restart" ; ')
+    editor.set_menu_string("onClose", None)
+    editor.set_menu_string("onESC", None)
+    _dealias(menu)
+    _append_menu(p, lists[0], menu)
+    names.append(OPTIONS_RESTART_MENU)
+    log(f"options: asked in game too ({', '.join(o['label'] for o in options)}), at the start: the level restarts when a choice changes")
+    return names
