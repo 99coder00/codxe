@@ -418,6 +418,145 @@ death
         self.assertEqual(text.count(b"modderHelp"), kit.count(b"modderHelp"))  # the calls are left alone
         self.assertEqual(rawfile_text(other), b'init()\n{\n\tif( modderHelp( trig, "Missing." ) )\n\t\treturn;\n}\n')
 
+    def _rawfile_template(self):
+        from t4ff.layout import TypeRef
+        from t4ff.platforms import x360
+        from t4ff.zone import BLOCK_VIRTUAL, Node, Ptr
+
+        p = x360()
+        template = Node(TypeRef("record", "RawFile", p.record("RawFile").size), 1, BLOCK_VIRTUAL)
+        template.data = bytearray(p.record("RawFile").size)
+        buffer = Node(TypeRef("scalar", "char", 1, 1), 1, BLOCK_VIRTUAL)
+        buffer.extra["origin"] = ("member", "RawFile", "buffer")
+        buffer.segments = [(buffer.type, 1, 1, False)]
+        template.relocs[8] = Ptr("follow", buffer)
+        template.children = [buffer]
+        return p, template
+
+    def test_precache_before_waits(self):
+        """Dead Sand's level script calls the zombie mode's main(), which waits for the players, then
+        its own setup, which precaches its rocket barrage: the console refuses precaches after a wait,
+        so the setup's precaches are made at the start of the level script's main() too, and so are
+        those of the zone's models scripts set by name and nothing precaches (its rockets')."""
+        from unittest import mock
+
+        from t4ff.scripts import make_rawfile, precache_before_waits, rawfile_text
+
+        p, template = self._rawfile_template()
+        level = (b"#include maps\\_dead_sand_utility;\r\nmain()\r\n{\r\n\tmaps\\dead_sand_zombiemode::main();\r\n"
+                 b"\tdead_sand_init();\r\n\tlevel thread maps\\_other::setup( 1 );\r\n}\r\n")
+        utility = (b'dead_sand_init()\r\n{\r\n\t// PrecacheItem( "commented_out" );\r\n\tPrecacheItem( "rocket_barrage" );\r\n'
+                   b'\tif( x ) { y(); }\r\n}\r\nother()\r\n{\r\n\tPrecacheItem( "not_called" );\r\n}\r\n')
+        other = b'setup( n )\n{\n\tprecacheShader( "hud_icon" );\n\tprecacheString( &"MAP_HINT" );\n\tPrecacheModel( var );\n}\n'
+        zombiemode = b'main()\n{\n\tPrecacheItem( "colt" );\n\tflag_wait( "all_players_connected" );\n}\n'
+        # models set by name: the zone's that nothing precaches are precached, the others are not
+        rockets = (b'fire()\n{\n\trocket SetModel( "katyusha_rocket" );\n\tbox SetModel( "zombie_box" );\n'
+                   b'\tother SetModel( "not_in_zone" );\n\tSetModel( "katyusha_rocket" );\n}\ninit()\n{\n\tPrecacheModel( "zombie_box" );\n}\n')
+        files = [(n, make_rawfile(p, template, n, t)) for n, t in (("maps/dead_sand.gsc", level), ("maps/_dead_sand_utility.gsc", utility),
+                                                                  ("maps/_other.gsc", other), ("maps/dead_sand_zombiemode.gsc", zombiemode),
+                                                                  ("maps/_rockets.gsc", rockets))]
+        with mock.patch("t4ff.scripts._rawfiles", lambda p, z: files), \
+                mock.patch("t4ff.scripts._model_names", lambda p, z: ["Katyusha_Rocket", "zombie_box"]):
+            added = precache_before_waits(p, None, "maps/dead_sand.gsc", log=lambda msg: None)
+            self.assertEqual(added, ['PrecacheItem( "rocket_barrage" );', 'precacheShader( "hud_icon" );', 'precacheString( &"MAP_HINT" );',
+                                     'PrecacheModel( "katyusha_rocket" );'])
+            self.assertEqual(precache_before_waits(p, None, "maps/dead_sand.gsc", log=lambda msg: None), [])  # once
+        self.assertTrue(rawfile_text(files[0][1]).startswith(
+            b"#include maps\\_dead_sand_utility;\r\nmain()\r\n{\r\n\t// t4ff: the precaches of the setup below, before the level script's first wait\r\n"
+            b'\tPrecacheItem( "rocket_barrage" );\r\n\tprecacheShader( "hud_icon" );\r\n\tprecacheString( &"MAP_HINT" );\r\n'
+            b'\tPrecacheModel( "katyusha_rocket" );\r\n\r\n'
+            b"\tmaps\\dead_sand_zombiemode::main();\r\n"))
+        # the setup's own calls, which would stop it after the wait, are comments
+        self.assertIn(b'\t// PrecacheItem( "commented_out" );\r\n\t/* t4ff: made first in the level script: PrecacheItem( "rocket_barrage" ); */\r\n',
+                      rawfile_text(files[1][1]))
+        self.assertIn(b'PrecacheItem( "not_called" );', rawfile_text(files[1][1]))
+        self.assertIn(b'\t/* t4ff: made first in the level script: precacheShader( "hud_icon" ); */\n\t/* t4ff: made first in the level script: '
+                      b'precacheString( &"MAP_HINT" ); */\n\tPrecacheModel( var );\n', rawfile_text(files[2][1]))
+        self.assertIn(b'\tPrecacheItem( "colt" );\n', rawfile_text(files[3][1]))
+
+    def test_speed_up_zombies_only(self):
+        """speed_up_zombies() gave every axis AI the zombies' sprint (Dead Sand's SS soldiers ran as
+        zombies): it hurries zombies only."""
+        from unittest import mock
+
+        from t4ff.scripts import make_rawfile, rawfile_text, speed_up_zombies_only
+
+        p, template = self._rawfile_template()
+        text = (b'speed_up_zombies()\r\n{\t\r\n\tzombie_stragglers = GetAiArray( "axis" );\r\n\t\r\n\tfor (i=0; i<zombie_stragglers.size; i++)\r\n'
+                b'\t{\r\n\t\tzombie_stragglers[i].zombie_move_speed = "sprint";\r\n\t}\r\n}\r\n')
+        node = make_rawfile(p, template, "maps/_zombiemode_spawner.gsc", text)
+        with mock.patch("t4ff.scripts._rawfiles", lambda p, z: [("maps/_zombiemode_spawner.gsc", node)]):
+            self.assertEqual(speed_up_zombies_only(p, None, log=lambda msg: None), ["maps/_zombiemode_spawner.gsc"])
+            self.assertEqual(speed_up_zombies_only(p, None, log=lambda msg: None), [])
+        self.assertIn(b"\t{\r\n\t\t// t4ff: only zombies\r\n\t\tif( !IsDefined( zombie_stragglers[i].is_zombie ) || !zombie_stragglers[i].is_zombie )\r\n"
+                      b"\t\t\tcontinue;\r\n\r\n\t\tzombie_stragglers[i].zombie_move_speed", rawfile_text(node))
+
+    def test_zombie_idles_for_zombies(self):
+        """The zombie mode replaced the stand and crouch idles of every AI with the zombies' (Dead
+        Sand's soldiers stood with their arms out): on maps with soldiers, the zombie idles get poses
+        of their own that only zombies' stop script plays. Maps with zombies only keep theirs."""
+        from unittest import mock
+
+        from t4ff.scripts import make_rawfile, rawfile_text, zombie_idles_for_zombies
+
+        p, template = self._rawfile_template()
+        text = (b'#include maps\\_utility;\r\n#using_animtree( "generic_human" );\r\nmain()\r\n{\r\n\tinit_animscripts();\r\n}\r\n'
+                b'// anim.idleAnimArray["stand"][0][0] = %ai_zombie_idle_v1_delta;\r\n'
+                b'init_animscripts()\r\n{\r\n\tanimscripts\\init::firstInit();\r\n\r\n'
+                b'\tanim.idleAnimArray\t\t["stand"] = [];\r\n\tanim.idleAnimWeights\t["stand"] = [];\r\n'
+                b'\tanim.idleAnimArray\t\t["stand"][0][0] \t= %ai_zombie_idle_v1_delta;\r\n\tanim.idleAnimWeights\t["stand"][0][0] \t= 10;\r\n'
+                b'\tanim.idleAnimArray\t\t["crouch"][0][0] \t= %ai_zombie_idle_crawl_delta;\r\n}\r\n'
+                b'other()\r\n{\r\n\tx = anim.idleAnimArray["stand"];\r\n}\r\n')
+        node = make_rawfile(p, template, "maps/dead_sand_zombiemode.gsc", text)
+        files = [("maps/dead_sand_zombiemode.gsc", node)]
+        with mock.patch("t4ff.scripts._rawfiles", lambda p, z: files):
+            with mock.patch("t4ff.scripts._actor_classnames", lambda p, z: {"actor_axis_zombie_ger_ber_sshonor", "actor_zombie_dog"}):
+                self.assertEqual(zombie_idles_for_zombies(p, None, log=lambda msg: None), [])
+            with mock.patch("t4ff.scripts._actor_classnames", lambda p, z: {"actor_axis_zombie_ger_ber_sshonor", "actor_ally_rus_commissar_ppsh"}):
+                self.assertEqual(zombie_idles_for_zombies(p, None, log=lambda msg: None), ["maps/dead_sand_zombiemode.gsc"])
+                self.assertEqual(zombie_idles_for_zombies(p, None, log=lambda msg: None), [])  # once
+        new = rawfile_text(node)
+        self.assertIn(b'init_animscripts()\r\n{\r\n\tlevel thread t4ff_zombie_idles();\r\n\tanimscripts\\init::firstInit();\r\n\r\n'
+                      b'\tanim.idleAnimArray\t\t["zombie_stand"] = [];\r\n\tanim.idleAnimWeights\t["zombie_stand"] = [];\r\n'
+                      b'\tanim.idleAnimArray\t\t["zombie_stand"][0][0] \t= %ai_zombie_idle_v1_delta;\r\n\tanim.idleAnimWeights\t["zombie_stand"][0][0] \t= 10;\r\n'
+                      b'\tanim.idleAnimArray\t\t["zombie_crouch"][0][0] \t= %ai_zombie_idle_crawl_delta;\r\n}\r\n', new)
+        # the comment above it and the other functions stay
+        self.assertIn(b'// anim.idleAnimArray["stand"][0][0]', new)
+        self.assertIn(b'\tx = anim.idleAnimArray["stand"];\r\n}\r\n\r\n// t4ff: ', new)
+        self.assertIn(b'ai[i].exception[ "stop_immediate" ] = ::t4ff_zombie_stop;\r\n', new)
+        self.assertIn(b'\t\tsets = anim.idleAnimArray[ "zombie_" + pose ];\r\n', new)
+        self.assertNotIn(b"\r\r", new)
+        self.assertNotIn(b"\n\n\n", new.replace(b"\r", b""))
+
+    def test_valid_cursor_hints(self):
+        """The console's SetCursorHint crashes the game on a hint type it has not (it lists the valid
+        ones past the end of their table): Dead Sand's "HINT_NONE" becomes "HINT_NOICON"; valid ones,
+        in any case, stay."""
+        from unittest import mock
+
+        from t4ff.layout import TypeRef
+        from t4ff.platforms import x360
+        from t4ff.scripts import make_rawfile, rawfile_text, valid_cursor_hints
+        from t4ff.zone import BLOCK_VIRTUAL, Node, Ptr
+
+        p = x360()
+        template = Node(TypeRef("record", "RawFile", p.record("RawFile").size), 1, BLOCK_VIRTUAL)
+        template.data = bytearray(p.record("RawFile").size)
+        buffer = Node(TypeRef("scalar", "char", 1, 1), 1, BLOCK_VIRTUAL)
+        buffer.extra["origin"] = ("member", "RawFile", "buffer")
+        buffer.segments = [(buffer.type, 1, 1, False)]
+        template.relocs[8] = Ptr("follow", buffer)
+        template.children = [buffer]
+        battery = make_rawfile(p, template, "maps/_dead_sand_utility.gsc",
+                               b'think()\r\n{\r\n\tself setcursorhint( "HINT_NONE" );\r\n\tself SetCursorHint("hint_activate");\r\n}\r\n')
+        other = make_rawfile(p, template, "maps/other.gsc", b'f()\n{\n\tself setCursorHint( "HINT_NOICON" );\n}\n')
+        files = [("maps/_dead_sand_utility.gsc", battery), ("maps/other.gsc", other)]
+        with mock.patch("t4ff.scripts._rawfiles", lambda p, z: files):
+            self.assertEqual(valid_cursor_hints(p, None, log=lambda msg: None), ["maps/_dead_sand_utility.gsc"])
+            self.assertEqual(valid_cursor_hints(p, None, log=lambda msg: None), [])
+        self.assertEqual(rawfile_text(battery), b'think()\r\n{\r\n\tself setcursorhint( "HINT_NOICON" );\r\n\tself SetCursorHint("hint_activate");\r\n}\r\n')
+        self.assertEqual(rawfile_text(other), b'f()\n{\n\tself setCursorHint( "HINT_NOICON" );\n}\n')
+
     def test_mod_scripts_over_the_games(self):
         """The console runs the game's own copy of a script over the map's, the PC the mod's: the
         mod's zone manager (the DLC3 kit's) gets a name of its own and the map calls it by that

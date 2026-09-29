@@ -184,6 +184,298 @@ def spawn_script_origins(p: Platform, zone: Zone, log=print) -> List[str]:
     return changed
 
 
+# The console's SetCursorHint lists the valid hint types when a script gives another one, and its list
+# runs past the end of their table (into the float 1.0 after it): the game crashes reading a string
+# at 0x3F800000 (Xenia freezes). Dead Sand's Nebelwerfer battery sets "HINT_NONE", which is none;
+# the icon-less hint is "HINT_NOICON".
+VALID_CURSOR_HINTS = ("HINT_INHERIT", "HINT_NOICON", "HINT_SEAT", "HINT_ACTIVATE", "HINT_HEALTH", "HINT_FRIENDLY", "HINT_SPECTATOR")
+_CURSOR_HINT = re.compile(rb'(\bsetcursorhint\s*\(\s*)"([^"]*)"', re.I)
+
+
+def valid_cursor_hints(p: Platform, zone: Zone, log=print) -> List[str]:
+    """Scripts give SetCursorHint valid hint types only, "HINT_NOICON" for others (see above).
+    Returns the names of the scripts changed."""
+    changed = []
+    for name, node in _rawfiles(p, zone):
+        if name.startswith(",") or not name.lower().endswith(".gsc") or _buffer(node) is None:
+            continue
+        text = rawfile_text(node)
+        if b"setcursorhint" not in text.lower():
+            continue
+
+        def fix(m):
+            if m.group(2).decode("latin-1").upper() in VALID_CURSOR_HINTS:
+                return m.group(0)
+            return m.group(1) + b'"HINT_NOICON"'
+
+        new = _CURSOR_HINT.sub(fix, text)
+        if new != text:
+            set_rawfile_text(p, node, new)
+            changed.append(normalize(name))
+    if changed:
+        log(f"scripts: hint types the console has not are HINT_NOICON (its SetCursorHint crashes on others) ({', '.join(changed)})")
+    return changed
+
+
+# The console refuses precaches once the level script has waited ("precacheItem must be called
+# before any wait statements in the level script"), and a model not precached cannot be set ("model
+# 'katyusha_rocket' not precached"). Zombie maps' level scripts call the zombie mode's main(), which
+# waits for the players, then their own setup: Dead Sand's precaches its rocket barrage there, so
+# its Nebelwerfer fires no rocket. The precaches of the functions the level script's main() calls
+# are made at its start instead (theirs become comments), and so are those of the zone's models
+# scripts set by name that no script precaches (Dead Sand's rockets set "katyusha_rocket", which
+# nothing precaches on the console).
+_PRECACHE = re.compile(rb'\b(precache(?:item|model|shader|shellshock|rumble|menu|string))\s*\(\s*(&?"[^"\n]*")\s*\)\s*;', re.I)
+_PRECACHE_MARK = b"// t4ff: the precaches of the setup below, before the level script's first wait"
+
+
+def _blank_comments(text: bytes) -> bytes:
+    """``text`` with its comments made spaces (the rest keeps its offsets)."""
+    return _COMMENTS.sub(lambda m: " " * len(m.group(0)), text.decode("latin-1")).encode("latin-1")
+
+
+def _function_body(text: bytes, name: str) -> Optional[Tuple[int, int]]:
+    """(start, end) of the body (inside the braces) of the function ``name`` defined in ``text``."""
+    source = _blank_comments(text)
+    m = re.search(rb"(?m)^[ \t]*" + re.escape(name.encode("latin-1")) + rb"[ \t]*\([^)]*\)\s*\{", source, re.I)
+    if m is None:
+        return None
+    depth, i = 1, m.end()
+    in_string = False
+    while i < len(source) and depth:
+        c = source[i : i + 1]
+        if in_string:
+            if c == b"\\":
+                i += 1
+            elif c == b'"':
+                in_string = False
+        elif c == b'"':
+            in_string = True
+        elif c == b"{":
+            depth += 1
+        elif c == b"}":
+            depth -= 1
+        i += 1
+    return (m.end(), i - 1) if depth == 0 else None
+
+
+_CALLED = re.compile(rb"(?:\b([A-Za-z_]\w*(?:[\\/]\w+)+)\s*::\s*)?\b([A-Za-z_]\w*)\s*\(")
+
+
+_SET_MODEL = re.compile(rb'\bsetmodel\s*\(\s*"([^"\n]+)"\s*\)', re.I)
+
+
+def _model_names(p: Platform, zone: Zone) -> List[str]:
+    return [asset_name(p, n) for n in zone.extra_root.walk() if n.type.name == "XModel" and (n.extra.get("origin") or ("",))[0] == "asset"]
+
+
+def precache_before_waits(p: Platform, zone: Zone, level_script: str, log=print) -> List[str]:
+    """The precaches of the functions the level script's main() calls, and of the zone's models
+    scripts set by name that nothing precaches, at its start (see above). Returns the precache calls
+    added."""
+    nodes = {normalize(name): node for name, node in _rawfiles(p, zone) if not name.startswith(",") and _buffer(node) is not None}
+    level_script = level_script.lower()
+    if level_script not in nodes:
+        return []
+    level_text = rawfile_text(nodes[level_script])
+    if _PRECACHE_MARK in level_text:
+        return []
+    body = _function_body(level_text, "main")
+    if body is None:
+        return []
+    source = _blank_comments(level_text)
+    # the scripts a bare function name may come from: the level script and those it includes
+    includes = [level_script] + sorted(r for r in script_references(level_script, b"\n".join(re.findall(rb"#include\s+[\w\\/]+\s*;", source))))
+    wanted: List[bytes] = []
+    seen_calls = set()
+    moved: Dict[str, List[Tuple[int, int]]] = {}  # the calls made at the start instead, by script
+    for m in _CALLED.finditer(source[body[0] : body[1]]):
+        path, function = m.group(1), m.group(2).decode("latin-1")
+        if function.lower() in ("main", "if", "while", "for", "switch", "return", "wait", "thread"):
+            continue
+        candidates = [normalize(path.decode("latin-1")) + ".gsc"] if path else includes
+        for script in candidates:
+            if (script, function.lower()) in seen_calls or script not in nodes:
+                continue
+            seen_calls.add((script, function.lower()))
+            text = _blank_comments(rawfile_text(nodes[script]))
+            found = _function_body(text, function)
+            if found is None:
+                continue
+            for call in _PRECACHE.finditer(text, found[0], found[1]):
+                if call.group(0) not in wanted:
+                    wanted.append(call.group(0))
+                moved.setdefault(script, []).append(call.span())
+            break
+    main_precaches = {c.group(0).lower() for c in _PRECACHE.finditer(source[body[0] : body[1]])}
+    wanted = [c for c in wanted if c.lower() not in main_precaches]
+    # the setup's own calls, after the wait, would stop it ("precacheItem must be called before any
+    # wait statements"): they are comments
+    for script, spans in moved.items():
+        text = rawfile_text(nodes[script])
+        for start, end in sorted(set(spans), reverse=True):
+            text = text[:start] + b"/* t4ff: made first in the level script: " + text[start:end] + b" */" + text[end:]
+        set_rawfile_text(p, nodes[script], text)
+    level_text = rawfile_text(nodes[level_script])
+    body = _function_body(level_text, "main")
+    # models the scripts set by name that nothing precaches
+    loaded = {name.lower() for name in _model_names(p, zone)}
+    precached, set_by_name = set(), []
+    for name, node in nodes.items():
+        if not name.endswith(".gsc"):
+            continue
+        text = _blank_comments(rawfile_text(node))
+        precached.update(c.group(2).strip(b'"&').lower() for c in _PRECACHE.finditer(text) if c.group(1).lower() == b"precachemodel")
+        for m in _SET_MODEL.finditer(text):
+            if m.group(1) not in set_by_name:
+                set_by_name.append(m.group(1))
+    for model in set_by_name:
+        call = b'PrecacheModel( "' + model + b'" );'
+        if model.lower() not in precached and model.decode("latin-1").lower() in loaded and call not in wanted:
+            wanted.append(call)
+    if not wanted:
+        return []
+    newline = b"\r\n" if b"\r\n" in level_text else b"\n"
+    insert = newline + b"\t" + _PRECACHE_MARK + b"".join(newline + b"\t" + c for c in wanted) + newline
+    set_rawfile_text(p, nodes[level_script], level_text[: body[0]] + insert + level_text[body[0] :])
+    added = [c.decode("latin-1") for c in wanted]
+    log(f"scripts: {len(added)} precaches of the setup {level_script} runs are made before its first wait too, as the console needs ({', '.join(added[:4])})")
+    return added
+
+
+# Treyarch's first zombie scripts (Nacht, and maps made with the first mod tools) hurry the last
+# zombies of a round with speed_up_zombies(), which gives every axis AI the zombies' sprint: Dead
+# Sand's SS soldiers then run as zombies. Only zombies are hurried.
+_SPEED_UP = re.compile(rb"(zombie_stragglers\s*=\s*GetAiArray\s*\(\s*\"axis\"\s*\)\s*;\s*for\s*\([^)]*zombie_stragglers\.size[^)]*\)\s*\{)", re.I)
+_SPEED_UP_FIX = b"// t4ff: only zombies"
+
+
+def speed_up_zombies_only(p: Platform, zone: Zone, log=print) -> List[str]:
+    """speed_up_zombies() hurries zombies only (see above). Returns the names of the scripts changed."""
+    changed = []
+    for name, node in _rawfiles(p, zone):
+        if name.startswith(",") or not name.lower().endswith(".gsc") or _buffer(node) is None:
+            continue
+        text = rawfile_text(node)
+        if b"zombie_stragglers" not in text or _SPEED_UP_FIX in text:
+            continue
+        newline = b"\r\n" if b"\r\n" in text else b"\n"
+        fix = (newline + b"\t\t" + _SPEED_UP_FIX + newline
+               + b"\t\tif( !IsDefined( zombie_stragglers[i].is_zombie ) || !zombie_stragglers[i].is_zombie )" + newline
+               + b"\t\t\tcontinue;" + newline)
+        new, count = _SPEED_UP.subn(lambda m: m.group(1) + fix, text)
+        if count:
+            set_rawfile_text(p, node, new)
+            changed.append(normalize(name))
+    if changed:
+        log(f"scripts: speed_up_zombies() hurries zombies only, not the map's other AI ({', '.join(changed)})")
+    return changed
+
+
+# Treyarch's zombie modes give the zombies their idles by replacing the idles of the game's stand and
+# crouch poses (init_animscripts()): every AI idles as a zombie then, and Dead Sand's soldiers (its
+# commissars, marines and SS) stand with their arms out when they stop. On maps with soldiers the
+# zombie idles get poses of their own ("zombie_stand", "zombie_crouch"), and a zombie's stop script
+# plays them (the animscripts let a script run first as each AI stops, self.exception["stop_immediate"]:
+# for zombies it is stop.gsc's own loop, with their idles, which killanimscript ends like the rest).
+_ZOMBIE_IDLE = re.compile(rb'anim\.idleAnimArray\s*\[\s*"(?:stand|crouch)"\s*\]\s*\[\s*\d+\s*\]\s*\[\s*\d+\s*\]\s*=\s*%\s*ai_zombie_idle', re.I)
+_IDLE_POSE = re.compile(rb'(anim\.idleAnim(?:Array|Weights)\s*\[\s*)"(stand|crouch)"', re.I)
+_GENERIC_HUMAN = re.compile(rb'#using_animtree\s*\(\s*"generic_human"\s*\)', re.I)
+_FUNCTION_HEADER = re.compile(rb"(?m)^[ \t]*([A-Za-z_]\w*)[ \t]*\([^)]*\)\s*\{")
+_ZOMBIE_IDLES_MARK = b"t4ff_zombie_idles"
+_ZOMBIE_IDLE_FUNCTIONS = rb"""
+// t4ff: the zombies' idles are theirs only (the map has soldiers, who idled as zombies)
+t4ff_zombie_idles()
+{
+	for( ;; )
+	{
+		ai = GetAiArray();
+		for( i = 0; i < ai.size; i++ )
+		{
+			if( IsDefined( ai[i].is_zombie ) && ai[i].is_zombie && !IsDefined( ai[i].t4ff_idles ) && IsDefined( ai[i].exception ) )
+			{
+				ai[i].t4ff_idles = true;
+				ai[i].exception[ "stop_immediate" ] = ::t4ff_zombie_stop;
+			}
+		}
+		wait( 0.05 );
+	}
+}
+
+// t4ff: animscripts\stop::main() for zombies, with their idles (killanimscript ends it)
+t4ff_zombie_stop()
+{
+	animscripts\utility::initialize( "stop" );
+	for( ;; )
+	{
+		pose = "stand";
+		if( self animscripts\stop::getDesiredIdlePose() == "crouch" )
+			pose = "crouch";
+		if( self.a.pose != pose )
+			self clearAnim( %root, 0.3 );
+		self animscripts\SetPoseMovement::SetPoseMovement( pose, "stop" );
+		sets = anim.idleAnimArray[ "zombie_" + pose ];
+		idleSet = RandomInt( sets.size );
+		idleAnim = animscripts\utility::anim_array( sets[ idleSet ], anim.idleAnimWeights[ "zombie_" + pose ][ idleSet ] );
+		transTime = 0.2;
+		if( GetTime() == self.a.scriptStartTime )
+			transTime = 0.5;
+		self setFlaggedAnimKnobAllRestart( "idle", idleAnim, %body, 1, transTime, self.animplaybackrate );
+		self animscripts\shared::DoNoteTracks( "idle" );
+	}
+}
+"""
+
+
+def _actor_classnames(p: Platform, zone: Zone) -> Set[str]:
+    """The classnames of the actors (AI spawners) of the zone's map entities."""
+    names = set()
+    for node in zone.extra_root.walk():
+        if node.type.name != "MapEnts" or (node.extra.get("origin") or ("",))[0] != "asset":
+            continue
+        f = find_field(p.record("MapEnts"), "entityString")
+        ptr = node.relocs.get(f.offset) if f is not None else None
+        target = ptr.target() if ptr is not None else None
+        if target is not None:
+            text = bytes(target.data).rstrip(b"\0").decode("latin-1")
+            names.update(m.lower() for m in re.findall(r'"classname"\s+"(actor_[^"]*)"', text))
+    return names
+
+
+def zombie_idles_for_zombies(p: Platform, zone: Zone, log=print) -> List[str]:
+    """On maps with soldiers, only zombies idle as zombies (see above). Returns the names of the
+    scripts changed."""
+    if not any("zombie" not in name for name in _actor_classnames(p, zone)):
+        return []
+    changed = []
+    for name, node in _rawfiles(p, zone):
+        if name.startswith(",") or not name.lower().endswith(".gsc") or _buffer(node) is None:
+            continue
+        text = rawfile_text(node)
+        if _ZOMBIE_IDLES_MARK in text or not _GENERIC_HUMAN.search(text):
+            continue
+        source = _blank_comments(text)
+        m = _ZOMBIE_IDLE.search(source)
+        if m is None:
+            continue
+        # the function setting the zombie idles
+        headers = [h for h in _FUNCTION_HEADER.finditer(source) if h.start() < m.start()]
+        body = _function_body(text, headers[-1].group(1).decode("latin-1")) if headers else None
+        if body is None or not body[0] <= m.start() < body[1]:
+            continue
+        newline = b"\r\n" if b"\r\n" in text else b"\n"
+        function = _IDLE_POSE.sub(rb'\1"zombie_\2"', text[body[0] : body[1]])
+        function = newline + b"\tlevel thread t4ff_zombie_idles();" + function
+        text = text[: body[0]] + function + text[body[1] :]
+        if not text.endswith(b"\n"):
+            text += newline
+        set_rawfile_text(p, node, text + _ZOMBIE_IDLE_FUNCTIONS.replace(b"\n", newline))
+        changed.append(normalize(name))
+    if changed:
+        log(f"scripts: the map has soldiers, and only its zombies idle as zombies ({', '.join(changed)})")
+    return changed
+
+
 # The game runs the first script of a name it loads, and the console loads its own zones (common.ff,
 # patch.ff, ...) before the map: a script both have is the game's there. On PC, with the map's mod
 # active, the mod's scripts (its mod.ff, its .iwd and loose files) win over the game's instead. The

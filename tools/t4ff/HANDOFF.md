@@ -134,7 +134,14 @@ lacks are added (from its files, the console fastfiles, the PC files). Script fi
   (with `sound_notify`), which the game loads by name and maps from the first mod tools lack;
 - scripts of the mod that the console's own zones have too (which the console would run instead)
   get names of their own when only the map's scripts call them (`keep_mod_scripts`): The Simpsons'
-  zone manager (see Open problems, 2).
+  zone manager (see Open problems, 2), Dead Sand's blockers (3);
+- `SetCursorHint` gets valid hint types only (`valid_cursor_hints`; the console crashes on others:
+  Dead Sand's Nebelwerfer froze Xenia);
+- the setup's literal precaches, and those of the zone's models scripts set by name that nothing
+  precaches, are made before the level script's first wait (`precache_before_waits`; Dead Sand's
+  rockets);
+- `speed_up_zombies()` hurries zombies only (`speed_up_zombies_only`; Dead Sand's SS sprinted);
+- on maps with soldiers, only zombies idle as zombies (`zombie_idles_for_zombies`).
 
 **Assets the game looks up by name.** Player body animations of the player animation script,
 shellshock files the scripts name, and the animations of the anim trees (`animtrees/*.atr`): the
@@ -154,8 +161,8 @@ rows, paging, and scrolling (the cursor fix is in `src/game/t4/sp/components/use
 confirmed in Xenia with CoD Xe r422: up from the first row goes to the last, 7-19 of 19).
 
 **CoD Xe (T4 SP).** `log_console` (console and script errors to the debug output), `thread_watch`
-(where a stuck thread is), the dynamic usermaps list, a mod menu entry for music boxes, VS2010
-build script.
+(where a stuck thread is), `startup_command` (a console command run once the main menu is up, e.g.
+`devmap <map>`), the dynamic usermaps list, a mod menu entry for music boxes, VS2010 build script.
 
 ## Maps tested in game
 
@@ -164,7 +171,7 @@ build script.
 | Aztec (`nazi_zombie_aztec`) | converts and plays; the reference map |
 | Zombie Woods (`nazi_zombie_wh`, 2008) | converts and plays; title card loading screen |
 | The Simpsons (`simpsons`, 2010, mod heavy) | converts and plays; voices, music box, airstrike (tester), rounds and dog rounds (Xenia) work. The window crash (1) is fixed but awaits a console test; Moe's (2) not looked into |
-| Dead Sand (`nazi_zombie_dead_sand`, 2009) | converts; loads and is playable for a few seconds, then crashes (3) |
+| Dead Sand (`nazi_zombie_dead_sand`, 2009) | converts and plays; commissars, marines, SS, Nebelwerfer (Xenia). Objective picture (3) |
 
 ## Open problems
 
@@ -230,22 +237,45 @@ mapper changed in them is lost on the console, not looked into.
 
 Next: Moe's (not looked into); a console test of rounds in the TV room and of dog rounds.
 
-### 3. Dead Sand: crash a few seconds into the game
-
-Loads in Xenia and is playable for a few seconds, then Xenia stops with "Overflowed stackpoints!"
-(the Server thread went 65536 calls deep). The same Xenia error came from The Simpsons' zipline
-setup looping forever (fixed, see Scripts above), so a script loop is the prime suspect; on a real
-console the game kills such a thread with "potential infinite loop in script". Its collision trees
-and path node tree were checked against PC and are identical.
+### 3. Dead Sand: crash, Nebelwerfer, soldiers (fixed); objective picture
 
 About the map: made with the first mod tools (April 2009); its scripts spawn campaign AI (marines,
-commissars, SS with panzerschrecks and MG42s) and fire rocket barrages, so it also misses campaign
-animations, effects and HUD materials the console's zones do not have (see 4). Its
-`dead_sand_init()` calls `PrecacheItem` after a wait (a script error on PC too). Its sky
-`flying_ft` is a stock cube map from the PC game's files, converted only with `--iwd`.
+commissars, SS with panzerschrecks and MG42s) in some rounds and fire a rocket barrage (the
+Nebelwerfer), so it also misses campaign animations, effects and HUD materials the console's zones
+do not have (see 4). Its sky `flying_ft` is a stock cube map from the PC game's files, converted
+only with `--iwd`. Fixed, each checked in Xenia (scripts.py):
 
-Next: run it on the console with xbWatson and `log_console` (and `thread_watch` in Xenia) to get
-the looping script, then fix the pattern generally as with `modderHelp()`.
+- **Crash a few seconds in** ("Overflowed stackpoints!", the Server thread 65536 calls deep): the
+  console ran `patch.ff`'s `maps/_zombiemode_blockers.gsc` instead of the mod's. With the mod's
+  (`keep_mod_scripts`) it plays; A/B with only that changed. Which loop of the game's script ran
+  away with Dead Sand's entities was not traced.
+- **Freeze when the Nebelwerfer is bought**: its trigger sets `SetCursorHint("HINT_NONE")`; the
+  console's `SetCursorHint` lists the valid types for an invalid one and reads past their table
+  (a string pointer 0x3F800000, the float 1.0 after it). `valid_cursor_hints`.
+- **No rockets**: `dead_sand_init()` precaches `rocket_barrage` after the zombie mode's wait
+  ("precacheItem must be called before any wait statements in the level script"), and nothing
+  precaches the rockets' `katyusha_rocket` ("model 'katyusha_rocket' not precached").
+  `precache_before_waits`; the setup's own call becomes a comment (after the wait it errors).
+- **SS sprinting like zombies**: `speed_up_zombies_only`.
+- **Soldiers idling as zombies** (arms out; confirmed by a tester): `init_animscripts()` replaces
+  `anim.idleAnimArray["stand"]`/`["crouch"]` for every AI. `stop.gsc` picks
+  `idleAnimArray[pose][idleSet % size]` and `randomizeIdleSet()` resets `idleSet` on every stop,
+  so a per zombie idle set does not hold; `zombie_idles_for_zombies` moves the zombie idles to
+  `"zombie_stand"`/`"zombie_crouch"` and gives each zombie a `stop_immediate` exception (run at the
+  start of `stop.gsc`'s `main()`, per AI) that plays them in a copy of its loop.
+
+Not bugs of the conversion, found on the way (tracker script, see the toolbox):
+
+- the allies die in batches at round start: `kill_some_friendlies()` kills about half at every
+  round (worldspawn, `MOD_UNKNOWN`);
+- the Nebelwerfer kills every axis AI of the map: its explosions check
+  `Distance( target_pos.origin, enemy.origin )` with a position for `target_pos`. `.origin` of a
+  vector is undefined (a probe logged it), the retail game skips the errors, and every AI gets the
+  kill branch (SS spawned during a barrage died in the same frame; without it they fight for
+  minutes). PC runs the same script engine; left as is.
+
+Open: the objective picture in the pause menu is a checkerboard (a missing image, see 4 perhaps).
+Harmless errors in its log: `_interactive_objects.gsc` calls `connectpaths` on script models.
 
 ### 4. Stock assets no console fastfile has
 
@@ -289,9 +319,7 @@ the map's alias use the game's own stream from the disc.
 
 1. The Simpsons on a console: the window crash (1) after an airstrike and barrier repairs, rounds
    in the TV room and dog rounds (2); then Moe's (2).
-2. Dead Sand in Xenia with `log_console` and `thread_watch` (the logging copies of the toolbox can
-   find the looping script): find and fix the looping script (3). Its scripts may be shadowed by
-   the game's zones too (the conversion now warns about the mod's).
+2. Dead Sand on a console (3), public testing; its objective picture.
 3. Stock assets: named materials, then the PC game's fastfiles as a source (4).
 4. A known complex map next, once these are done.
 
@@ -338,6 +366,18 @@ How the checks above were made, to repeat them:
   can start a test script (teleports with `setOrigin`, `player.god = true`, killing zombies near the
   player as a player would). An override replaces the script for every map: remove them after.
   This found the round skips (zone states, spawner count and the failsafe kills per round).
+- **Tracking AI in game.** A test script hooks every non-zombie spawner (`getSpawnerArray()`,
+  `add_spawn_function`) and logs each soldier's spawn, damage, death (`waittill("death",
+  attacker)` then `self.damagemod`, `self.damageweapon`) and, every 5 seconds, where the living ones
+  are, their `a.script` and enemy; an entity gone without a death is a deletion. A lethal
+  `DoDamage` sends no "damage" notify, and a script kill shows as worldspawn `MOD_UNKNOWN`. Found
+  Dead Sand's friendly culling and Nebelwerfer (3). The console's compiler hung the level load (no
+  error logged) on one such script until variables named `alive`, `mod`, `rec` and functions named
+  `track`, `report` were renamed (which one was not narrowed down): with a hang right after
+  "GSCLoader: Loaded override script", suspect the script.
+- **Loading a map at boot.** `"startup_command": "devmap <map>"` in `codxe.json` loads it once the
+  main menu is up (no menu navigation or typing in Xenia). `thread_watch` on hangs Dead Sand's load:
+  keep it off unless looking for a stuck thread.
 - **Driving Xenia.** Xenia takes its settings as arguments (`--keyboard_mode=1
   --keyboard_user_index=1 --log_file=...`): with a controller plugged in, the keyboard on the
   second slot presses START, which makes it the game's controller. Keys (the config's `[HID.Key]`):

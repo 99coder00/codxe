@@ -282,7 +282,28 @@ too gets a name of its own (`maps/_zombiemode_zone_manager_mod.gsc`), and the
 map's scripts call it by that name. Not when a script of the game's that the map
 runs calls it too (the game's `maps/_load.gsc` calls `maps/_laststand.gsc`), nor
 for scripts the engine runs by name (animscripts, client scripts): the
-conversion warns about those, which stay the game's.
+conversion warns about those, which stay the game's. Dead Sand's crash
+("Overflowed stackpoints!") came from the same: the console ran `patch.ff`'s
+`maps/_zombiemode_blockers.gsc` instead of the mod's.
+
+More differences the converted scripts work around (Dead Sand's):
+
+- The console's `SetCursorHint` crashes the game on a hint type it has not (it
+  lists the valid ones past the end of their table): Dead Sand's Nebelwerfer
+  sets `"HINT_NONE"`, which becomes `"HINT_NOICON"`.
+- The console refuses precaches once the level script has waited, and a model
+  not precached cannot be set. Zombie maps call the zombie mode's `main()`,
+  which waits for the players, then their own setup: its literal precaches are
+  made at the start of the level script's `main()` instead (the setup's become
+  comments), and so are those of the zone's models scripts set by name that
+  nothing precaches (Dead Sand's rockets, `katyusha_rocket`).
+- `speed_up_zombies()` of the first zombie scripts gives every axis AI the
+  zombies' sprint; it hurries zombies only, not Dead Sand's SS.
+- The zombie mode gives zombies their idles by replacing the stand and crouch
+  idles of every AI (`init_animscripts()`). On maps with soldiers (actor
+  spawners that are not zombies) the zombie idles get poses of their own, and
+  zombies play them from the animscripts' per AI hook
+  (`self.exception["stop_immediate"]`); the soldiers keep the game's.
 
 Some errors in the console log come from the PC map itself and are harmless:
 PC Aztec's zombie type names a `walther` sidearm zombies never draw, and
@@ -500,7 +521,7 @@ python dev/verify_samples.py path/to/console/*.ff   # updates t4ff/defs/x360_ver
 | Aztec | plays |
 | Zombie Woods (2008) | plays, with a title card loading screen |
 | The Simpsons (2010) | plays; voices, music box, rounds and dog rounds work. Known problems below |
-| Dead Sand (2009) | converts and loads, then crashes after a few seconds |
+| Dead Sand (2009) | plays; commissars, marines, SS and the Nebelwerfer work (Xenia). Known problems below |
 
 ### Known problems
 
@@ -514,8 +535,13 @@ python dev/verify_samples.py path/to/console/*.ff   # updates t4ff/defs/x360_ver
   `patch.ff` running instead of the mod's (fixed, see the scripts above; checked in Xenia). Moe's
   cannot be reached: not looked into yet. The mod's `_laststand.gsc`, `_loadout.gsc` and
   `_debug.gsc` stay the game's (the conversion warns).
-- **Dead Sand crashes Xenia** ("Overflowed stackpoints!") a few seconds into a game, most likely a
-  script that loops forever (as The Simpsons' zipline setup did before its fix). Not solved.
+- **Dead Sand's crash** ("Overflowed stackpoints!" a few seconds into a game), **its Nebelwerfer
+  freeze**, its rockets that did not fire and its soldiers idling as zombies are fixed (see the
+  scripts above; checked in Xenia). Its objective picture in the pause menu is a checkerboard. Its
+  Nebelwerfer kills every zombie and SS of the map, not only those near its rockets: the map's
+  script reads `target_pos.origin` of a position (undefined), the retail game skips the error and
+  every AI passes the distance check. Seen on the console; PC runs the same script engine, so it
+  is left as the map plays.
 - **Stock assets no console fastfile has** stay missing ("Could not load material/fx/xanim" in the
   console log): the PC game's own zones have them, and t4ff does not read those yet. Maps that use
   campaign AI or effects (Dead Sand) miss the most.
