@@ -49,8 +49,8 @@ CoD Xe mod `mod_menu` stays enabled in all tests.
   what is only likely. The console `nazi_zombie_aztec.ff` used as a reference is CoD Xenon's
   conversion of a community map, not a Treyarch zone.
 - **Tests.** `python -m unittest discover -s tests` in `tools/t4ff`, with `T4FF_SAMPLES` set for
-  the sample based tests (layout below). Run them before every push; 70 as of this writing, of
-  which two fail on Windows only (see Open problems, 6).
+  the sample based tests (layout below). Run them before every push; 70 as of this writing, all
+  passing on Windows too.
 
 ## Environment
 
@@ -284,9 +284,6 @@ the map's alias use the game's own stream from the disc.
 - The image load def is loaded with a follow pointer (-1) where the game's own zones use insert
   (-2); harmless so far.
 - Volume maps are still references.
-- Two tests fail on Windows only, before and after this work: `test_encoder_pipeline_matches_cod_xenon`
-  runs a fake encoder script Windows cannot start (WinError 193), and
-  `test_install_from_zip_in_downloads` finds the installed Xbox 360 SDK's `xma2encode.exe` first.
 
 ## Next steps
 

@@ -125,8 +125,11 @@ class DepsTests(unittest.TestCase):
                 z.writestr("xdk/bin/win32/xmaencoder.dll", b"dll")
                 z.writestr("xdk/readme.txt", b"")
             bin_dir = os.path.join(tmp, "bin")
-            env = {"HOME": home, "USERPROFILE": home, "XMA2ENCODE": "", "XEDK": "", "PATH": tmp}
-            with mock.patch.dict(os.environ, env), mock.patch.object(deps, "BIN_DIR", bin_dir), mock.patch.object(deps, "TOOL_DIR", tmp):
+            env = {"HOME": home, "USERPROFILE": home, "XMA2ENCODE": "", "PATH": tmp}
+            # no developer kit on this computer, even where one is installed (their variables and
+            # the Program Files folders searched on Windows)
+            env.update(dict.fromkeys(("XEDK", "DurangoXDK", "GXDKLatest", "GameDKLatest", "GameDKXboxLatest", "GameDK"), ""))
+            with mock.patch.dict(os.environ, env), mock.patch.object(deps, "BIN_DIR", bin_dir), mock.patch.object(deps, "TOOL_DIR", tmp), mock.patch.object(deps, "_program_files", lambda: []):
                 found = deps.find_xma2encode(search_zips=True)
                 self.assertTrue(found.endswith("::xdk/bin/win32/xma2encode.exe"))
                 path = deps.install_xma2encode(found, log=lambda msg: None)
@@ -1417,6 +1420,12 @@ class AudioTests(unittest.TestCase):
                     )
                 )
             os.chmod(fake, os.stat(fake).st_mode | stat.S_IEXEC)
+            if sys.platform.startswith("win"):
+                # Windows starts no script by its #! line: a batch file runs it with this Python
+                launcher = fake + ".cmd"
+                with open(launcher, "w") as f:
+                    f.write(f'@"{sys.executable}" "{fake}" %*\n')
+                fake = launcher
             encoder = audio.XmaEncoder(fake)
             pcm = audio.Pcm(44100, np.zeros((1000, 1), dtype=np.int16))
             # CoD Xenon's file, in the game's layout (its 64 KiB blocks stop after a split second)
