@@ -106,7 +106,10 @@ rem --- build ---
 :build
 echo.
 echo Building the Release configuration for Xbox 360...
-"%MSBUILD%" codxe.sln /m /nologo /v:minimal "/p:Configuration=Release" "/p:Platform=Xbox 360"
+rem The Xbox 360 toolset's PATH for build steps starts with Xbox360TechPreviewPath, empty without the
+rem tech preview: a PATH starting with ";" makes cmd find no command at all (the version header's
+rem "powershell" is "not recognized"). The SDK's own tools folder fills it.
+"%MSBUILD%" codxe.sln /m /nologo /v:minimal "/p:Configuration=Release" "/p:Platform=Xbox 360" "/p:Xbox360TechPreviewPath=%XEDK%\bin\win32"
 if not errorlevel 1 goto :success
 echo.
 echo The build failed, see above. If it says the 2010-01 platform toolset or the Xbox 360 platform is

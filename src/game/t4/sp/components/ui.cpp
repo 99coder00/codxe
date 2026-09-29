@@ -24,6 +24,25 @@ void DrawBranding(int localClientNum)
     UI_DrawText(scrPlaceFullUnsafe, text, 64, consoleFont, x, y, 0, 0, 0.2, color_white_rgba, 0);
 }
 
+// codxe.json's "startup_command" (e.g. "devmap nazi_zombie_aztec"), run once when the front end has
+// been up for a moment: tests start a map without going through the menus.
+void RunStartupCommand()
+{
+    static bool done = false;
+    static DWORD first_refresh = 0;
+    if (done || !Config::startup_command[0])
+        return;
+    const DWORD now = GetTickCount();
+    if (!first_refresh)
+        first_refresh = now;
+    if (now - first_refresh < 3000)
+        return;
+    done = true;
+    DbgPrint("[codxe][T4 SP] startup_command: %s\n", Config::startup_command);
+    Cbuf_AddText(0, Config::startup_command);
+    Cbuf_AddText(0, "\n");
+}
+
 Detour UI_Refresh_Detour;
 
 void UI_Refresh_Hook(int localClientNum)
@@ -32,6 +51,7 @@ void UI_Refresh_Hook(int localClientNum)
     console::OnUIRefresh();
     UsermapList::OnUIRefresh();
     DrawBranding(localClientNum);
+    RunStartupCommand();
 }
 
 void Campaign_UnlockAll()

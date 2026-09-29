@@ -19,6 +19,7 @@ bool Config::dump_rawfile = false;
 bool Config::dump_map_ents = false;
 bool Config::log_console = false;
 bool Config::thread_watch = false;
+char Config::startup_command[256] = {};
 char Config::mod_base_path[MAX_PATH] = {};
 std::string Config::data_root;
 bool Config::shared_layout_enabled = false;
@@ -282,6 +283,7 @@ Config::~Config()
     dump_map_ents = false;
     log_console = false;
     thread_watch = false;
+    startup_command[0] = '\0';
     data_root.clear();
     shared_layout_enabled = false;
     for (size_t i = 0; i < mounted_links.size(); ++i)
@@ -339,6 +341,11 @@ bool Config::LoadFromJson(const char *jsonBuffer, DWORD bufferSize)
             {
                 thread_watch = (jsonTokenType == Json_True);
             }
+            else if (wcscmp(propertyName, L"startup_command") == 0 && jsonTokenType == Json_String)
+            {
+                XJSONGetTokenValue(hJsonReader, valueBuffer, ARRAYSIZE(valueBuffer));
+                wcstombs_s(nullptr, startup_command, ARRAYSIZE(startup_command), valueBuffer, _TRUNCATE);
+            }
             else
             {
                 DbgPrint("[codxe][Config] WARNING: Ignoring unknown property: %ls\n", propertyName);
@@ -354,6 +361,7 @@ bool Config::LoadFromJson(const char *jsonBuffer, DWORD bufferSize)
     DbgPrint("  Dump Map Entities: %s\n", dump_map_ents ? "true" : "false");
     DbgPrint("  Log Console: %s\n", log_console ? "true" : "false");
     DbgPrint("  Thread Watch: %s\n", thread_watch ? "true" : "false");
+    DbgPrint("  Startup Command: %s\n", startup_command[0] ? startup_command : "(none)");
 
     if (active_mod[0] != '\0')
     {
