@@ -347,7 +347,8 @@ def _convert_map(args, paths, options, map_files, out_dir):
         progress.step("Merging into one fastfile")
     main_zone = zones[0] if len(zones) == 1 else merge_zones(x360(), zones)
     progress.step("Checking the scripts")
-    extra = missing_scripts_zone(x360(), main_zone, [map_files, IwdLibrary(args.iwd)], convs[0].console_library)
+    extra = missing_scripts_zone(x360(), main_zone, [map_files, IwdLibrary(args.iwd)], convs[0].console_library,
+                                 roots=(f"maps/{options.map_name}.gsc", f"clientscripts/{options.map_name}.csc"), from_map=mod_scripts)
     if extra is not None:
         main_zone = merge_zones(x360(), [main_zone, extra], log=lambda msg: None)
     # assets the game looks up by name (player body animations, shellshock files) no zone has
@@ -359,25 +360,37 @@ def _convert_map(args, paths, options, map_files, out_dir):
     # the mod's scripts that the game's own zones have too run under their own names (see scripts.py)
     from .scripts import keep_mod_scripts
 
-    keep_mod_scripts(x360(), main_zone, mod_scripts, convs[0].console_library, f"maps/{options.map_name}.gsc")
+    renamed = keep_mod_scripts(x360(), main_zone, mod_scripts, convs[0].console_library, f"maps/{options.map_name}.gsc")
+    # the options the mod's own front end menus set, before those menus go
+    from .scripts import menu_dvar_values
+
+    menu_values = menu_dvar_values(main_zone)
     if convs[0].console_library is not None:
         from .merge import drop_frontend_menus
 
         drop_frontend_menus(x360(), main_zone, convs[0].console_library.is_stock_menu)
-    # PC script menus (a music box) and hints name keyboard keys: the controller's buttons instead
-    from .menu import gamepad_script_menus
+    # PC script menus (a music box) and hints name keyboard keys: the controller's buttons instead;
+    # their items that do nothing stay out of the controller's way, and the D-pad moves between
+    # buttons as they are laid out
+    from .menu import controller_navigation, decorate_inert_items, gamepad_script_menus
     from .scripts import (
-        fix_modder_help, precache_before_waits, spawn_script_origins, speed_up_zombies_only, use_key_hints, valid_cursor_hints,
-        zombie_idles_for_zombies,
+        fix_modder_help, menu_dvar_defaults, precache_before_waits, spawn_script_origins, speed_up_zombies_only, use_key_hints,
+        valid_cursor_hints, zombie_idles_for_zombies,
     )  # fmt: skip
 
     gamepad_script_menus(x360(), main_zone)
+    from .scripts import script_strings
+
+    script_menus = script_strings(x360(), main_zone)  # the menus the scripts open are named in them
+    decorate_inert_items(x360(), main_zone, script_menus=script_menus)
+    controller_navigation(x360(), main_zone, script_menus=script_menus)
     use_key_hints(x360(), main_zone)
     # the modding kits' setups stop at missing entities, as their authors meant (see scripts.py)
     fix_modder_help(x360(), main_zone)
     spawn_script_origins(x360(), main_zone)
     valid_cursor_hints(x360(), main_zone)
     precache_before_waits(x360(), main_zone, f"maps/{options.map_name}.gsc")
+    menu_dvar_defaults(x360(), main_zone, menu_values, f"maps/{options.map_name}.gsc")
     speed_up_zombies_only(x360(), main_zone)
     zombie_idles_for_zombies(x360(), main_zone)
     # technique sets copied from CoD Xenon's maps read the dynamic shadow texture before it is set
@@ -397,6 +410,11 @@ def _convert_map(args, paths, options, map_files, out_dir):
     fixed = sync_alias_types(x360(), main_zone)
     if fixed:
         print(f"sound aliases: the type in the flags of {fixed} aliases set to their sound file's")
+    # the mod's versions of the game's scripts that keep no name of their own: the map's scripts folder,
+    # which CoD Xe loads in place of the game's (after the fixes above, which they have too)
+    from .scripts import usermap_scripts, write_usermap_scripts
+
+    write_usermap_scripts(usermap_scripts(x360(), main_zone, mod_scripts, convs[0].console_library, renamed), out_dir)
     return main_zone, getattr(convs[0], "planned_texture_bytes", 0)
 
 

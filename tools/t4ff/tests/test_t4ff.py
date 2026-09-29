@@ -491,6 +491,81 @@ death
         self.assertIn(b"\t{\r\n\t\t// t4ff: only zombies\r\n\t\tif( !IsDefined( zombie_stragglers[i].is_zombie ) || !zombie_stragglers[i].is_zombie )\r\n"
                       b"\t\t\tcontinue;\r\n\r\n\t\tzombie_stragglers[i].zombie_move_speed", rawfile_text(node))
 
+    def test_usermap_scripts(self):
+        """The mod's versions of the game's scripts that keep_mod_scripts could not rename (PhilMod's
+        _load, its client scripts) go to the map's scripts folder, which CoD Xe loads in place of the
+        game's; the same as the game's (whitespace aside), renamed ones and the map's own stay out, and
+        what an earlier conversion wrote there goes."""
+        import os
+        import tempfile
+        from unittest import mock
+
+        from t4ff.scripts import make_rawfile, usermap_scripts, write_usermap_scripts
+
+        p, template = self._rawfile_template()
+        mine = {"maps/_load.gsc": b"main()\n{\n\tphil();\n}\n", "maps/_same.gsc": b"f() { }\n", "clientscripts/_load.csc": b"main() { phil(); }\n",
+                "maps/_zombiemode_zone_manager.gsc": b"g() { phil(); }\n", "maps/mymap.gsc": b"main() { }\n"}
+        game = {"maps/_load.gsc": b"main()\n{\n}\n", "maps/_same.gsc": b"f()\n{\n}\n", "clientscripts/_load.csc": b"main() { }\n",
+                "maps/_zombiemode_zone_manager.gsc": b"g() { }\n"}
+        files = [(n, make_rawfile(p, template, n, t)) for n, t in mine.items()]
+
+        class Library:
+            def find_in_game_zones(self, asset_type, name):
+                return (None, make_rawfile(p, template, name, game[name])) if name in game else None
+
+        with mock.patch("t4ff.scripts._rawfiles", lambda p, z: files):
+            scripts = usermap_scripts(p, None, set(mine), Library(), {"maps/_zombiemode_zone_manager.gsc": "maps/_zombiemode_zone_manager_mod.gsc"})
+        self.assertEqual(scripts, {"maps/_load.gsc": mine["maps/_load.gsc"], "clientscripts/_load.csc": mine["clientscripts/_load.csc"]})
+        with tempfile.TemporaryDirectory() as out:
+            os.makedirs(os.path.join(out, "scripts", "maps"))
+            with open(os.path.join(out, "scripts", "maps", "_stale.gsc"), "wb") as f:
+                f.write(b"old")
+            self.assertEqual(write_usermap_scripts(scripts, out, log=lambda msg: None), ["clientscripts/_load.csc", "maps/_load.gsc"])
+            with open(os.path.join(out, "scripts", "maps", "_load.gsc"), "rb") as f:
+                self.assertEqual(f.read(), mine["maps/_load.gsc"])
+            self.assertFalse(os.path.exists(os.path.join(out, "scripts", "maps", "_stale.gsc")))
+            write_usermap_scripts({}, out, log=lambda msg: None)
+            self.assertFalse(os.path.exists(os.path.join(out, "scripts")))
+
+    def test_menu_dvar_defaults(self):
+        """PhilMod's main menu sets its difficulty (philmod_gamemode 2) before the map loads; the
+        console shows the game's menus, so the level script sets it when nothing did. Dvars set to
+        several values, set by expressions, the game's own and those no script reads are left out."""
+        from unittest import mock
+
+        from t4ff.layout import TypeRef
+        from t4ff.scripts import make_rawfile, menu_dvar_defaults, menu_dvar_values, rawfile_text
+        from t4ff.zone import BLOCK_VIRTUAL, Node, Zone
+
+        p, template = self._rawfile_template()
+        root = Node(TypeRef("record", "MenuList"), 1, BLOCK_VIRTUAL)
+        for text in ('"setdvar" "philmod_gamemode" 2 ; "close" "self"',
+                     '"setdvar" "philmod_gamemode" "dvarString" ( "philsv_gamemode" ) ;',
+                     '"setdvar" "credits_frommenu" 1 ; "setdvar" "cg_blood" 0 ;',
+                     '"setdvar" "credits_frommenu" 0 ; "setdvar" "unread_option" 1 ; "setdvar" "phil_hud" "on"'):
+            node = Node(TypeRef("scalar", "char", 1, 1), len(text) + 1, BLOCK_VIRTUAL)
+            node.string = True
+            node.data = bytearray(text.encode("latin-1") + b"\0")
+            root.children.append(node)
+        zone = Zone(p.name, [], [], [], 0, 0, None, None)
+        zone.extra_root = root
+        values = menu_dvar_values(zone)
+        self.assertEqual(values["philmod_gamemode"], {"2"})
+        self.assertEqual(values["credits_frommenu"], {"0", "1"})
+
+        level = b'main()\r\n{\r\n\tlevel.philMod.gameMode = GetDvarInt( "philmod_gamemode" );\r\n}\r\n'
+        other = (b'f()\n{\n\tif( GetDvar( "credits_frommenu" ) == "1" ) x();\n\tb = GetDvarInt("cg_blood");\n'
+                 b'\th = GetDvar( "phil_hud" );\n}\n')
+        files = [(n, make_rawfile(p, template, n, t)) for n, t in (("maps/mymap.gsc", level), ("maps/_phil_hud.gsc", other))]
+        with mock.patch("t4ff.scripts._rawfiles", lambda p, z: files):
+            self.assertEqual(menu_dvar_defaults(p, None, values, "maps/mymap.gsc", log=lambda msg: None), {"phil_hud": "on", "philmod_gamemode": "2"})
+            self.assertEqual(menu_dvar_defaults(p, None, values, "maps/mymap.gsc", log=lambda msg: None), {})  # once
+        self.assertTrue(rawfile_text(files[0][1]).startswith(
+            b"main()\r\n{\r\n\t// t4ff: the options the map's own menus set on PC, which the console does not show\r\n"
+            b'\tif( GetDvar( "phil_hud" ) == "" )\r\n\t\tSetDvar( "phil_hud", "on" );\r\n'
+            b'\tif( GetDvar( "philmod_gamemode" ) == "" )\r\n\t\tSetDvar( "philmod_gamemode", "2" );\r\n\r\n'
+            b"\tlevel.philMod.gameMode"))
+
     def test_zombie_idles_for_zombies(self):
         """The zombie mode replaced the stand and crouch idles of every AI with the zombies' (Dead
         Sand's soldiers stood with their arms out): on maps with soldiers, the zombie idles get poses
@@ -1039,6 +1114,167 @@ class MenuTests(unittest.TestCase):
         self.assertEqual(texts(music), ["^1A: ^4First song", "^1X: ^4Second song", "Press B to close menu", "Made by 1 person"])
         self.assertEqual(handlers(other), [(27, "close")])
         self.assertEqual(texts(other), ["Press ESC"])
+
+    def test_inert_menu_items_are_decorations(self):
+        """Mini-Labor's weapon choice puts a background under each button, its ACCEPT's at the same
+        place and before it: the console's focus stopped on them and ACCEPT could not be pressed.
+        Items that do nothing become decorations; the buttons, items already decorations and menus
+        with nothing to press stay as they are."""
+        import struct
+
+        from t4ff.commands import find_field
+        from t4ff.layout import TypeRef
+        from t4ff.menu import WINDOW_DECORATION, decorate_inert_items
+        from t4ff.platforms import x360
+        from t4ff.zone import BLOCK_VIRTUAL, Node, Ptr, Zone
+
+        p = x360()
+        mrec, irec, wrec = p.record("menuDef_t"), p.record("itemDef_s"), p.record("windowDef_t")
+        window_name = find_field(mrec, "window").offset + find_field(wrec, "name").offset
+        flags_off = find_field(irec, "window").offset + find_field(wrec, "staticFlags").offset
+
+        def record(name):
+            node = Node(TypeRef("record", name, p.record(name).size), 1, BLOCK_VIRTUAL)
+            node.data = bytearray(p.record(name).size)
+            return node
+
+        def string(text):
+            node = Node(TypeRef("scalar", "char", 1, 1), len(text) + 1, BLOCK_VIRTUAL)
+            node.string = True
+            node.data = bytearray(text.encode("latin-1") + b"\0")
+            return node
+
+        def point(owner, off, target):
+            owner.relocs[off] = Ptr("follow", target)
+            owner.children.append(target)
+            struct.pack_into(">I", owner.data, off, 0xFFFFFFFF)
+
+        def menu(name, specs):  # (type, action, static flags)
+            m = record("menuDef_t")
+            point(m, window_name, string(name))
+            items = Node(TypeRef("pointer", "itemDef_s", 4, 4), len(specs), BLOCK_VIRTUAL)
+            items.data = bytearray(4 * len(specs))
+            for i, (item_type, action, flags) in enumerate(specs):
+                item = record("itemDef_s")
+                struct.pack_into(">i", item.data, find_field(irec, "type").offset, item_type)
+                struct.pack_into(">I", item.data, flags_off, flags)
+                if action:
+                    point(item, find_field(irec, "action").offset, string(action))
+                point(items, 4 * i, item)
+            point(m, find_field(mrec, "items").offset, items)
+            struct.pack_into(">i", m.data, find_field(mrec, "itemCount").offset, len(specs))
+            return m
+
+        def flags(m):
+            items = m.relocs[find_field(mrec, "items").offset].target()
+            return [struct.unpack_from(">I", items.relocs[4 * i].target().data, flags_off)[0] for i in range(items.count)]
+
+        loadout = menu("loadout", [(0, None, 0), (1, '"scriptMenuResponse" "accept"', 0), (0, None, 0),
+                                   (1, '"scriptMenuResponse" 1', 0), (0, None, WINDOW_DECORATION | 0x800000), (8, None, 0)])
+        hud = menu("hud", [(0, None, 0), (1, None, 0)])
+        root = Node(TypeRef("record", "MenuList"), 1, BLOCK_VIRTUAL)
+        root.children = [loadout, hud]
+        zone = Zone(p.name, [], [], [], 0, 0, None, None)
+        zone.extra_root = root
+        messages = []
+        self.assertEqual(decorate_inert_items(p, zone, log=messages.append), {"loadout": 2})
+        self.assertEqual(flags(loadout), [WINDOW_DECORATION, 0, WINDOW_DECORATION, 0, WINDOW_DECORATION | 0x800000, 0])
+        self.assertEqual(flags(hud), [0, 0])  # nothing to press: left alone
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(decorate_inert_items(p, zone, log=lambda msg: None), {})  # once
+
+    def test_menu_grid_on_a_controller(self):
+        """Mini-Labor's weapon choice: buttons in a grid under an ACCEPT. Each button gets D-pad and
+        stick handlers giving the focus to the nearest button that way, unnamed buttons a name for
+        them; the choices (they set a local variable and answer the scripts) follow the focus, and A
+        on one confirms it. Menus the scripts do not name are left alone."""
+        import struct
+
+        from t4ff.commands import find_field
+        from t4ff.layout import TypeRef
+        from t4ff.menu import controller_navigation
+        from t4ff.platforms import x360
+        from t4ff.zone import BLOCK_VIRTUAL, Node, Ptr, Zone
+
+        p = x360()
+        mrec, irec, wrec, krec = p.record("menuDef_t"), p.record("itemDef_s"), p.record("windowDef_t"), p.record("ItemKeyHandler")
+        window = find_field(irec, "window").offset
+        name_off, rect_off = window + find_field(wrec, "name").offset, window + find_field(wrec, "rect").offset
+        action_off, focus_off, key_off = (find_field(irec, f).offset for f in ("action", "onFocus", "onKey"))
+
+        def record(name):
+            node = Node(TypeRef("record", name, p.record(name).size), 1, BLOCK_VIRTUAL)
+            node.data = bytearray(p.record(name).size)
+            return node
+
+        def string(text):
+            node = Node(TypeRef("scalar", "char", 1, 1), len(text) + 1, BLOCK_VIRTUAL)
+            node.string = True
+            node.data = bytearray(text.encode("latin-1") + b"\0")
+            return node
+
+        def point(owner, off, target):
+            owner.relocs[off] = Ptr("follow", target)
+            owner.children.append(target)
+            struct.pack_into(">I", owner.data, off, 0xFFFFFFFF)
+
+        def text(node, off):
+            ptr = node.relocs.get(off)
+            return bytes(ptr.target().data).rstrip(b"\0").decode() if ptr is not None and ptr.kind != "null" else None
+
+        def menu(name, specs):  # (x, y, action)
+            m = record("menuDef_t")
+            point(m, find_field(mrec, "window").offset + find_field(wrec, "name").offset, string(name))
+            items = Node(TypeRef("pointer", "itemDef_s", 4, 4), len(specs), BLOCK_VIRTUAL)
+            items.data = bytearray(4 * len(specs))
+            for i, (x, y, action) in enumerate(specs):
+                item = record("itemDef_s")
+                struct.pack_into(">i", item.data, find_field(irec, "type").offset, 1)
+                struct.pack_into(">4f", item.data, rect_off, x, y, 100, 50)
+                point(item, action_off, string(action))
+                point(items, 4 * i, item)
+            point(m, find_field(mrec, "items").offset, items)
+            struct.pack_into(">i", m.data, find_field(mrec, "itemCount").offset, len(specs))
+            return m, [items.relocs[4 * i].target() for i in range(len(specs))]
+
+        accept = '"scriptMenuResponse" "accept" ; "setLocalVarBool" "done" 1 ; '
+        choice = '"scriptMenuResponse" {0} ; "setLocalVarInt" "choice" {0} ; '
+        loadout, items = menu("loadout", [(300, 0, accept), (0, 100, choice.format(1)), (200, 100, choice.format(2)),
+                                          (0, 200, choice.format(3)), (200, 200, choice.format(4))])
+        other, other_items = menu("other", [(0, 0, '"close" "self"'), (200, 0, '"close" "self"')])
+        root = Node(TypeRef("record", "MenuList"), 1, BLOCK_VIRTUAL)
+        root.children = [loadout, other]
+        zone = Zone(p.name, [], [], [], 0, 0, None, None)
+        zone.extra_root = root
+        self.assertEqual(controller_navigation(p, zone, log=lambda msg: None, script_menus={"loadout"}), {"loadout": 5})
+        names = [text(item, name_off) for item in items]
+        self.assertEqual(names, [f"t4ff_focus_{i}" for i in range(5)])
+
+        def moves(item):
+            out, ptr = {}, item.relocs.get(key_off)
+            while ptr is not None and ptr.kind != "null":
+                h = ptr.target()
+                out[struct.unpack_from(">i", h.data, 0)[0]] = text(h, find_field(krec, "action").offset)
+                ptr = h.relocs.get(find_field(krec, "next").offset)
+            return out
+
+        def target(item, key):
+            return moves(item)[key].split('"')[3]
+
+        up, down, left, right = 20, 21, 22, 23
+        first = items[1]
+        self.assertEqual((target(first, up), target(first, down), target(first, left), target(first, right)),
+                         ("t4ff_focus_0", "t4ff_focus_3", "t4ff_focus_1", "t4ff_focus_2"))
+        self.assertEqual(target(items[4], up), "t4ff_focus_2")
+        self.assertEqual(target(items[0], down), "t4ff_focus_2")  # ACCEPT: to the button below it
+        self.assertEqual(sorted(moves(first)), [20, 21, 22, 23, 28, 29, 30, 31])  # the stick too
+        # the choices follow the focus, A confirms
+        self.assertEqual(text(first, focus_off), choice.format(1))
+        self.assertEqual(text(first, action_off), accept)
+        self.assertEqual(text(items[0], action_off), accept)
+        self.assertIsNone(text(items[0], focus_off))
+        # a menu the scripts do not name
+        self.assertIsNone(other_items[0].relocs.get(key_off))
 
     def test_dynamic_map_list(self):
         """The Nazi Zombies map list of CoD Xenon's patch_ui.ff: the stock rows stay, the 13 rows of
@@ -2128,6 +2364,54 @@ not_an_animation_anywhere
         kept = {name for name, _ in _rawfiles(x360(), extra)} if extra is not None else set()
         self.assertFalse(set(ZOMBIE_ENGINE_SCRIPTS) & kept)
         self.assertIsNone(missing_scripts_zone(x360(), zone_of_assets(x360(), [("rawfile", "maps/mak.gsc", make_rawfile(x360(), template, "maps/mak.gsc", b"main() {}"))]), [], library, log=lambda msg: None))
+
+    def test_level_script_from_the_maps_files(self):
+        """PhilMod's maps keep every script in an .iwd: the level script and client script, which the
+        engine loads by name and no script names, come from the map's files, and so does all they
+        use; a script the game's zones have too comes from the map's files when they have it (as on
+        PC), and is reported for keep_mod_scripts."""
+        from t4ff.layout import TypeRef
+        from t4ff.platforms import x360
+        from t4ff.scripts import _rawfiles, make_rawfile, missing_scripts_zone, zone_of_assets
+        from t4ff.zone import BLOCK_VIRTUAL, Node, Ptr
+
+        p = x360()
+        template = Node(TypeRef("record", "RawFile", p.record("RawFile").size), 1, BLOCK_VIRTUAL)
+        template.data = bytearray(p.record("RawFile").size)
+        buffer = Node(TypeRef("scalar", "char", 1, 1), 1, BLOCK_VIRTUAL)
+        buffer.extra["origin"] = ("member", "RawFile", "buffer")
+        buffer.segments = [(buffer.type, 1, 1, False)]
+        template.relocs[8] = Ptr("follow", buffer)
+        template.children = [buffer]
+        files = {
+            "maps/mymap.gsc": b"main()\n{\n\tmaps\\_load::main();\n\tmaps\\_phil_mod::init();\n\tmaps\\_other::go();\n}\n",
+            "clientscripts/mymap.csc": b"main()\n{\n}\n",
+            "maps/_load.gsc": b"main()\n{\n\tmaps\\_phil_extra::go();\n}\n",
+            "maps/_phil_mod.gsc": b"init()\n{\n}\n",
+            "maps/_phil_extra.gsc": b"go()\n{\n}\n",
+        }
+
+        class MapFiles:
+            def read(self, name):
+                return files.get(name)
+
+        class Library:  # the game's zones have maps/_load.gsc and maps/_other.gsc
+            def in_game_zones(self, asset_type, name):
+                return name in ("maps/_load.gsc", "maps/_other.gsc")
+
+            def find(self, asset_type, name):
+                return None
+
+        zone = zone_of_assets(p, [("rawfile", "maps/unrelated.gsc", make_rawfile(p, template, "maps/unrelated.gsc", b"main() {}"))])
+        from_map, logs = set(), []
+        extra = missing_scripts_zone(p, zone, [MapFiles()], Library(), log=logs.append,
+                                     roots=("maps/mymap.gsc", "clientscripts/mymap.csc"), from_map=from_map)
+        added = sorted(name for name, _ in _rawfiles(p, extra))
+        self.assertEqual(added, ["clientscripts/mymap.csc", "maps/_load.gsc", "maps/_phil_extra.gsc", "maps/_phil_mod.gsc", "maps/mymap.gsc"])
+        self.assertEqual(from_map, {"maps/_load.gsc"})
+        self.assertTrue(any("maps/mymap.gsc (the game loads it by name" in line for line in logs), logs)
+        # without the roots nothing names them, as before
+        self.assertIsNone(missing_scripts_zone(p, zone, [MapFiles()], Library(), log=lambda msg: None))
 
     def test_convert_map(self):
         """The whole usermap (map + patch + mod, merged) converts to a zone the console loader reads,

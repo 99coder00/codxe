@@ -409,6 +409,39 @@ def plan_textures(conv, root: Node):
     plan_textures_shared([conv])
 
 
+# The images of 2D materials (menus, the HUD, script menus: technique set "2d") are seen at their
+# size on screen, where a dropped level shows as a blur (Mini-Labor's weapon choice). The texture
+# budget reduces them only once no other texture can be.
+UI_TECHNIQUE_SETS = ("2d",)
+
+
+def _ui_images(conv) -> set:
+    """Names of the images the 2D materials of ``conv``'s zone use."""
+    rec = conv.src.record("Material")
+    techset_off = find_field(rec, "techniqueSet").offset
+    table_off = find_field(rec, "textureTable").offset
+    count_off = find_field(rec, "textureCount").offset
+    entry = conv.src.record("MaterialTextureDef")
+    image_off = find_field(entry, "u").offset
+    names = set()
+    for node in conv.zone.extra_root.walk():
+        if node.type.name != "Material" or (node.extra.get("origin") or ("",))[0] != "asset":
+            continue
+        ptr = node.relocs.get(techset_off)
+        techset = ptr.target() if ptr is not None and ptr.kind != "null" else None
+        if techset is None or asset_display_name_pc(conv, techset).lstrip(",") not in UI_TECHNIQUE_SETS:
+            continue
+        ptr = node.relocs.get(table_off)
+        table = ptr.target() if ptr is not None and ptr.kind != "null" else None
+        for i in range(node.data[count_off] if table is not None else 0):
+            ptr = table.relocs.get(i * entry.size + image_off)
+            image = ptr.target() if ptr is not None and ptr.kind != "null" else None
+            name = asset_display_name_pc(conv, image) if image is not None else ""
+            if name:
+                names.add(name.lstrip(","))
+    return names
+
+
 def plan_textures_shared(convs):
     """Choose how many top mip levels to drop per image so the textures of all the zones of
     ``convs`` (e.g. a map and its mod, merged later) fit one memory budget.
@@ -487,8 +520,9 @@ def plan_textures_shared(convs):
     total = sum(size(n) for n in sources)
     before = total
     if options.texture_budget:
+        ui = set().union(*(_ui_images(conv) for conv in convs))
         while total > options.texture_budget:
-            candidates = [n for n in sources if can_drop(n)]
+            candidates = [n for n in sources if can_drop(n) and n not in ui] or [n for n in sources if can_drop(n)]
             if not candidates:
                 convs[0].warn(f"textures need {total / 1048576:.1f} MiB, over the {options.texture_budget / 1048576:.1f} MiB budget, and cannot be reduced further")
                 break

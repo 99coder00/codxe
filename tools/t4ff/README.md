@@ -190,6 +190,14 @@ load for a usermap ("Could not find script"); it comes from CoD Xenon's Aztec
 when that is given with `--console-zone`. Scripts found nowhere are left to the
 game's own zones, and the log lists them.
 
+The level script (`maps/<map>.gsc`) and client script (`clientscripts/<map>.csc`)
+are loaded by name, so no script names them: maps made with PhilMod (Mini-Labor)
+keep every script in an `.iwd` and none in the fastfiles, and the console
+stopped with "Could not find script 'maps/nazi_zombie_002c'". They come from the
+map's files when no zone has them, and so does everything they use. A script the
+game's zones have too comes from the map's files when the map has its own (the
+PC runs the mod's); whether the console can run it is decided below.
+
 Zombie maps also get the two client scripts the game loads by name for them,
 which no script names: `clientscripts/_zombie_mode.csc` and the zombie
 `clientscripts/_callbacks.csc` (with `sound_notify`). The console's own zones
@@ -250,6 +258,30 @@ name the buttons ("A: Beauty Of Annihilation", "Press B to close menu"). Hints
 the scripts set naming the PC's use key ("Press F To Play A Song") show the
 console's use button.
 
+Menus made for the mouse can also be pressed with a controller: the D-pad moves
+the focus through the menu's items in their order (up and left to the previous
+item, left only when it is on the same row, down and right likewise), and A acts
+on the focused one. The console focuses any item that is not a decoration, so
+backgrounds left without `decoration` stop the focus where A does nothing:
+Mini-Labor's weapon choice puts one under each button, its ACCEPT's at the same
+place and first, and ACCEPT could not be pressed (the game waited for it
+forever). Items that do nothing (no action, handler or dvar) become decorations.
+Moving through the list order suits a column of buttons, not a grid (down moved
+only at the end of a row), and the focus shows nothing on buttons made of
+pictures. So the buttons of the menus the map's scripts open get their own
+D-pad and stick handlers, which the console runs before its own moves: each
+gives the focus (`setfocus`) to the nearest button in that direction, and
+unnamed buttons get a name for it (`t4ff_focus_<n>`). Buttons choosing a value
+the menu shows (they set a local variable: the frame around a weapon) and
+answer the scripts, with one other button confirming (ACCEPT), follow the focus:
+their action runs when the focus arrives, and A on one confirms it. A sends one
+answer only: a script waiting for them in a loop gets one per frame.
+
+Mods choose their options in their own front end menus (PhilMod's difficulty,
+`philmod_gamemode`), which the console does not show: a dvar the map's scripts
+read that the map's menus set to one value gets it at the start of the level
+script when unset (Mini-Labor plays on "Default", not "Easy").
+
 Maps made with Sparks' DLC2 / DLC3 modding kits check their entities with
 `modderHelp()`, whose setups are meant to stop when one is missing, but it only
 says so with `developer` on. In the game as played the setups go on without the
@@ -281,8 +313,14 @@ until the failsafe killed them. A script of the mod that the game's zones have
 too gets a name of its own (`maps/_zombiemode_zone_manager_mod.gsc`), and the
 map's scripts call it by that name. Not when a script of the game's that the map
 runs calls it too (the game's `maps/_load.gsc` calls `maps/_laststand.gsc`), nor
-for scripts the engine runs by name (animscripts, client scripts): the
-conversion warns about those, which stay the game's. Dead Sand's crash
+for scripts the engine runs by name (animscripts, client scripts): those go to
+the map's `scripts` folder (`usermaps/<map>/scripts/maps/_load.gsc`, ...), which
+CoD Xe loads in place of the game's copies while the map runs, as the PC loads a
+mod's loose scripts (CoD Xe builds from before that feature run the game's).
+PhilMod replaces much of the game's own: `_load`, `_gameskill` (zombie damage
+kept at full), `_laststand` (its solo Quick Revive), `_loadout`,
+`_callbackglobal`, `common_scripts/utility`, the death and melee animscripts and
+two client scripts all run from there. Dead Sand's crash
 ("Overflowed stackpoints!") came from the same: the console ran `patch.ff`'s
 `maps/_zombiemode_blockers.gsc` instead of the mod's.
 
@@ -364,7 +402,14 @@ the same one, with a 1280x720 picture) with, in this order:
 
 Its picture is named `loadscreen_<map>_codxe`: the map's own zone often has a
 `loadscreen_<map>` image too (The Simpsons does), which would replace the
-picture once it loads.
+picture once it loads. For the same reason the map's own zones never take assets
+from other maps' load zones among the console fastfiles: a mod's menus name
+`$levelbriefing`, and Mini-Labor carried Mario's, which showed once the map had
+loaded.
+
+In Xenia, a map loaded after another in the same session can show the previous
+map's picture: every load zone made this way has its picture at the same place
+and size, and Xenia keeps the texture it had there. A console reads it anew.
 
 Without any of CoD Xenon's load zones among the console fastfiles, the map's PC
 `_load.ff` is converted when it has one.
@@ -379,8 +424,10 @@ good values. By default each map gets what fits: its textures get what the
 keep full quality when that is enough (Zombie Woods, Aztec: about 130 MiB with
 every texture at full size). A map over the target is converted again with
 less texture memory, its largest textures losing top mip levels first; the
-world's lightmaps keep theirs. Loaded sounds beyond `--loaded-sound-memory`
-(32 MiB) are streamed, the longest first; looping sounds stay loaded, since a
+world's lightmaps keep theirs, and the images of 2D materials (menus, the HUD),
+seen at their size on screen, lose levels only once nothing else can. Loaded
+sounds beyond `--loaded-sound-memory` (32 MiB) are streamed, the longest first;
+looping sounds stay loaded, since a
 looping stream holds one of the console's few stream channels as long as it
 plays and the music and voices, streamed too, are then cut off halfway. `--max-texture-size`,
 `--sound-rate 32000` and `--mono-sounds` trade more quality for memory.
@@ -514,6 +561,12 @@ Verify new console layouts with:
 python dev/verify_samples.py path/to/console/*.ff   # updates t4ff/defs/x360_verified.txt
 ```
 
+The game disc's own maps are samples too: Nacht (`nazi_zombie_prototype.ff`) and Makin (`mak.ff`)
+proved the layouts of world portals (`GfxPortal`, which every map with portals has: Mini-Labor's
+world was left out before), destructibles, water cells, LOD chains and physics constraints. Their
+headers count the delayed image pixels in the zone's size and t4ff's do not (both load): only the
+header's size, temp and runtime block fields may differ.
+
 ### Maps tested on the console
 
 | Map | Result |
@@ -522,6 +575,7 @@ python dev/verify_samples.py path/to/console/*.ff   # updates t4ff/defs/x360_ver
 | Zombie Woods (2008) | plays, with a title card loading screen |
 | The Simpsons (2010) | plays; voices, music box, rounds and dog rounds work. Known problems below |
 | Dead Sand (2009) | plays; commissars, marines, SS and the Nebelwerfer work (Xenia). Known problems below |
+| Mini-Labor (2014, PhilMod) | plays; weapon choice, doors, power, box, Pack-a-Punch, Perk-o-Matic work (Xenia). Known problems below |
 
 ### Known problems
 
@@ -542,6 +596,9 @@ python dev/verify_samples.py path/to/console/*.ff   # updates t4ff/defs/x360_ver
   script reads `target_pos.origin` of a position (undefined), the retail game skips the error and
   every AI passes the distance check. Seen on the console; PC runs the same script engine, so it
   is left as the map plays.
+- **Mini-Labor** needs a CoD Xe build that loads the map's `scripts` folder for PhilMod's own
+  core scripts; older builds run the game's (easier damage, the stock last stand). Its objective
+  chain (wrench, uranium, C4, the Endgame-O-Matic) and traps are not checked yet.
 - **Stock assets no console fastfile has** stay missing ("Could not load material/fx/xanim" in the
   console log): the PC game's own zones have them, and t4ff does not read those yet. Maps that use
   campaign AI or effects (Dead Sand) miss the most.

@@ -141,7 +141,11 @@ lacks are added (from its files, the console fastfiles, the PC files). Script fi
   precaches, are made before the level script's first wait (`precache_before_waits`; Dead Sand's
   rockets);
 - `speed_up_zombies()` hurries zombies only (`speed_up_zombies_only`; Dead Sand's SS sprinted);
-- on maps with soldiers, only zombies idle as zombies (`zombie_idles_for_zombies`).
+- on maps with soldiers, only zombies idle as zombies (`zombie_idles_for_zombies`);
+- the level and client scripts, loaded by name, come from the map's files when no zone has them,
+  and a script the game has too comes from the map's files when it has its own
+  (`missing_scripts_zone` roots; Mini-Labor, 7);
+- options the mod's front end menus set get their value when unset (`menu_dvar_defaults`; 7).
 
 **Assets the game looks up by name.** Player body animations of the player animation script,
 shellshock files the scripts name, and the animations of the anim trees (`animtrees/*.atr`): the
@@ -162,7 +166,9 @@ confirmed in Xenia with CoD Xe r422: up from the first row goes to the last, 7-1
 
 **CoD Xe (T4 SP).** `log_console` (console and script errors to the debug output), `thread_watch`
 (where a stuck thread is), `startup_command` (a console command run once the main menu is up, e.g.
-`devmap <map>`), the dynamic usermaps list, a mod menu entry for music boxes, VS2010 build script.
+`devmap <map>`), a usermap's own versions of the game's scripts (`usermaps/<map>/scripts/`, loaded in
+place of the zones' copies), the dynamic usermaps list, a mod menu entry for music boxes, VS2010
+build script.
 
 ## Maps tested in game
 
@@ -172,6 +178,7 @@ confirmed in Xenia with CoD Xe r422: up from the first row goes to the last, 7-1
 | Zombie Woods (`nazi_zombie_wh`, 2008) | converts and plays; title card loading screen |
 | The Simpsons (`simpsons`, 2010, mod heavy) | converts and plays; voices, music box, airstrike (tester), rounds and dog rounds (Xenia) work. The window crash (1) is fixed but awaits a console test; Moe's (2) not looked into |
 | Dead Sand (`nazi_zombie_dead_sand`, 2009) | converts and plays; commissars, marines, SS, Nebelwerfer (Xenia). Objective picture (3) |
+| Mini-Labor (`nazi_zombie_002c`, 2014, PhilMod) | converts and plays; weapon choice, doors, power, box, Pack-a-Punch, Perk-o-Matic (Xenia). PhilMod's core scripts from the map's scripts folder (needs the new CoD Xe; 7) |
 
 ## Open problems
 
@@ -314,14 +321,60 @@ the map's alias use the game's own stream from the disc.
 - The image load def is loaded with a follow pointer (-1) where the game's own zones use insert
   (-2); harmless so far.
 - Volume maps are still references.
+- The zone header's size: the game's own zones count the delayed image pixels in it, t4ff's do not
+  (`Writer.write`); both load. Left as is.
+
+### 7. Mini-Labor (PhilMod): fixed so far, and PhilMod's core scripts
+
+A team map built on PhilMod (YaPh1l's framework: 10 perks through a Perk-o-Matic, 10 powerups,
+ballistic knife, crossbow, traps, an objective ending, five difficulties). Fixed, checked in Xenia:
+
+- **Its world was left out** ("console layout of GfxPortal not verified"): no console sample had
+  portals. The disc's Nacht and Makin (`WaW/nazi_zombie_prototype.ff`, `mak.ff`) round trip byte
+  for byte after the header and verified `GfxPortal` and 11 more layouts; `verify_samples.py`
+  accepts header differences in size, temp and runtime only.
+- **"Could not find script 'maps/nazi_zombie_002c'"**: every PhilMod script is in `_phil_mod.iwd`;
+  the level and client scripts, loaded by name, are now roots of `missing_scripts_zone`.
+- **The weapon choice (Auswahlomat) could not be accepted**: backgrounds took the focus (see the
+  README); `decorate_inert_items` (menu.py). How the console moves the focus, from the disc's
+  `default.xex`: the menu key handler (`sub_82261BB8`) sends up/left to the previous item unless
+  (`sub_82263828`) the previous focusable item is on the same row (the focused item's vertical
+  centre within its height) and to the left, left only when it is; down/right likewise with the
+  next item (`sub_82263908`). Item_HandleKey is `sub_822619E8`.
+- **Blurry menus**: the texture budget reduces 2D materials' images last (`_ui_images`, assets.py).
+- **Easy instead of Default**: `menu_dvar_defaults` (scripts.py).
+- **Mario's loading screen once the map had loaded**: the mod's menus name `$levelbriefing`, and the
+  console library found it in CoD Xenon's `mario_load.ff`; the library now leaves load zones out
+  (library.py). Xenia also shows the previous map's loading picture when maps are loaded one after
+  another in one session (same address and size in every load zone; its texture cache keeps it).
+- **The weapon choice on a controller** (tester: the D-pad did nothing visible, A did not start
+  the game): `controller_navigation` (menu.py) gives each button of the script menus D-pad and
+  stick handlers (`setfocus` the nearest button that way; item handlers run before the default
+  moves: `sub_8225C5B0`, the menu's own handlers first, then the focused item's), and choices
+  confirmed by one button follow the focus (onFocus) and confirm on A. A first sent the choice and
+  the confirmation: the level script's `waittill("menuresponse")` loop got the first only.
+- **PhilMod's core scripts** (`_load`, `_gameskill`, `_laststand`, `_loadout`, `_callbackglobal`,
+  `common_scripts/utility`, the death, melee and utility animscripts, two client scripts): the game's
+  own scripts call them too or the engine runs them by name, so no renaming. t4ff writes them to
+  `usermaps/<map>/scripts/`, and CoD Xe's script loader hook (`scr_parser.cpp`,
+  `Scr_AddSourceBuffer`) reads that folder after the active mod's, so they run in place of the
+  game's as on PC. Checked in Xenia: all 18 used load, no script error, `player_damageMultiplier`
+  ends at PhilMod's 1 (the game's sets about 0.36), the systems above work.
+
+Not checked yet: the objective chain
+(wrench, uranium, C4, the Endgame-O-Matic, `end_game`), the saw blades, the Amm-O-Matic, the
+zipline. Its ending is Treyarch's game over; PhilMod's `maps/credits.gsc` only backs its main
+menu's "About this map", which the console does not show.
 
 ## Next steps
 
 1. The Simpsons on a console: the window crash (1) after an airstrike and barrier repairs, rounds
    in the TV room and dog rounds (2); then Moe's (2).
 2. Dead Sand on a console (3), public testing; its objective picture.
-3. Stock assets: named materials, then the PC game's fastfiles as a source (4).
-4. A known complex map next, once these are done.
+3. Mini-Labor: public testing (with the CoD Xe build that loads usermap scripts); its objective chain (7).
+4. Stock assets: named materials, then the PC game's fastfiles as a source (4).
+5. Das Herrenhaus (Der Riese scripts, Black Ops perks, a boss, buildables, Harry's shield) as the
+   next complex map.
 
 ## Investigation toolbox
 
@@ -375,6 +428,14 @@ How the checks above were made, to repeat them:
   error logged) on one such script until variables named `alive`, `mod`, `rec` and functions named
   `track`, `report` were renamed (which one was not narrowed down): with a hang right after
   "GSCLoader: Loaded override script", suspect the script.
+- **Menus in a test.** With `startup_command` nothing pressed START at the title screen, so the
+  game listens to the controller on the first slot, not the keyboard on the second: press START
+  from the keyboard until the log shows "startup_command:". A test script can log what menus send
+  (`self waittill("menuresponse", menu, response)`) and answer them itself
+  (`player notify("menuresponse", "loadout", "accept")`).
+- **The console's script compiler** hangs the level load without an error on an unknown function
+  (`array()` is PC only): check each builtin and helper a test script uses against the console's
+  scripts first.
 - **Loading a map at boot.** `"startup_command": "devmap <map>"` in `codxe.json` loads it once the
   main menu is up (no menu navigation or typing in Xenia). `thread_watch` on hangs Dead Sand's load:
   keep it off unless looking for a stuck thread.

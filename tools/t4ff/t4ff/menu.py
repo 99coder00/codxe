@@ -28,9 +28,10 @@ from __future__ import annotations
 
 import re
 import struct
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from .commands import find_field
+from .layout import TypeRef
 from .zone import Node, Platform, Ptr, Zone
 
 LIST_MENU = "levels_unlock"
@@ -825,3 +826,214 @@ def _set_label_texts(zone: Zone, labels: List[Tuple[Node, str]], log=print):
         node.data = bytearray(text.encode("latin-1") + b"\0")
         node.count = len(node.data)
         node.segments = [(node.type, node.count, node.count, False)]
+
+
+# A controller moves the focus from item to item (the D-pad), and the console focuses any item that
+# is not a decoration (staticFlags WINDOW_DECORATION), then acts on the focused one (A). PC menus made
+# for the mouse can leave their backgrounds without "decoration": the click still reaches the button
+# over them. Mini-Labor's weapon choice puts a background under each button, its ACCEPT's at the
+# same place and before it, so on the console the focus stopped on backgrounds and ACCEPT could not
+# be pressed: the game waited for it forever. Items that do nothing (no action, no handler, no dvar)
+# are decorations, as the menus of the game mark theirs; they are drawn as before.
+WINDOW_DECORATION = 0x00100000
+_INERT_TYPES = (0, 1)  # ITEM_TYPE_TEXT, ITEM_TYPE_BUTTON
+_ITEM_HANDLERS = ("mouseEnterText", "mouseExitText", "mouseEnter", "mouseExit", "action", "onAccept", "onFocus",
+                  "leaveFocus", "dvar", "dvarTest", "onListboxSelectionChange", "onKey", "enableDvar")  # fmt: skip
+
+
+def decorate_inert_items(p: Platform, zone: Zone, log=print, script_menus: Optional[Set[str]] = None) -> Dict[str, int]:
+    """Items of the zone's menus that do nothing become decorations (see above); with
+    ``script_menus`` (lowercase names the map's scripts use), only those menus. Returns {menu name:
+    items changed}."""
+    mrec, irec, wrec = p.record("menuDef_t"), p.record("itemDef_s"), p.record("windowDef_t")
+    name_off = find_field(mrec, "window").offset + find_field(wrec, "name").offset
+    items_off, count_off = find_field(mrec, "items").offset, find_field(mrec, "itemCount").offset
+    flags_off = find_field(irec, "window").offset + find_field(wrec, "staticFlags").offset
+    type_off = find_field(irec, "type").offset
+    handlers = [find_field(irec, f).offset for f in _ITEM_HANDLERS if find_field(irec, f) is not None]
+    changed: Dict[str, int] = {}
+    for menu in zone.extra_root.walk():
+        if menu.type.name != "menuDef_t":
+            continue
+        ptr = menu.relocs.get(items_off)
+        array = ptr.target() if ptr is not None and ptr.kind != "null" else None
+        count = p.u32.unpack_from(menu.data, count_off)[0] if array is not None else 0
+        focusable, inert = 0, []
+        for i in range(count):
+            item_ptr = array.relocs.get(4 * i)
+            item = item_ptr.target() if item_ptr is not None and item_ptr.kind != "null" else None
+            if item is None or len(item.data) < flags_off + 4:
+                continue
+            flags = p.u32.unpack_from(item.data, flags_off)[0]
+            if flags & WINDOW_DECORATION:
+                continue
+            if any(off in item.relocs and item.relocs[off].kind != "null" for off in handlers):
+                focusable += 1
+            elif p.u32.unpack_from(item.data, type_off)[0] in _INERT_TYPES:
+                inert.append((item, flags))
+        if not inert or not focusable:
+            continue  # nothing to reach, nothing in the way
+        if script_menus is not None and (_text_of(menu, name_off) or "").lower() not in script_menus:
+            continue
+        for item, flags in inert:
+            p.u32.pack_into(item.data, flags_off, flags | WINDOW_DECORATION)
+        name = _text_of(menu, name_off) or "?"
+        changed[name] = len(inert)
+    if changed:
+        log(f"menus: items that do nothing are decorations, which the controller's focus skips "
+            f"({', '.join(f'{name} {n}' for name, n in sorted(changed.items()))})")
+    return changed
+
+
+# The D-pad moves the focus through a menu's items in their order: up and left to the previous one
+# (left only when it is on the same row), down and right to the next (the disc's menu key handler,
+# see HANDOFF.md). In a grid of buttons (Mini-Labor's weapon choice, 3 by 3 under an ACCEPT) down
+# only moves at the end of a row and up reaches ACCEPT from the first button only. A focused item's
+# own key handlers come first (then the default moves): every button of the map's menus gets one per
+# direction, D-pad and stick, giving the focus to the nearest button that way ("setfocus"), or
+# keeping it. Buttons without a name get one ("t4ff_focus_<n>") for "setfocus" to find them.
+KEY_APAD_UP, KEY_APAD_DOWN, KEY_APAD_LEFT, KEY_APAD_RIGHT = 28, 29, 30, 31
+_DIRECTIONS = (
+    ((0.0, -1.0), (KEY_DPAD_UP, KEY_APAD_UP)),
+    ((0.0, 1.0), (KEY_DPAD_DOWN, KEY_APAD_DOWN)),
+    ((-1.0, 0.0), (KEY_DPAD_LEFT, KEY_APAD_LEFT)),
+    ((1.0, 0.0), (KEY_DPAD_RIGHT, KEY_APAD_RIGHT)),
+)
+# A menu whose buttons choose a value it shows (they set a local variable: the weapon a frame is
+# around) and send it to the scripts, with one other button confirming (ACCEPT): the focus shows
+# nothing, so the choice follows the focus (the choice's action becomes its onFocus), and A on a
+# choice confirms it (its action becomes the confirming button's). Not both on A: a script waiting
+# for menu responses in a loop gets one per frame, the second is lost.
+_NUMBERS = re.compile(r"\d+")
+
+
+def _sorted_children(node: Node):
+    """A structure's pointed data loads in the order of its fields."""
+    node.children = [ptr.node for _, ptr in sorted(node.relocs.items()) if ptr.kind in ("follow", "insert") and ptr.node is not None]
+
+
+def _set_string(owner: Node, off: int, text: str, template: Node):
+    string = _string_node(text, template)
+    owner.relocs[off] = _ptr("follow", owner, off, string)
+    string.extra["ptr"] = owner.relocs[off]
+    struct.pack_into(">I", owner.data, off, 0xFFFFFFFF)
+    _sorted_children(owner)
+
+
+def _screen_rect(item: Node, rect_off: int) -> Tuple[float, float, float, float]:
+    x, y, w, h = struct.unpack_from(">4f", item.data, rect_off)
+    horz, vert = struct.unpack_from(">2i", item.data, rect_off + 16)
+    # the alignments place the rectangle on a 640 by 480 screen (center 2, right / bottom 3)
+    x += {2: 320.0, 3: 640.0}.get(horz, 0.0)
+    y += {2: 240.0, 3: 480.0}.get(vert, 0.0)
+    return x, y, w, h
+
+
+def _nearest(centers: List[Tuple[float, float]], i: int, direction: Tuple[float, float]) -> int:
+    """The item nearest to ``i`` that way: within 45 degrees of it first, then anywhere that side."""
+    dx, dy = direction
+    best, best_score = i, None
+    for j, (x, y) in enumerate(centers):
+        vx, vy = x - centers[i][0], y - centers[i][1]
+        along = vx * dx + vy * dy
+        if j == i or along <= 0.5:
+            continue
+        across = abs(vx * dy - vy * dx)
+        score = along + 2 * across + (0 if across <= along else 100000)
+        if best_score is None or score < best_score:
+            best, best_score = j, score
+    return best
+
+
+def controller_navigation(p: Platform, zone: Zone, log=print, script_menus: Optional[Set[str]] = None) -> Dict[str, int]:
+    """Buttons of the zone's menus move the focus to the nearest button in the direction pressed,
+    and choices confirmed by a button follow the focus (see above); with ``script_menus``
+    (lowercase names the map's scripts use), only those menus. Returns {menu name: buttons}."""
+    mrec, irec, wrec, krec = p.record("menuDef_t"), p.record("itemDef_s"), p.record("windowDef_t"), p.record("ItemKeyHandler")
+    menu_name = find_field(mrec, "window").offset + find_field(wrec, "name").offset
+    items_off, count_off = find_field(mrec, "items").offset, find_field(mrec, "itemCount").offset
+    window = find_field(irec, "window").offset
+    name_off, flags_off = window + find_field(wrec, "name").offset, window + find_field(wrec, "staticFlags").offset
+    rect_off = window + find_field(wrec, "rect").offset
+    action_off, focus_off, on_key = (find_field(irec, f).offset for f in ("action", "onFocus", "onKey"))
+    key_off, key_action, key_next = (find_field(krec, f).offset for f in ("key", "action", "next"))
+    # strings other pointers refer into (the PC linker shares them) stay where they are
+    shared = {id(ptr.node) for node in zone.extra_root.walk() for ptr in node.relocs.values() if ptr.kind in ("ref", "alias") and ptr.node is not None}
+    changed: Dict[str, int] = {}
+    for menu in list(zone.extra_root.walk()):
+        if menu.type.name != "menuDef_t":
+            continue
+        if script_menus is not None and (_text_of(menu, menu_name) or "").lower() not in script_menus:
+            continue
+        ptr = menu.relocs.get(items_off)
+        array = ptr.target() if ptr is not None and ptr.kind != "null" else None
+        count = p.u32.unpack_from(menu.data, count_off)[0] if array is not None else 0
+        buttons = []
+        for i in range(count):
+            item_ptr = array.relocs.get(4 * i)
+            item = item_ptr.target() if item_ptr is not None and item_ptr.kind != "null" else None
+            if item is None or len(item.data) < on_key + 4 or p.u32.unpack_from(item.data, flags_off)[0] & WINDOW_DECORATION:
+                continue
+            if _text_of(item, action_off) is not None:
+                buttons.append(item)
+        names = [_text_of(item, name_off) for item in buttons]
+        named = [n for n in names if n]
+        if len(buttons) < 2 or len(set(named)) != len(named):
+            continue  # nothing to move between, or names "setfocus" cannot tell apart
+        template = next(n for n in menu.walk() if n.string)
+        taken = set(named)
+        for i, item in enumerate(buttons):
+            if not names[i]:
+                n = i
+                while f"t4ff_focus_{n}" in taken:
+                    n += 1
+                names[i] = f"t4ff_focus_{n}"
+                taken.add(names[i])
+                _set_string(item, name_off, names[i], template)
+        centers = []
+        for item in buttons:
+            x, y, w, h = _screen_rect(item, rect_off)
+            centers.append((x + w / 2, y + h / 2))
+        for i, item in enumerate(buttons):
+            # the item's key handlers: those it has keep their keys
+            chain: List[Node] = []
+            ptr = item.relocs.get(on_key)
+            while ptr is not None and ptr.kind != "null" and ptr.target() is not None:
+                chain.append(ptr.target())
+                ptr = chain[-1].relocs.get(key_next)
+            bound = {struct.unpack_from(">i", h.data, key_off)[0] for h in chain}
+            for direction, keys in _DIRECTIONS:
+                target = names[_nearest(centers, i, direction)]
+                for key in keys:
+                    if key in bound:
+                        continue
+                    handler = Node(TypeRef("record", "ItemKeyHandler", krec.size), 1, item.block)
+                    handler.data = bytearray(krec.size)
+                    handler.extra["align"] = 4
+                    struct.pack_into(">i", handler.data, key_off, key)
+                    _set_string(handler, key_action, f'"setfocus" "{target}" ; ', template)
+                    handler.relocs[key_next] = _ptr("null", handler, key_next)
+                    owner, off = (chain[-1], key_next) if chain else (item, on_key)
+                    owner.relocs[off] = _ptr("follow", owner, off, handler)
+                    handler.extra["ptr"] = owner.relocs[off]
+                    struct.pack_into(">I", owner.data, off, 0xFFFFFFFF)
+                    _sorted_children(owner)
+                    chain.append(handler)
+        # choices confirmed by a button: the choice follows the focus, A confirms it too
+        actions = [_text_of(item, action_off) for item in buttons]
+        groups: Dict[str, List[int]] = {}
+        for i, action in enumerate(actions):
+            if "scriptmenuresponse" in action.lower() and "setlocalvar" in action.lower():
+                groups.setdefault(_NUMBERS.sub("#", action), []).append(i)
+        choices = max(groups.values(), key=len) if groups else []
+        confirms = [i for i, action in enumerate(actions) if i not in choices and "scriptmenuresponse" in action.lower()]
+        if any(id(buttons[i].relocs[action_off].node) in shared or _text_of(buttons[i], focus_off) is not None for i in choices):
+            choices = []  # a shared string, or choices that already do something on focus
+        if len(choices) >= 2 and len(confirms) == 1:
+            for i in choices:
+                _set_string(buttons[i], focus_off, actions[i], template)
+                _set_string(buttons[i], action_off, actions[confirms[0]], template)
+        changed[_text_of(menu, menu_name) or "?"] = len(buttons)
+    if changed:
+        log(f"menus: the D-pad moves between buttons as they are laid out ({', '.join(f'{n} {c}' for n, c in sorted(changed.items()))})")
+    return changed

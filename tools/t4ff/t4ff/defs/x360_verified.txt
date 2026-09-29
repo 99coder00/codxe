@@ -7,13 +7,17 @@ CollisionPartition
 ComBurnableCell
 ComBurnableSample
 ComPrimaryLight
+ComWaterCell
 ComWorld
 D3DBaseTexture360
 DObjAnimMat
+DestructibleDef
+DestructiblePiece
 DynEntityClient
 DynEntityColl
 DynEntityDef
 DynEntityPose
+DynEntityServer
 FlameTable
 FxEffectDef
 FxElemDef
@@ -21,6 +25,8 @@ FxElemMarkVisuals
 FxElemVelStateSample
 FxElemVisStateSample
 FxElemVisuals
+FxImpactEntry
+FxImpactTable
 FxTrailDef
 FxTrailVertex
 GameWorldSp
@@ -31,6 +37,7 @@ GfxDrawSurf
 GfxImage
 GfxImageLoadDef
 GfxLight
+GfxLightCorona
 GfxLightDef
 GfxLightGridColors
 GfxLightGridEntry
@@ -40,6 +47,7 @@ GfxLightRegionAxis
 GfxLightRegionHull
 GfxLightmapArray
 GfxPackedVertex
+GfxPortal
 GfxReflectionProbe
 GfxSceneDynModel
 GfxShadowGeometry
@@ -49,6 +57,8 @@ GfxStaticModelInst
 GfxSurface
 GfxTexture
 GfxWorld
+GfxWorldLodChain
+GfxWorldLodInfo
 GfxWorldVertex
 ItemKeyHandler
 LoadedSound
@@ -66,6 +76,8 @@ MaterialTextureDef
 MaterialVertexDeclaration
 MaterialVertexShader
 MenuList
+PhysConstraint
+PhysConstraints
 PhysGeomInfo
 PhysGeomList
 PhysPreset

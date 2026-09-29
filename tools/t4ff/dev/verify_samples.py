@@ -9,6 +9,7 @@ default).
 """
 
 import os
+import struct
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -56,11 +57,18 @@ def main(paths):
         zone = Reader(platform, data).load()
         out = Writer(platform).write(zone)
         identical = out == data
-        # Runtime blocks are never streamed: their console struct sizes cannot be verified and the
-        # PC sizes are used (over-estimating the block is harmless). Accept a runtime-only header difference.
-        runtime_only = not identical and len(out) == len(data) and out[16:] == data[16:] and out[:12] == data[:12]
+        # The header (size, external size, the 7 block sizes) may differ where t4ff computes a value
+        # the data does not prove: the runtime block is never streamed (its console struct sizes
+        # cannot be verified and the PC's are used, over-estimating it is harmless), the temp block's
+        # high water mark, and the size, which the game's own zones count the delayed image pixels
+        # in and t4ff does not (both load). The data after the header must be identical.
+        header = 36
+        fields_in = struct.unpack(">9I", data[:header]) if len(data) >= header else ()
+        fields_out = struct.unpack(">9I", out[:header]) if len(out) >= header else ()
+        runtime_only = (not identical and len(out) == len(data) and out[header:] == data[header:]
+                        and all(a == b for i, (a, b) in enumerate(zip(fields_in, fields_out)) if i not in (0, 2, 3)))
         found = records_of(zone, platform)
-        state = "identical" if identical else ("identical except the runtime block size" if runtime_only else "DIFFERENT")
+        state = "identical" if identical else ("identical except the header's computed sizes" if runtime_only else "DIFFERENT")
         print(f"{path}: {len(zone.assets)} assets, round trip {state}, {len(found)} record types")
         identical = identical or runtime_only
         if identical:

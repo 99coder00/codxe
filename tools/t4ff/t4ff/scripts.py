@@ -18,7 +18,7 @@ only, and does not load Shi No Numa's zone for a usermap. So, as CoD Xenon's Azt
 from __future__ import annotations
 
 import re
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from .commands import find_field
 from .layout import TypeRef
@@ -48,6 +48,19 @@ def script_references(name: str, text: bytes) -> Set[str]:
     source = _COMMENTS.sub("", text.decode("latin-1"))
     refs = {m.group(1) for m in _INCLUDE.finditer(source)} | {m.group(1) for m in _CALL.finditer(source)}
     return {normalize(r) + ext for r in refs}
+
+
+_STRING_LITERAL = re.compile(rb'"([^"\\\n]{1,64})"')
+
+
+def script_strings(p: Platform, zone: Zone) -> Set[str]:
+    """The string literals of the zone's scripts, lowercase: the menus they open or precache among
+    them (OpenMenu( "loadout" ), game["menu"] = "tom_music_player_002c")."""
+    strings = set()
+    for name, node in _rawfiles(p, zone):
+        if not name.startswith(",") and name.lower().endswith(SCRIPT_EXTENSIONS) and _buffer(node) is not None:
+            strings.update(m.group(1).decode("latin-1").lower() for m in _STRING_LITERAL.finditer(rawfile_text(node)))
+    return strings
 
 
 def _rawfiles(p: Platform, zone: Zone) -> Iterable[Tuple[str, Node]]:
@@ -343,6 +356,68 @@ def precache_before_waits(p: Platform, zone: Zone, level_script: str, log=print)
     return added
 
 
+# Mods choose their options in their own front end menus, which set dvars the map's scripts read:
+# PhilMod's main menu sets its difficulty (philmod_gamemode 2, "Default") before the map loads. The
+# console shows the game's menus, the dvar is never set and the map reads 0 (PhilMod's "Easy"). A dvar
+# the map's scripts read that the map's menus set to one value only gets that value at the start of
+# the level script, when nothing set it (the game's own dvars always have a value, so they keep it).
+_MENU_SETDVAR = re.compile(r'"setdvar"\s+"(\w+)"\s+(?:"([^"]*)"|([^\s";]+))(\s*\()?', re.I)
+# the game's own settings, which its menus set from the player's choices (cg_blood 0 is the PC's
+# "disable mature content"): never the mod's options
+_ENGINE_DVAR = re.compile(r"^(?:cg|ui|r|g|sv|cl|com|con|snd|bg|player|scr|xblive|party|dw|fs|net|sys|ai|compass|hud|in|vid|"
+                          r"developer|onlinegame|systemlink|splitscreen|credits)(?:_|$)", re.I)  # fmt: skip
+_GETDVAR = re.compile(rb'\bgetdvar(?:int|float)?\s*\(\s*"(\w+)"\s*\)', re.I)
+_MENU_DVAR_MARK = b"// t4ff: the options the map's own menus set on PC, which the console does not show"
+
+
+def menu_dvar_values(zone: Zone) -> Dict[str, Set[str]]:
+    """{dvar: values} the menus' scripts (every string of ``zone``) set with literal values."""
+    values: Dict[str, Set[str]] = {}
+    for node in zone.extra_root.walk():
+        if not node.string:
+            continue
+        text = bytes(node.data).rstrip(b"\0").decode("latin-1")
+        if "setdvar" not in text.lower():
+            continue
+        for m in _MENU_SETDVAR.finditer(text):
+            if m.group(4):
+                continue  # an expression ("dvarString" ( "other" ))
+            value = m.group(2) if m.group(2) is not None else m.group(3)
+            values.setdefault(m.group(1).lower(), set()).add(value)
+    return values
+
+
+def menu_dvar_defaults(p: Platform, zone: Zone, menu_values: Dict[str, Set[str]], level_script: str, log=print) -> Dict[str, str]:
+    """The dvars the map's scripts read that its menus (``menu_values``, from menu_dvar_values before
+    the front end menus go) set to one value get it at the start of the level script's main() when
+    unset (see above). Returns {dvar: value}."""
+    nodes = {normalize(name): node for name, node in _rawfiles(p, zone) if not name.startswith(",") and _buffer(node) is not None}
+    level_script = level_script.lower()
+    if level_script not in nodes or not menu_values:
+        return {}
+    level_text = rawfile_text(nodes[level_script])
+    if _MENU_DVAR_MARK in level_text:
+        return {}
+    read = set()
+    for name, node in nodes.items():
+        if name.endswith(SCRIPT_EXTENSIONS):
+            read.update(m.group(1).decode("latin-1").lower() for m in _GETDVAR.finditer(_blank_comments(rawfile_text(node))))
+    defaults = {dvar: next(iter(values)) for dvar, values in sorted(menu_values.items())
+                if dvar in read and len(values) == 1 and not _ENGINE_DVAR.match(dvar)}  # fmt: skip
+    body = _function_body(level_text, "main")
+    if not defaults or body is None:
+        return {}
+    newline = b"\r\n" if b"\r\n" in level_text else b"\n"
+    lines = [b"\t" + _MENU_DVAR_MARK]
+    for dvar, value in defaults.items():
+        lines.append(f'\tif( GetDvar( "{dvar}" ) == "" )'.encode("latin-1"))
+        lines.append(f'\t\tSetDvar( "{dvar}", "{value}" );'.encode("latin-1"))
+    insert = newline + newline.join(lines) + newline
+    set_rawfile_text(p, nodes[level_script], level_text[: body[0]] + insert + level_text[body[0] :])
+    log(f"scripts: dvars the map's own menus set on PC get their value when unset ({', '.join(f'{d} {v}' for d, v in defaults.items())})")
+    return defaults
+
+
 # Treyarch's first zombie scripts (Nacht, and maps made with the first mod tools) hurry the last
 # zombies of a round with speed_up_zombies(), which gives every axis AI the zombies' sprint: Dead
 # Sand's SS soldiers then run as zombies. Only zombies are hurried.
@@ -538,16 +613,17 @@ def keep_mod_scripts(p: Platform, zone: Zone, mod_scripts: Set[str], console_lib
     for name in shadowed:
         if name not in calls:
             continue  # nothing the map runs uses it
+        # not renamed: the map's scripts folder has it (usermap_scripts), older CoD Xe builds run the game's
         if name.startswith(_ENGINE_RUN_SCRIPTS):
-            log(f"warning: {name} of the mod is not the one the console runs: the engine runs it by name, and the game's own zones have one")
+            log(f"scripts: {name} of the mod runs from the map's scripts folder: the engine runs it by name, and the game's own zones have one")
             continue
         game_callers = sorted(caller for caller, refs in calls.items() if name in refs and runs_game_copy[caller] and caller != name)
         if game_callers:
-            log(f"warning: {name} of the mod is not the one the console runs: the game's own zones have one, which their {game_callers[0]} calls too")
+            log(f"scripts: {name} of the mod runs from the map's scripts folder: the game's own zones have one, which their {game_callers[0]} calls too")
             continue
         new = _free_name(name[: -len(".gsc")] + MOD_SCRIPT_SUFFIX, ".gsc", set(nodes) | set(calls), game)
         if not _rename_rawfile(p, zone, nodes[name], new):
-            log(f"warning: {name} of the mod is not the one the console runs: its name is shared with other data of the zone")
+            log(f"scripts: {name} of the mod runs from the map's scripts folder: its name is shared with other data of the zone")
             continue
         renamed[name] = new
     if not renamed:
@@ -564,6 +640,50 @@ def keep_mod_scripts(p: Platform, zone: Zone, mod_scripts: Set[str], console_lib
     for old, new in renamed.items():
         log(f"scripts: {old} of the mod runs as {new}: the game's own zones have one too, which the console would run instead (the PC runs the mod's)")
     return renamed
+
+
+# The mod's versions of scripts the game's zones have too, which keep_mod_scripts cannot rename (the
+# game's own scripts call them too, or the engine runs them by name: PhilMod's _load, _gameskill,
+# _laststand, _callbackglobal, animscripts/death, its client scripts...), go to the map's folder
+# (usermaps/<map>/scripts/<name>), from which CoD Xe loads a script in place of the zones' one, as
+# the PC loads a mod's loose scripts. Older CoD Xe builds run the game's.
+USERMAP_SCRIPTS = "scripts"
+
+
+def usermap_scripts(p: Platform, zone: Zone, mod_scripts: Set[str], console_library, renamed: Dict[str, str]) -> Dict[str, bytes]:
+    """{name: text} of the mod's scripts (``mod_scripts``) the game's own zones have too and that
+    differ, but the renamed ones (see above)."""
+    if console_library is None:
+        return {}
+    scripts = {}
+    for name, node in _rawfiles(p, zone):
+        key = normalize(name)
+        if name.startswith(",") or key not in mod_scripts or key in renamed or not key.endswith(SCRIPT_EXTENSIONS) or _buffer(node) is None:
+            continue
+        found = console_library.find_in_game_zones("RawFile", key)
+        text = rawfile_text(node)
+        if found is not None and _SPACE.sub(b"", rawfile_text(found[1])) != _SPACE.sub(b"", text):
+            scripts[key] = text
+    return scripts
+
+
+def write_usermap_scripts(scripts: Dict[str, bytes], out_dir: str, log=print) -> List[str]:
+    """Write ``scripts`` to ``out_dir``/scripts, replacing what an earlier conversion wrote there."""
+    import os
+    import shutil
+
+    folder = os.path.join(out_dir, USERMAP_SCRIPTS)
+    if os.path.isdir(folder):
+        shutil.rmtree(folder)
+    for name, text in sorted(scripts.items()):
+        path = os.path.join(folder, *name.split("/"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(text)
+    if scripts:
+        log(f"scripts: {len(scripts)} of the mod's versions of the game's scripts go to {USERMAP_SCRIPTS}/, which CoD Xe loads in place of "
+            f"the game's ({', '.join(sorted(scripts)[:6])}{', ...' if len(scripts) > 6 else ''})")
+    return sorted(scripts)
 
 
 def _script_path(name: str):
@@ -677,10 +797,15 @@ def zone_of_assets(p: Platform, assets: List[Tuple[str, str, Node]], strings: Op
     return zone
 
 
-def missing_scripts_zone(p: Platform, zone: Zone, sources: List, console_library=None, log=print) -> Optional[Zone]:
+def missing_scripts_zone(p: Platform, zone: Zone, sources: List, console_library=None, log=print,
+                         roots: Sequence[str] = (), from_map: Optional[Set[str]] = None) -> Optional[Zone]:
     """A zone with the scripts ``zone``'s scripts use but no zone of the map has: from the map's own
     files (``sources[0]``, images.IwdLibrary), the console library, then other PC files
-    (``sources[1:]``)."""
+    (``sources[1:]``). ``roots``: scripts the engine loads by name for the map (its level script
+    and client script), which no script names: taken from the map's own files when no zone has
+    them (PhilMod's maps keep every script in an .iwd). A script the game's zones have too comes
+    from the map's own files when they have it, as on PC; its name goes into ``from_map`` (for
+    keep_mod_scripts)."""
     defined: Dict[str, Optional[Node]] = {}
     texts: Dict[str, bytes] = {}
     template = None
@@ -714,24 +839,40 @@ def missing_scripts_zone(p: Platform, zone: Zone, sources: List, console_library
             defined[ref] = node
             added.append(("rawfile", asset_name(p, node), node))
             queue.append((ref, rawfile_text(node)))
+    by_name: List[str] = []
+    for ref in roots:
+        ref = normalize(ref)
+        data = sources[0].read(ref) if sources else None
+        if defined.get(ref) is not None or data is None:
+            continue
+        node = make_rawfile(p, template, ref, data.rstrip(b"\0"))
+        by_name.append(ref)
+        defined[ref] = node
+        added.append(("rawfile", asset_name(p, node), node))
+        queue.append((ref, rawfile_text(node)))
     while queue:
         user, text = queue.pop()
         for ref in sorted(script_references(user, text)):
             if ref in defined or ref in unknown:
                 continue
-            if console_library is not None and console_library.in_game_zones("RawFile", ref):
-                defined[ref] = None  # the game's own zones have it
+            in_game = console_library is not None and console_library.in_game_zones("RawFile", ref)
+            if in_game and (not sources or sources[0].read(ref) is None):
+                defined[ref] = None  # the game's own zones have it, the map has no copy of its own
                 continue
             node, origin = finder.find(ref)
             if node is None:
                 unknown[ref] = user
                 continue
+            if in_game and from_map is not None:
+                from_map.add(ref)
             origins[ref] = origin
             defined[ref] = node
             added.append(("rawfile", asset_name(p, node), node))
             queue.append((ref, rawfile_text(node)))
     for ref, source in sorted(engine.items()):
         log(f"scripts: added {ref} (the game loads it for zombie maps, the map has none) from the {source}")
+    for ref in by_name:
+        log(f"scripts: added {ref} (the game loads it by name for the map, no zone of it has it) from the map's files")
     for ref, source in sorted(origins.items()):
         log(f"scripts: added {ref} (used by the map's scripts, not in its fastfiles) from the {source}")
     for ref in ZOMBIE_ENGINE_SCRIPTS:

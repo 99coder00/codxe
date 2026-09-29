@@ -106,6 +106,10 @@ class ConsoleLibrary:
         self._zones = []
         skipped: List[str] = []
         files = library_files(self.paths, self.first, self.exclude, skipped)
+        # Maps' load zones (mario_load.ff) hold what is theirs only: their loading screen ($levelbriefing
+        # and its picture, which a mod's menus name). A map given it showed Mario's once loaded
+        # (Mini-Labor). The loading screen writer reads them itself.
+        files = [f for f in files if not os.path.basename(f).lower().endswith("_load.ff")]
         if skipped:
             self.log(
                 f"console library: {len(skipped)} fastfiles t4ff converted left out (e.g. {os.path.basename(skipped[0])}): "
