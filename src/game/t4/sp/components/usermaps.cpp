@@ -21,10 +21,18 @@ const char *const USERMAPS_DIRECTORY = "usermaps";
 
 // ui_codxe_map<row>, ui_codxe_mapcmd<row>: the name and the command of each row ("" hides the row).
 // ui_codxe_mapoffset, ui_codxe_mapmore: the list's position (the scroll catchers show when there is more to see).
-// ui_codxe_maprange: "14-26 / 40". ui_codxe_maptitle, ui_codxe_mapdesc, ui_codxe_mapimage: the focused map.
-// The menu sets ui_codxe_focus (the focused row) and ui_codxe_scroll (rows to scroll, reset here).
+// ui_codxe_maprange: "14-26 / 40". ui_codxe_maptitle, ui_codxe_mapdesc, ui_codxe_mapimage, ui_codxe_mapoptions: the
+// focused map. The menu sets ui_codxe_focus (the focused row), ui_codxe_scroll (rows to scroll, reset here) and
+// ui_codxe_option (X: 1, Y: 2, the focused map's first or second option to change, reset here).
 const char *const DVAR_FOCUS = "ui_codxe_focus";
 const char *const DVAR_SCROLL = "ui_codxe_scroll";
+const char *const DVAR_OPTION = "ui_codxe_option";
+
+// options.txt (written by t4ff): options a PC mod chooses in its own menus, which the console does not show (PhilMod's
+// difficulty). "option <dvar> <default value> <label>", then its choices, "choice <value> <name>". The menu shows the
+// focused map's, X and Y change the first two, and the map's row sets them before loading it.
+const char *const OPTIONS_FILE = "options.txt";
+const char *const OPTION_BUTTONS[] = {"X", "Y"};
 
 // The picture of a map without one in the menu zone: its preview.bin (written by t4ff, a texture tiled for the
 // console) is copied into this image of the menu zone, whose material the preview shows.
@@ -48,6 +56,15 @@ static_assert(sizeof(PreviewHeader) == 20, "");
 const char *const STOCK_MAPS[] = {"nazi_zombie_prototype", "nazi_zombie_asylum", "nazi_zombie_sumpf",
                                   "nazi_zombie_factory"};
 
+struct MapOption
+{
+    std::string dvar;
+    std::string label;
+    std::vector<std::string> values;
+    std::vector<std::string> names;
+    size_t current;
+};
+
 struct UsermapEntry
 {
     std::string name;
@@ -55,9 +72,11 @@ struct UsermapEntry
     std::string displayName;
     std::string description;
     std::string image;
+    std::vector<MapOption> options;
 };
 
 std::vector<UsermapEntry> usermaps;
+std::map<std::string, size_t> chosenOptions; // "<map>/<dvar>" -> choice, kept while the game runs
 int listOffset = 0;
 int focusedRow = -1;
 bool dvarsCreated = false;
@@ -136,6 +155,80 @@ bool IsStockMap(const std::string &name)
     return false;
 }
 
+// The first word of text (after leading blanks), the rest in *rest.
+std::string FirstWord(const std::string &text, std::string *rest)
+{
+    const std::string trimmed = Trim(text);
+    const size_t end = trimmed.find_first_of(" \t");
+    *rest = end == std::string::npos ? std::string() : Trim(trimmed.substr(end));
+    return trimmed.substr(0, end);
+}
+
+// A dvar name or value set through the command buffer: letters, digits and a few signs only.
+bool IsPlainToken(const std::string &text)
+{
+    if (text.empty() || text.length() > 63)
+        return false;
+    for (size_t i = 0; i < text.length(); ++i)
+    {
+        const char c = text[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '.' ||
+              c == '-'))
+            return false;
+    }
+    return true;
+}
+
+std::vector<MapOption> ReadOptions(const std::string &path)
+{
+    std::vector<MapOption> options;
+    const std::vector<std::string> lines = ReadLines(path);
+    for (size_t i = 0; i < lines.size(); ++i)
+    {
+        std::string rest;
+        const std::string kind = FirstWord(lines[i], &rest);
+        if (_stricmp(kind.c_str(), "option") == 0)
+        {
+            MapOption option;
+            std::string afterDvar, label;
+            option.dvar = FirstWord(rest, &afterDvar);
+            const std::string defaultValue = FirstWord(afterDvar, &label);
+            option.label = label;
+            option.current = 0;
+            option.values.push_back(defaultValue); // the default's position, fixed below
+            if (IsPlainToken(option.dvar))
+                options.push_back(option);
+        }
+        else if (_stricmp(kind.c_str(), "choice") == 0 && !options.empty())
+        {
+            std::string name;
+            const std::string value = FirstWord(rest, &name);
+            if (IsPlainToken(value))
+            {
+                options.back().values.push_back(value);
+                options.back().names.push_back(name.empty() ? value : name);
+            }
+        }
+    }
+
+    std::vector<MapOption> valid;
+    for (size_t i = 0; i < options.size(); ++i)
+    {
+        MapOption option = options[i];
+        const std::string defaultValue = option.values[0];
+        option.values.erase(option.values.begin());
+        if (option.values.empty())
+            continue;
+        for (size_t k = 0; k < option.values.size(); ++k)
+        {
+            if (option.values[k] == defaultValue)
+                option.current = k;
+        }
+        valid.push_back(option);
+    }
+    return valid;
+}
+
 // Menu text: no quotes (the dvars are also set through the command buffer) and no line breaks.
 std::string MenuText(const std::string &text)
 {
@@ -195,6 +288,18 @@ void ScanUsermaps()
         const std::vector<std::string> preview = ReadLines(filesystem::JoinPath(mapDirectory.c_str(), "preview.txt"));
         if (!preview.empty())
             entry.image = MenuText(preview[0]);
+
+        entry.options = ReadOptions(filesystem::JoinPath(mapDirectory.c_str(), OPTIONS_FILE));
+        for (size_t i = 0; i < entry.options.size(); ++i)
+        {
+            MapOption &option = entry.options[i];
+            option.label = MenuText(option.label.empty() ? option.dvar : option.label);
+            for (size_t k = 0; k < option.names.size(); ++k)
+                option.names[k] = MenuText(option.names[k]);
+            const std::map<std::string, size_t>::const_iterator chosen = chosenOptions.find(name + "/" + option.dvar);
+            if (chosen != chosenOptions.end() && chosen->second < option.values.size())
+                option.current = chosen->second;
+        }
 
         usermaps.push_back(entry);
     } while (FindNextFileA(findHandle, &findData) != 0);
@@ -281,9 +386,27 @@ void PublishPreview()
             picture = PREVIEW_SLOT;
     }
 
+    // "Difficulty: Default (X)"
+    std::string options;
+    for (size_t i = 0; valid && i < usermaps[index].options.size() && i < ARRAYSIZE(OPTION_BUTTONS); ++i)
+    {
+        const MapOption &option = usermaps[index].options[i];
+        options += (i ? "   " : "") + option.label + ": " + option.names[option.current] + " (" + OPTION_BUTTONS[i] + ")";
+    }
+
     SetDvar("ui_codxe_maptitle", valid ? usermaps[index].displayName : "");
     SetDvar("ui_codxe_mapdesc", valid ? usermaps[index].description : "");
     SetDvar("ui_codxe_mapimage", picture);
+    SetDvar("ui_codxe_mapoptions", options);
+}
+
+// The row's command: the map's options, then the map.
+std::string MapCommand(const UsermapEntry &entry)
+{
+    std::string command;
+    for (size_t i = 0; i < entry.options.size(); ++i)
+        command += "set " + entry.options[i].dvar + " " + entry.options[i].values[entry.options[i].current] + "; ";
+    return command + "devmap " + entry.name;
 }
 
 void PublishRows()
@@ -299,7 +422,7 @@ void PublishRows()
         SetDvar(dvarName, valid ? usermaps[index].displayName : "");
 
         _snprintf_s(dvarName, ARRAYSIZE(dvarName), _TRUNCATE, "ui_codxe_mapcmd%d", row);
-        SetDvar(dvarName, valid ? "devmap " + usermaps[index].name : "");
+        SetDvar(dvarName, valid ? MapCommand(usermaps[index]) : "");
     }
 
     char value[64];
@@ -372,6 +495,7 @@ void UsermapList::OnMenuOpen(const char *menuName)
     focusedRow = -1;
     SetDvar(DVAR_SCROLL, "0");
     SetDvar(DVAR_FOCUS, "");
+    SetDvar(DVAR_OPTION, "0");
     PublishRows();
 }
 
@@ -404,6 +528,23 @@ void UsermapList::OnUIRefresh()
         focusedRow = row;
         PublishPreview();
     }
+
+    // X / Y: the focused map's next choice of its first / second option
+    const char *option = Dvar_GetVariantString(DVAR_OPTION);
+    const int which = option ? std::atoi(option) - 1 : -1;
+    if (which >= 0)
+    {
+        Dvar_SetFromStringByName(DVAR_OPTION, "0");
+        const int index = listOffset + focusedRow;
+        if (focusedRow >= 0 && index >= 0 && index < static_cast<int>(usermaps.size()) &&
+            which < static_cast<int>(usermaps[index].options.size()))
+        {
+            MapOption &chosen = usermaps[index].options[which];
+            chosen.current = (chosen.current + 1) % chosen.values.size();
+            chosenOptions[usermaps[index].name + "/" + chosen.dvar] = chosen.current;
+            PublishRows();
+        }
+    }
 }
 
 UsermapList::UsermapList()
@@ -415,6 +556,7 @@ UsermapList::UsermapList()
     dvarsCreated = false;
     listMenu = nullptr;
     previewInSlot.clear();
+    chosenOptions.clear();
 }
 
 UsermapList::~UsermapList()
