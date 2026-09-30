@@ -636,6 +636,47 @@ death
         self.assertNotIn(b"\r\r", new)
         self.assertNotIn(b"\n\n\n", new.replace(b"\r", b""))
 
+    def test_splitscreen_fog(self):
+        """In splitscreen the game's _load.gsc gives a map without splitscreen fog yellow fog: the level
+        script says the fog is set, and the map's own SetVolFog calls set the game's splitscreen fog
+        there. A player's fog, the game's scripts, scripts with a splitscreen fog of their own and
+        comments stay; a second run changes nothing."""
+        from unittest import mock
+
+        from t4ff.scripts import make_rawfile, rawfile_text, splitscreen_fog
+
+        p, template = self._rawfile_template()
+        level = b"main()\r\n{\r\n\tmaps\\createart\\mymap_art::main();\r\n}\r\n"
+        art = (b"main()\r\n{\r\n\tlevel thread fog_settings();\r\n}\r\nfog_settings()\r\n{\r\n\tstart_dist = 440;\r\n"
+               b"\t// SetVolFog( 0, 1, 2, 3, 0.5, 0.5, 0.5, 0 );\r\n"
+               b"\tSetVolFog( start_dist, 3200, 225, 64, 0.533, 0.717, 1, 0 );\r\n"
+               b"\tif( level.dark ) setVolFog(0, 500, 225, 64, 0, 0, 0, 2);\r\n\telse SetVolFog(0, 900, 225, 64, 0, 0, 0, 2);\r\n"
+               b"\tplayers[i] SetVolFog( 75, 200, 225, 64, 0, 0, 0, 0 );\r\n\tplayer SetVolFog( 75, 200, 225, 64, 0, 0, 0, 0 );\r\n"
+               b"\tget_players()[0]SetVolFog( 75, 200, 225, 64, 0, 0, 0, 0 );\r\n\tget_player() SetVolFog( 75, 200, 225, 64, 0, 0, 0, 0 );\r\n}")
+        treyarch = (b"fog_settings()\n{\n\tif( IsSplitScreen() )\n\t\tmaps\\_utility::set_splitscreen_fog( 1, 2, 3, 4, 5, 6, 7, 0, 4000 );\n"
+                    b"\telse\n\t\tSetVolFog( 1, 2, 3, 4, 5, 6, 7, 0 );\n}\n")
+        game = b"fog()\n{\n\tSetVolFog( 1, 2, 3, 4, 5, 6, 7, 0.4 );\n}\n"
+        files = [(n, make_rawfile(p, template, n, t)) for n, t in (("maps/mymap.gsc", level), ("maps/createart/mymap_art.gsc", art),
+                                                                    ("maps/createart/other_art.gsc", treyarch), ("maps/_load.gsc", game))]
+        with mock.patch("t4ff.scripts._rawfiles", lambda p, z: files):
+            self.assertEqual(splitscreen_fog(p, None, "maps/mymap.gsc", lambda name: name == "maps/_load.gsc", log=lambda msg: None),
+                             ["maps/createart/mymap_art.gsc", "maps/mymap.gsc"])
+            self.assertEqual(splitscreen_fog(p, None, "maps/mymap.gsc", lambda name: name == "maps/_load.gsc", log=lambda msg: None), [])  # once
+        self.assertEqual(rawfile_text(files[0][1]), b"main()\r\n{\r\n\t// t4ff: in splitscreen, the map's fog is its own: no placeholder fog of "
+                                                    b"maps/_load.gsc\r\n\tlevel.splitscreen_fog = true;\r\n\r\n\tmaps\\createart\\mymap_art::main();\r\n}\r\n")
+        new = rawfile_text(files[1][1])
+        self.assertIn(b"\t// SetVolFog( 0, 1, 2, 3, 0.5, 0.5, 0.5, 0 );\r\n\tt4ff_vol_fog( start_dist, 3200, 225, 64, 0.533, 0.717, 1, 0 );\r\n"
+                      b"\tif( level.dark ) t4ff_vol_fog(0, 500, 225, 64, 0, 0, 0, 2);\r\n\telse t4ff_vol_fog(0, 900, 225, 64, 0, 0, 0, 2);\r\n"
+                      b"\tplayers[i] SetVolFog( 75, 200, 225, 64, 0, 0, 0, 0 );\r\n\tplayer SetVolFog( 75, 200, 225, 64, 0, 0, 0, 0 );\r\n"
+                      b"\tget_players()[0]SetVolFog( 75, 200, 225, 64, 0, 0, 0, 0 );\r\n\tget_player() SetVolFog( 75, 200, 225, 64, 0, 0, 0, 0 );\r\n}\r\n\r\n"
+                      b"// t4ff: the map's fog", new)
+        self.assertIn(b"\t\tSetVolFog( start_dist, halfway_dist, halfway_height, base_height, red, green, blue, trans_time );\r\n", new)
+        self.assertIn(b"\tmaps\\_utility::set_splitscreen_fog( start_dist, halfway_dist, halfway_height, base_height, red, green, blue, trans_time, cull_dist );\r\n", new)
+        self.assertNotIn(b"\r\r", new)
+        self.assertNotIn(b"\n\n\n", new.replace(b"\r", b""))
+        self.assertEqual(rawfile_text(files[2][1]), treyarch)
+        self.assertEqual(rawfile_text(files[3][1]), game)
+
     def test_valid_cursor_hints(self):
         """The console's SetCursorHint crashes the game on a hint type it has not (it lists the valid
         ones past the end of their table): Dead Sand's "HINT_NONE" becomes "HINT_NOICON"; valid ones,

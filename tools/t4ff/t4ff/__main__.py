@@ -393,6 +393,13 @@ def _convert_map(args, paths, options, map_files, out_dir):
     menu_dvar_defaults(x360(), main_zone, menu_values, f"maps/{options.map_name}.gsc")
     speed_up_zombies_only(x360(), main_zone)
     zombie_idles_for_zombies(x360(), main_zone)
+    # in splitscreen the map's own fog, not the game's yellow placeholder (see scripts.py)
+    from .scripts import splitscreen_fog
+
+    def is_game_script(name, library=convs[0].console_library):
+        return name in renamed.values() or (library is not None and library.find_in_game_zones("RawFile", name) is not None)
+
+    splitscreen_fog(x360(), main_zone, f"maps/{options.map_name}.gsc", is_game_script)
     # technique sets copied from CoD Xenon's maps read the dynamic shadow texture before it is set
     from .techsets import fix_argument_sections
 

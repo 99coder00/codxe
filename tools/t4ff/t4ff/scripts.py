@@ -655,6 +655,111 @@ def zombie_idles_for_zombies(p: Platform, zone: Zone, log=print) -> List[str]:
     return changed
 
 
+# In splitscreen the game's maps/_load.gsc gives a map that set no splitscreen fog (level.splitscreen_fog,
+# which set_splitscreen_fog() of maps/_utility.gsc sets) a placeholder meant to stand out: yellow fog
+# 200 units away. The game's maps and CoD Xenon's set theirs in their art scripts, PC maps never did:
+# The Simpsons plays washed in yellow in splitscreen. So the level script says the fog is set as it
+# starts (a map without fog has none in splitscreen either), and the fog the map's own scripts set
+# (SetVolFog, not a player's) is the game's splitscreen fog in splitscreen, as in Treyarch's art
+# scripts: that fog stops drawing the world where it is thick, at least 4000 units away as theirs do,
+# and two of its halfway distances past its start (three quarters fog) for thinner fogs.
+_SPLITSCREEN_MARK = b"// t4ff: in splitscreen, the map's fog is its own"
+_SET_VOL_FOG = re.compile(rb"(?<![\w:\\/])SetVolFog(?=\s*\()", re.I)
+_OWN_SPLITSCREEN_FOG = re.compile(rb"\bset_splitscreen_fog\s*\(|\bt4ff_vol_fog\b", re.I)
+_SPLITSCREEN_FOG_FUNCTION = rb"""
+// t4ff: the map's fog, in splitscreen the game's splitscreen fog, which stops drawing the world where the fog is thick
+t4ff_vol_fog( start_dist, halfway_dist, halfway_height, base_height, red, green, blue, trans_time )
+{
+	if( !IsDefined( trans_time ) )
+		trans_time = 0;
+	if( !IsSplitScreen() )
+	{
+		SetVolFog( start_dist, halfway_dist, halfway_height, base_height, red, green, blue, trans_time );
+		return;
+	}
+	cull_dist = start_dist + halfway_dist * 2;
+	if( cull_dist < 4000 )
+		cull_dist = 4000;
+	maps\_utility::set_splitscreen_fog( start_dist, halfway_dist, halfway_height, base_height, red, green, blue, trans_time, cull_dist );
+}
+"""
+
+
+def _word_before(source: bytes, end: int) -> bytes:
+    """The word ending at ``end`` in ``source``, past the spaces before it."""
+    while end > 0 and source[end - 1 : end].isspace():
+        end -= 1
+    start = end
+    while start > 0 and (source[start - 1 : start].isalnum() or source[start - 1 : start] == b"_"):
+        start -= 1
+    return source[start:end]
+
+
+def _global_call(source: bytes, start: int) -> bool:
+    """Whether the call at ``start`` of ``source`` (comments blanked) has no entity it is called on
+    (``SetVolFog( ... )``, ``if( x ) SetVolFog( ... )``, not ``player SetVolFog( ... )``)."""
+    i = start
+    while i > 0 and source[i - 1 : i].isspace():
+        i -= 1
+    before = source[i - 1 : i]
+    if before == b"]":
+        return False
+    if before == b")":
+        depth = 0
+        while i > 0:
+            i -= 1
+            if source[i : i + 1] == b")":
+                depth += 1
+            elif source[i : i + 1] == b"(":
+                depth -= 1
+                if depth == 0:
+                    break
+        return _word_before(source, i).lower() in (b"if", b"while", b"for", b"foreach", b"switch")
+    if before.isalnum() or before == b"_":
+        return _word_before(source, i).lower() in (b"else", b"return")
+    return True
+
+
+def splitscreen_fog(p: Platform, zone: Zone, level_script: str, is_game_script=lambda name: False, log=print) -> List[str]:
+    """The level script says the fog is set, and the fog the map's own scripts set is the game's
+    splitscreen fog in splitscreen (see above). ``is_game_script(name)``: whether a script is (the
+    mod's copy of) one of the game's, which stay as they are. Returns the names of the scripts changed."""
+    nodes = {normalize(name): node for name, node in _rawfiles(p, zone) if not name.startswith(",") and _buffer(node) is not None}
+    level_script = level_script.lower()
+    fog_scripts, calls = [], 0
+    for name, node in sorted(nodes.items()):
+        if not name.endswith(".gsc") or is_game_script(name):
+            continue
+        text = rawfile_text(node)
+        source = _blank_comments(text)
+        if _OWN_SPLITSCREEN_FOG.search(source):
+            continue  # its fog has its splitscreen fog already
+        starts = [m.start() for m in _SET_VOL_FOG.finditer(source) if _global_call(source, m.start())]
+        if not starts:
+            continue
+        for start in reversed(starts):
+            text = text[:start] + b"t4ff_vol_fog" + text[start + len(b"SetVolFog") :]
+        newline = b"\r\n" if b"\r\n" in text else b"\n"
+        text = text.rstrip() + newline
+        set_rawfile_text(p, node, text + _SPLITSCREEN_FOG_FUNCTION.replace(b"\n", newline))
+        fog_scripts.append(name)
+        calls += len(starts)
+    changed = list(fog_scripts)
+    text = rawfile_text(nodes[level_script]) if level_script in nodes else b""
+    body = _function_body(text, "main")
+    if body is not None and _SPLITSCREEN_MARK not in text:
+        newline = b"\r\n" if b"\r\n" in text else b"\n"
+        insert = newline + b"\t" + _SPLITSCREEN_MARK + b": no placeholder fog of maps/_load.gsc" + newline + b"\tlevel.splitscreen_fog = true;" + newline
+        set_rawfile_text(p, nodes[level_script], text[: body[0]] + insert + text[body[0] :])
+        if level_script not in changed:
+            changed.append(level_script)
+        log("scripts: in splitscreen the map keeps its own fog, not the yellow placeholder of maps/_load.gsc")
+    if fog_scripts:
+        log(f"scripts: in splitscreen the map's {calls} SetVolFog call{'s' if calls > 1 else ''} set{'' if calls > 1 else 's'} the game's "
+            f"splitscreen fog ({', '.join(fog_scripts)})")
+    return changed
+
+
 # The game runs the first script of a name it loads, and the console loads its own zones (common.ff,
 # patch.ff, ...) before the map: a script both have is the game's there. On PC, with the map's mod
 # active, the mod's scripts (its mod.ff, its .iwd and loose files) win over the game's instead. The

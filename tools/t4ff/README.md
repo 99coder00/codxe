@@ -359,6 +359,17 @@ More differences the converted scripts work around (Dead Sand's):
   spawners that are not zombies) the zombie idles get poses of their own, and
   zombies play them from the animscripts' per AI hook
   (`self.exception["stop_immediate"]`); the soldiers keep the game's.
+- In splitscreen the game's `maps/_load.gsc` gives a map that set no
+  splitscreen fog (`level.splitscreen_fog`) a placeholder meant to stand out:
+  yellow fog 200 units away. The game's maps and CoD Xenon's set theirs in their
+  art scripts (`maps/createart/<map>_art.gsc`, `if( IsSplitScreen() )`); PC maps
+  never did, and The Simpsons played washed in yellow. The level script says the
+  fog is set as it starts (a map without fog has none in splitscreen either), and
+  the map's own `SetVolFog` calls (not a player's, not the game's scripts) set
+  the game's splitscreen fog in splitscreen (`maps\_utility::set_splitscreen_fog`),
+  which stops drawing the world where the fog is thick: at least 4000 units away,
+  as Treyarch's, and two of the fog's halfway distances past its start for
+  thinner fogs. Scripts that set a splitscreen fog of their own keep it.
 
 Some errors in the console log come from the PC map itself and are harmless:
 PC Aztec's zombie type names a `walther` sidearm zombies never draw, and

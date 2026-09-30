@@ -142,6 +142,9 @@ lacks are added (from its files, the console fastfiles, the PC files). Script fi
   rockets);
 - `speed_up_zombies()` hurries zombies only (`speed_up_zombies_only`; Dead Sand's SS sprinted);
 - on maps with soldiers, only zombies idle as zombies (`zombie_idles_for_zombies`);
+- in splitscreen the map keeps its own fog, not the yellow placeholder fog of the game's `_load.gsc`
+  (`level.splitscreen_fog`), and its `SetVolFog` calls set the game's splitscreen fog there
+  (`splitscreen_fog`; The Simpsons played washed in yellow, reported by CoD Xenon's developer);
 - the level and client scripts, loaded by name, come from the map's files when no zone has them,
   and a script the game has too comes from the map's files when it has its own
   (`missing_scripts_zone` roots; Mini-Labor, 7);
