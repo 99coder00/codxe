@@ -351,6 +351,15 @@ struct RawFile
 };
 static_assert(sizeof(RawFile) == 0xC, "");
 
+struct StringTable
+{
+    const char *name;
+    int columnCount;
+    int rowCount;
+    const char **values;
+};
+static_assert(sizeof(StringTable) == 0x10, "");
+
 enum MapType : __int32
 {
     MAPTYPE_NONE = 0x0,
@@ -368,7 +377,7 @@ union GfxTexture
     D3DTexture *map;
     D3DVolumeTexture *volmap;
     D3DCubeTexture *cubemap;
-    struct GfxImageLoadDef *loadDef;
+    void *loadDef;
 };
 
 struct CardMemory
@@ -400,8 +409,8 @@ static_assert(offsetof(GfxImage, name) == 0x24, "");
 union XAssetHeader
 {
     void *data;
-    RawFile *rawfile;
     GfxImage *image;
+    RawFile *rawfile;
 };
 
 struct XAsset
