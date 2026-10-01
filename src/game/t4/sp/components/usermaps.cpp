@@ -121,6 +121,67 @@ std::vector<std::string> ReadLines(const std::string &path)
     return lines;
 }
 
+// map.json of CoD Xe's own custom maps list (version 1, name, description), for maps without a
+// description.txt: maps made for that list (other converters') show their names here too.
+bool ReadMapJson(const std::string &path, std::string &name, std::string &description)
+{
+    if (!filesystem::FileExists(path.c_str()))
+        return false;
+
+    const std::string contents = filesystem::ReadFileToString(path);
+    HJSONREADER reader = XJSONCreateReader();
+    if (!reader)
+        return false;
+    if (contents.empty() || FAILED(XJSONSetBuffer(reader, contents.data(), static_cast<DWORD>(contents.size()), TRUE)))
+    {
+        XJSONCloseReader(reader);
+        return false;
+    }
+
+    int depth = 0;
+    int version = 0;
+    std::string field, foundName, foundDescription;
+    JSONTOKENTYPE tokenType;
+    DWORD tokenLength;
+    DWORD parsed;
+    char value[1024];
+    while (XJSONReadToken(reader, &tokenType, &tokenLength, &parsed) == S_OK)
+    {
+        if (tokenType == Json_BeginObject || tokenType == Json_BeginArray)
+        {
+            ++depth;
+            continue;
+        }
+        if (tokenType == Json_EndObject || tokenType == Json_EndArray)
+        {
+            --depth;
+            continue;
+        }
+        if (FAILED(XJSONGetTokenValue(reader, value, ARRAYSIZE(value))))
+            continue;
+        if (tokenType == Json_FieldName)
+        {
+            field = value;
+            continue;
+        }
+        if (depth != 1)
+            continue;
+        if (field == "version" && tokenType == Json_Number)
+            version = std::atoi(value);
+        else if (field == "name" && tokenType == Json_String)
+            foundName = value;
+        else if (field == "description" && tokenType == Json_String)
+            foundDescription = value;
+    }
+    XJSONCloseReader(reader);
+
+    if (version != 1 || foundName.empty())
+        return false;
+    name = foundName;
+    description = foundDescription;
+    return true;
+}
+
 // "nazi_zombie_wh" -> "Nazi Zombie Wh", for maps without a description.txt.
 std::string PrettyName(const std::string &name)
 {
@@ -274,16 +335,27 @@ void ScanUsermaps()
         if (!filesystem::FileExists(fastfile.c_str()))
             continue;
 
-        // description.txt: the map's name on the first line, its description on the next ones.
-        // preview.txt: a material the menu zone has (CoD Xenon's map pictures), for the preview.
+        // description.txt: the map's name on the first line, its description on the next ones; else
+        // map.json (CoD Xe's own list). preview.txt: a material the menu zone has (CoD Xenon's map
+        // pictures), for the preview.
         UsermapEntry entry;
         entry.name = name;
         entry.directory = mapDirectory;
         const std::vector<std::string> description =
             ReadLines(filesystem::JoinPath(mapDirectory.c_str(), "description.txt"));
-        entry.displayName = MenuText(description.empty() ? PrettyName(name) : description[0]);
-        for (size_t i = 1; i < description.size(); ++i)
-            entry.description += (i > 1 ? " " : "") + MenuText(description[i]);
+        std::string jsonName, jsonDescription;
+        if (description.empty() &&
+            ReadMapJson(filesystem::JoinPath(mapDirectory.c_str(), "map.json"), jsonName, jsonDescription))
+        {
+            entry.displayName = MenuText(jsonName);
+            entry.description = MenuText(jsonDescription);
+        }
+        else
+        {
+            entry.displayName = MenuText(description.empty() ? PrettyName(name) : description[0]);
+            for (size_t i = 1; i < description.size(); ++i)
+                entry.description += (i > 1 ? " " : "") + MenuText(description[i]);
+        }
 
         const std::vector<std::string> preview = ReadLines(filesystem::JoinPath(mapDirectory.c_str(), "preview.txt"));
         if (!preview.empty())
