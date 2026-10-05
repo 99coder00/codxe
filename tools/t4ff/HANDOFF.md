@@ -127,7 +127,9 @@ for a test (outside its playable area: it moves the player back).
 2. What the eighths cost: past 300 units of a texture's box it shows an eighth, not a quarter (a
    band where the GPU would sample a quarter is softer). Applying the half size texture farther
    (a "far" use band) would help; applied blocks cannot be evicted, so it needs care with the 64 MB.
-3. Committing (when asked): t4ff here; CoD Xe on `merge-upstream-r351`.
+3. Committed and pushed on 2026-10-05: t4ff as 2734211 on this branch; CoD Xe as 0d9e555 on
+   `merge-upstream-r351` (pushed to origin, not merged here: it carries the upstream r351 merge, which
+   the maintainer brings into this branch). The turret diagnostics in this tree stay uncommitted.
 4. The older items below (2026-10-03's list).
 
 ## State on 2026-10-03
