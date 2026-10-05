@@ -99,6 +99,10 @@ class ConsoleLibrary:
         self._index: Dict[Tuple[str, str], Tuple[Zone, Node]] = {}
         self._game: Dict[Tuple[str, str], Tuple[Zone, Node]] = {}  # assets of the game's own zones among them
         self._ui_menus: Set[str] = set()  # menus of the console's menu zones among them
+        # technique sets of every zone by name (the first is the index's), and the names of the vertex
+        # shaders of Treyarch's zones (those outside a usermaps folder): see techset_safe
+        self._techsets: Dict[str, List[Tuple[Zone, Node]]] = {}
+        self._treyarch_shaders: Set[str] = set()
 
     def _load(self):
         if self._zones is not None:
@@ -129,12 +133,19 @@ class ConsoleLibrary:
             self._zones.append(zone)
             game = is_game_zone(f)
             ui = os.path.splitext(os.path.basename(f))[0].lower() in UI_ZONES
+            treyarch = "usermaps" not in os.path.normcase(os.path.abspath(f)).split(os.sep)
             count = 0
             for node in zone.extra_root.walk():
+                if treyarch and node.type.name == "MaterialVertexShader" and not node.string:
+                    shader_name = node.relocs.get(0).target() if node.relocs.get(0) is not None else None
+                    if shader_name is not None and shader_name.string:
+                        self._treyarch_shaders.add(bytes(shader_name.data).rstrip(b"\0").decode("latin-1").lower())
                 origin = node.extra.get("origin")
                 if not origin or origin[0] != "asset":
                     continue
                 name = asset_name(self.p, node)
+                if origin[1] == "MaterialTechniqueSet" and name and not name.startswith(","):
+                    self._techsets.setdefault(name.lower(), []).append((zone, node))
                 if name and not name.startswith(","):
                     count += self._index.setdefault((origin[1], name.lower()), (zone, node)) == (zone, node)
                     if game:
@@ -149,7 +160,55 @@ class ConsoleLibrary:
         if not self.paths:
             return None
         self._load()
-        return self._index.get((rec_name, name.lstrip(",").lower()))
+        key = name.lstrip(",").lower()
+        if rec_name == "MaterialTechniqueSet":
+            # a copy every slot of which the game can draw with, when a zone has one (see techset_safe)
+            return next((found for found in self._techsets.get(key, []) if self.techset_safe(found[1])), self._index.get((rec_name, key)))
+        return self._index.get((rec_name, key))
+
+    def techset_safe(self, node: Node) -> bool:
+        """Whether every model and world vertex shader of a technique set (vertexShaderArray 1 to 15)
+        is one of Treyarch's (a name its zones have). CoD Xenon compiled shaders the console's zones
+        lack themselves, and those need a vertex declaration: the game sets none when a pass has the
+        shader of the vertex type it draws (it expects Treyarch's, compiled for that type), and the
+        D3D library then binds the shader to an empty declaration and spins forever. Kino
+        Rezurrection's dry grass (mc/mtl_drygrass, mc_ambient_t0c0 of CoD Xenon's Leviathan) froze the
+        game at its first frame. Their effect shaders (vertexShaderArray 0) draw."""
+        import struct
+
+        from .commands import find_field
+
+        if not self._treyarch_shaders or os.environ.get("T4FF_ALLOW_UNSAFE_TECHSETS"):
+            return True  # no zone of Treyarch's given: nothing to tell them apart with (or a test of CoD Xe's guard)
+        name_ptr = node.relocs.get(0)
+        set_name = bytes(name_ptr.target().data).rstrip(b"\0").decode("latin-1").lower() if name_ptr is not None and name_ptr.target() is not None else ""
+        if "effect" in set_name.lstrip(",").split("_"):
+            return True  # effects draw with generic vertices (vertexShaderArray 0): Kino Der Toten's do
+        ts_rec, tech_rec, pass_rec = (self.p.record(r) for r in ("MaterialTechniqueSet", "MaterialTechnique", "MaterialPass"))
+        techs = find_field(ts_rec, "techniques").offset
+        passes, count = find_field(tech_rec, "passArray").offset, find_field(tech_rec, "passCount").offset
+        shaders = find_field(pass_rec, "vertexShaderArray").offset
+        for t in range(find_field(ts_rec, "techniques").type.count):
+            ptr = node.relocs.get(techs + 4 * t)
+            tech = ptr.target() if ptr is not None else None
+            if tech is None:
+                continue
+            for k in range(struct.unpack_from(self.p.endian + "H", tech.data, count)[0]):
+                for slot in range(1, 16):
+                    shader_ptr = tech.relocs.get(passes + k * pass_rec.size + shaders + 4 * slot)
+                    shader = shader_ptr.target() if shader_ptr is not None and shader_ptr.kind != "null" else None
+                    name_ptr = shader.relocs.get(0) if shader is not None else None
+                    name = name_ptr.target() if name_ptr is not None else None
+                    if name is not None and bytes(name.data).rstrip(b"\0").decode("latin-1").lower() not in self._treyarch_shaders:
+                        return False
+        return True
+
+    def names(self, rec_name: str) -> List[str]:
+        """The (lowercase) names of the assets of a record among the library."""
+        if not self.paths:
+            return []
+        self._load()
+        return sorted(name for rec, name in self._index if rec == rec_name)
 
     def in_game_zones(self, rec_name: str, name: str) -> bool:
         """Whether a zone the game loads itself (e.g. ``common.ff``) among the library has the asset:
@@ -166,6 +225,13 @@ class ConsoleLibrary:
         self._load()
         name = name.lstrip(",").lower()
         return name in self._ui_menus or ("menuDef_t", name) in self._game
+
+    def game_rawfiles(self) -> List[Tuple[str, Node]]:
+        """(name, node) of the raw files (scripts...) of the game's own zones among the library."""
+        if not self.paths:
+            return []
+        self._load()
+        return [(name, node) for (rec_name, name), (_, node) in self._game.items() if rec_name == "RawFile"]
 
     def find_in_game_zones(self, rec_name: str, name: str) -> Optional[Tuple[Zone, Node]]:
         """The asset as the game's own zones among the library have it (maps may carry changed

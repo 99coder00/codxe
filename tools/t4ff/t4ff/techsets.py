@@ -170,3 +170,96 @@ def _technique_name(p: Platform, node: Node) -> str:
     ptr = node.relocs.get(find_field(p.record("MaterialTechnique"), "name").offset)
     target = ptr.target() if ptr is not None else None
     return bytes(target.data[:-1]).decode("latin-1") if target is not None and target.string else "?"
+
+
+# ---------------------------------------------------------------------------
+# Technique sets no console fastfile has
+#
+# A material whose technique set no console zone has gets the game's default technique set when the
+# map loads (the reference finds nothing, silently). Its passes have the vertex shaders of the world
+# vertex format of the default set only (vertexShaderArray, indexed 2 + worldVertFormat for world
+# surfaces); a world surface of two or three texture layers (worldVertFormat 1 to 3) is then drawn with
+# an empty slot, and the D3D library spins forever binding it to the vertex declaration: Kino
+# Rezurrection's 13 such materials (blends like l_sm_r0c0s0_b1c1s1_b2c2s2) froze the game on its
+# loading screen, its render worker at 100% in the shader binding, the main thread waiting for it.
+# Such a technique set is replaced by the console one closest to it of the same world vertex format,
+# which samples no map the original does not (the material may not have it).
+
+# the lit techniques (sun, spot and omni lights, with and without shadows) world surfaces are drawn with
+LIT_TECHNIQUES = range(8, 22)
+WORLD_SHADER_BASE = 2  # vertexShaderArray index of world vertex format 0
+MODEL_SHADER = 1  # vertexShaderArray index of models (packed vertices)
+TEXTURE_CODES = "cnsd"  # colour, normal, specular and detail maps (the other codes are blend modes)
+
+
+def techset_info(p: Platform, node: Node) -> Tuple[int, bool, bool]:
+    """(worldVertFormat, whether every pass of its lit techniques has the vertex shader of that world
+    format, whether every one has the model vertex shader) of a console technique set."""
+    import struct
+
+    ts_rec = p.record("MaterialTechniqueSet")
+    tech_rec = p.record("MaterialTechnique")
+    pass_rec = p.record("MaterialPass")
+    techs = find_field(ts_rec, "techniques").offset
+    shaders = find_field(pass_rec, "vertexShaderArray").offset
+    passes = find_field(tech_rec, "passArray").offset
+    count_off = find_field(tech_rec, "passCount").offset
+    wvf = node.data[find_field(ts_rec, "worldVertFormat").offset]
+    world = model = True
+    lit = False
+    for t in LIT_TECHNIQUES:
+        ptr = node.relocs.get(techs + 4 * t)
+        tech = ptr.target() if ptr is not None else None
+        if tech is None:
+            continue
+        for k in range(struct.unpack_from(p.endian + "H", tech.data, count_off)[0]):
+            lit = True
+            base = passes + k * pass_rec.size + shaders
+
+            def has(slot):
+                slot_ptr = tech.relocs.get(base + 4 * slot)
+                return slot_ptr is not None and slot_ptr.kind != "null"
+
+            world = world and has(WORLD_SHADER_BASE + wvf)
+            model = model and has(MODEL_SHADER)
+    return wvf, lit and world, lit and model
+
+
+def techset_features(name: str) -> Tuple[Tuple[str, ...], set, set]:
+    """The words of a technique set name outside its layers (wc, l, sm, unlit, blend, sco...), its
+    texture maps (code and layer: c0, n1...) and its layers' blend modes (r0, b1, t0, a0...)."""
+    import re
+
+    words, textures, modes = [], set(), set()
+    for word in name.lower().lstrip(",").split("_"):
+        pairs = re.fullmatch(r"(?:[a-z]\d)+", word)
+        if pairs:
+            for code, layer in re.findall(r"([a-z])(\d)", word):
+                (textures if code in TEXTURE_CODES else modes).add(code + layer)
+        else:
+            words.append(word)
+    return tuple(words), textures, modes
+
+
+def closest_techset(name: str, wvf: int, candidates: Dict[str, Tuple[int, bool, bool]]) -> Optional[str]:
+    """The technique set of ``candidates`` ({name: techset_info}) to draw what ``name`` (world vertex
+    format ``wvf``) would: the same world vertex format with its vertex shaders (the model one for a
+    model technique set, mc_), the same layers and family (its first word), none of the maps ``name``
+    does not sample; the most maps in common, then the fewest other differences."""
+    words, textures, modes = techset_features(name)
+    layers = {f[1] for f in textures | modes}
+    model = bool(words) and words[0] == "mc"
+    best, best_key = None, None
+    for candidate in sorted(candidates):
+        c_wvf, world_ok, model_ok = candidates[candidate]
+        if c_wvf != wvf or not (model_ok if model else world_ok):
+            continue
+        c_words, c_textures, c_modes = techset_features(candidate)
+        if not c_words or not words or c_words[0] != words[0] or not c_textures <= textures:
+            continue
+        if {f[1] for f in c_textures | c_modes} != layers:
+            continue
+        key = (len(c_textures), -len(set(c_words) ^ set(words)), -len(c_modes ^ modes))
+        if best_key is None or key > best_key:
+            best, best_key = candidate, key
+    return best

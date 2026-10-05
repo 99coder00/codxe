@@ -57,7 +57,7 @@ class Settings:
     map_name: str = ""
     t4_layout: bool = True
     no_sounds: bool = False
-    version: int = 3  # of the settings file: 2 made the t4 layout the default, 3 the automatic texture budget
+    version: int = 6  # of the settings file: 2 made the t4 layout the default, 3 the automatic texture budget, 4 the physical memory target, 5 the memory of all zone blocks, 6 a console's memory
 
     @classmethod
     def load(cls, path: str) -> "Settings":
@@ -74,6 +74,11 @@ class Settings:
             # saved before the automatic texture budget, which is better than a fixed one for any map,
             # and before loading screens were made for every map
             known.update(texture_budget="auto", load_zone=True)
+        if known.get("version", 1) < 6:
+            # the memory target was the map's total memory (200 MiB), then the textures, large and physical
+            # blocks (194 MiB); it is now every block of the map's zone, all from the game's main memory, as
+            # much as a console has (Xenia has more)
+            known.pop("memory_target", None)
         known["version"] = cls.version
         known["texture_budget"] = budget_text(known.get("texture_budget", "auto"))
         try:
@@ -428,7 +433,7 @@ def main():
         widget.grid(row=row, column=column + 1, sticky="w", **pad)
 
     option(0, 0, "Texture budget (MiB, 0 = none)", ttk.Combobox(options, values=TEXTURE_BUDGETS, width=8, textvariable=var["texture_budget"]))
-    option(0, 2, "Memory target (MiB)", ttk.Spinbox(options, from_=100, to=240, increment=5, width=8, textvariable=var["memory_target"]))
+    option(0, 2, "Memory target (MiB)", ttk.Spinbox(options, from_=150, to=220, increment=2, width=8, textvariable=var["memory_target"]))
     option(1, 0, "Max texture size", ttk.Combobox(options, values=TEXTURE_SIZES, width=10, state="readonly", textvariable=var["max_texture_size"]))
     option(1, 2, "Max loaded sounds (0 = no limit)", ttk.Spinbox(options, from_=0, to=5000, increment=50, width=8, textvariable=var["max_loaded_sounds"]))
     option(2, 0, "Loaded sound rate (Hz)", ttk.Combobox(options, values=SOUND_RATES, width=10, state="readonly", textvariable=var["sound_rate"]))
@@ -512,7 +517,8 @@ def main():
             console_zones=list(zones_box.get(0, "end")),
             iwds=list(iwds_box.get(0, "end")),
             texture_budget=budget_text(var["texture_budget"].get()),
-            memory_target=max(64.0, number("memory_target", float, MEMORY_TARGET_MIB)),
+            # a console's at most (the command line takes more, for Xenia only builds)
+            memory_target=min(220.0, max(64.0, number("memory_target", float, MEMORY_TARGET_MIB))),
             max_texture_size=number("max_texture_size", int, 0),
             sound_rate=number("sound_rate", int, 0),
             stream_rate=number("stream_rate", int, 0),
@@ -647,7 +653,9 @@ def main():
         start(convert_args(s), "Converting...", done)
 
     def update_menu():
-        """Make the Nazi Zombies map list of CoD Xenon's patch_ui.ff list the usermaps folder."""
+        """Get the game's menu zone ready for the maps of its usermaps folder (see cmd_menu): CoD Xe's own
+        custom maps list, from a menu zone among the Xbox 360 fastfiles given (CoD Xenon's 0.3.0), else
+        t4ff's list on CoD Xenon's 0.2.0 menu."""
         chosen = filedialog.askdirectory(title="The _codxe\\t4 folder the game reads (with zone and usermaps)")
         if not chosen:
             return
@@ -656,11 +664,15 @@ def main():
             if ok:
                 messagebox.showinfo(
                     "t4ff",
-                    "The map list now shows every map of the usermaps folder, 13 at a time (LB / RB: a page).\n\n"
-                    "It needs the CoD Xe build with the usermaps list (src/game/t4/sp/components/usermaps.cpp).",
+                    "Custom Maps in the Nazi Zombies menu now shows every map of the usermaps folder.\n\n"
+                    "See the log for which list: CoD Xe's own (CoD Xe r351 or later) or t4ff's "
+                    "(the CoD Xe build with the usermaps list).",
                 )
 
-        start(["menu", chosen], "Updating the menu...", done)
+        command = ["menu", chosen]
+        for path in current_settings().console_zones:
+            command += ["--menu-zone", path]
+        start(command, "Updating the menu...", done)
 
     def inspect():
         chosen = filedialog.askopenfilename(title="Fastfile to inspect (PC or Xbox 360)", filetypes=[("Fastfiles", "*.ff"), ("All files", "*")])

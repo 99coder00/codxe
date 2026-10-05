@@ -1,7 +1,7 @@
 # t4ff and CoD Xe T4: handoff notes
 
-State of the work on branch `claude/charming-ptolemy-rahr6b` as of 2026-09-28, for whoever
-(person or Claude session) picks it up next. The [README](README.md) explains what t4ff does and
+State of the work as of 2026-10-04 (the sections below date from 2026-09-28 on unless marked), for
+whoever (person or Claude session) picks it up next. The [README](README.md) explains what t4ff does and
 how to use it; this file is about where the work stands, the rules it follows, what is open, what
 was already tried, and how things were checked.
 
@@ -10,13 +10,186 @@ was already tried, and how things were checked.
 To continue in a new Claude Code session (for example one running on the tester's own PC, which
 can run t4ff on the real files and read the Xenia and Watson logs directly), give it this:
 
-> Read `tools/t4ff/HANDOFF.md` on branch `claude/charming-ptolemy-rahr6b` of this repository and
-> continue from its "Open problems" and "Next steps". Follow its working rules.
+> Read `tools/t4ff/HANDOFF.md` on branch `claude/charming-ptolemy-rahr6b` of this repository, starting
+> with its "State on 2026-10-04" section, and continue from there. Follow its working rules.
 
 Everything below is in the repository. Nothing from the earlier cloud sessions (their scratch
 files, sample downloads, analysis scripts) carried over: the samples come from the files listed
 under [Environment](#environment), and the checks are described under
 [Investigation toolbox](#investigation-toolbox).
+
+## State on 2026-10-04 (read this first)
+
+**The user's goal now: strictly console compatible.** Every map is converted for a console's memory
+(the default `--memory-target 212`); Xenia-only builds (Xenia's patch enlarges the game's memory
+pool) are for experiments. Test with `dev/xenia/xenia_run.py --console-memory`: it turns that patch
+off for the run (and puts the user's patch file back), so Xenia has a console's 414 MB pool. Checked:
+Kino Rezurrection at 210.4 MiB leaves 10.2 MB free in Xenia that way, as the 220.7 MiB model says.
+
+**Kino Rezurrection 1.06** (map `d`, a 533 MB PC map that needs T4M R49 there; files in
+`Downloads\Kino Rezurrection 1.06`) is converted, installed (`usermaps\d`) and plays: the helicopter
+intro, the landing, a tour of 15 places with zombies, at a console's memory. Converted with the Kino
+Der Toten command (below) on its folder; about 25 minutes (three conversions in the memory loop).
+
+What it needed:
+
+1. **T4M** (why the PC needs it): bigger asset pools and memory (the console's pools hold it; the
+   memory is below), and client scripts getting every view model notetrack, not only `tesla_` ones
+   (the Thundergun's effects wait for theirs). CoD Xe nops that test (TU7 0x82141FB8, `main.cpp`).
+2. **Wavelet IWIs** (formats 6-10, Black Ops weapon ports): decoded (`t4ff/wavelet.py`, from the
+   public OpenAssetTools' decoder); A8L8 normal maps made DXN.
+3. **Anim trees**: the map's own `#using_animtree` trees and the player animation script's
+   `multiplayer.atr` are taken from its files (the game's lack its animations).
+4. **The freeze at the first frame** (not CoD Xe's old "press A" wait: upstream #243 sets
+   `ui_autoContinue`): technique sets CoD Xenon compiled (`mc_ambient_t0c0`, the dry grass) have model
+   vertex shaders with vertex fetches, and the game binds those with no vertex declaration (Treyarch's
+   are compiled for the layout); D3D's bind (TU7 8237D8B0) then reads the element count at address
+   0x18 and loops. t4ff now replaces technique sets no Treyarch zone has the shaders of with the
+   closest Treyarch one (`library.techset_safe`, `techsets.closest_techset`; `T4FF_ALLOW_UNSAFE_TECHSETS`
+   keeps them, for tests). CoD Xe binds an empty declaration instead of none (`main.cpp`): a guard
+   for maps converted before.
+5. **Memory**: the game allocates every block of a map's zone from its main memory (TU7 0x821677A0),
+   not only the textures: about 286.7 MiB free in Xenia, 220.7 on a console (`t4ff/memory.py`).
+   Kino Rezurrection takes 139 MiB without textures (models 58, animations 22, the world 21, loaded
+   sounds 20; no model is unused), so its textures get 71 MiB at a console's 212.
+
+**Texture quality at a console's memory** (all in `t4ff/stream.py`, `assets.py`, `__main__.py`):
+
+- Textures saved without mips (the IWI flag) get a box filtered chain and stream (`with_mips`; 41 of
+  Kino Rezurrection's 80, 18.1 MiB whole in the fastfile before, 2.7 now).
+- Over the target the memory loop gives way in order: the PC versions of stock textures, then the
+  packed mip tails (levels of 16 texels or less: `--keep-mip-tail`, 17 MiB here), then the planner.
+- The planner (`choose_drops`) counts, once a conversion has streamed, what each texture keeps in the
+  fastfile (the report's `steps`), and cuts relative to its own count (`texture_cut`: its estimate is
+  some MiB off the written zone's). Deep streamed textures first keep an eighth of their size
+  instead of a quarter (tier 0, `--keep-quarter` to stop it), then the texture whose next top level
+  saves the most loses it; 2D images and stock textures streamed as the PC game's go last (cutting
+  the console copy loses the upgrade: 58 textures ended 64x64 before that).
+- **Three levels** (`PAK_EIGHTH`, pack version 3: older CoD Xe builds refuse it): the fastfile keeps
+  an eighth, a texture of its own; CoD Xe applies the pack's half (x4, +2) and whole (x8, +3) and
+  takes the pitch from the width (`TexturePitch`: an eighth's rows are padded, so its pitch shifted
+  would be twice the whole texture's). Checked with marked levels (`mark_pak.py --eighth`): 758
+  eighths in 51 of 60 tour screenshots, no garbage; unmarked views normal.
+- Fixed in passing: streaming boxes of deep textures were sized from a texture twice too small
+  (`_MaterialTexels` took 4x the fastfile copy's size: right for the disc's halves, not quarters),
+  so their top levels loaded from twice the disc linker's distance. They use the true size now.
+
+Result (conversion 3; conversion 4, installed, is the same with half the box growth): 210.4 MiB; 899 textures stream (880 deep, 758 of them keeping an
+eighth); every texture that streamed in the 278 MiB Xenia build keeps its full PC size; of those kept
+whole 147 lost a level (mostly 256x256 decals), 8 more (zombie limbs 512 to 128, smoke). A first
+console build with the old planner reduced 1328 of 1530 textures. 388-460 reads a tour, none failed,
+nothing evicted (no extra pool: 10 MB free).
+
+**The stream buffer starved (2026-10-05; the user saw wall buy chalk and map diagrams "compressed
+beyond recognition")**: those were the fastfile's eighths (a 512x256 chalk: 64x32) shown right in
+front of them; their top levels were never read. Three causes, in CoD Xe's streamer and t4ff's boxes:
+
+1. The 64 MB buffer was full of applied base levels (priority 5: never evicted). With the disc
+   linker's boxes, this map's large textures want 53-61 MB of base and half levels at once from the
+   world alone (counted from the converted zone's world boxes holding the view at six tour places).
+2. A load finding no room was proposed again every frame (the closest; inside their boxes all are at
+   distance 0, the first the tree walk meets wins): no other image loaded (head-of-line blocking).
+3. So images near the view kept their fastfile copy while others far inside their large boxes kept
+   their base level.
+
+Fixed: CoD Xe (`streaming.cpp`, "When the memory is full of base levels"): a load finding no room
+waits 30 frames; images within 300 units still showing their fastfile copy are proposed before any
+base level, the nearest first (`Propose`'s keys; the loader still gets the true distance): the user
+found the Stakeout's chalk still blocky, 61 units in front of it and 3 units outside its box, behind
+the base levels of every large texture the view was inside the box of; while memory is short a
+first load does not bring the base level along; an image within 100 units that finds no room for
+its half size has one place of its size given back (the applied base levels
+there go to their half size for 900 frames, then are evictable). t4ff: for a console's memory the
+boxes grow half the disc's distance (`--stream-growth`, `CONSOLE_STREAM_GROWTH`; the game renders
+1024x600, 80 degrees: a top level shows alone up to about 600 / texels per unit). Measured on a
+marked tour (every pack entry colored): screen covered by streamed levels 20% to 43% (full levels
+17.4% to 18.2%, half sizes 2.3% to 24.4%); reads 129 to 347 MB in 150 s (164 MB read again: the
+tour teleports). The chalks and the chalk map now load (half, or full when close). The extra pool's
+margin went from 16 MB to 1 MB: a logged tour showed the game allocates nothing from PMem while a map
+plays (all of it while it loads), and the pool goes back before anything else in PMem; a console's
+map leaves about 10 MB, now an 8 MB pool. With the nearest-first order: full levels 18.9%, half sizes
+28.0% of the screen (the build before all this: 17.4% and 2.3%). Diagnostics:
+`STREAM_LOG_FULL 1` logs what holds the memory when a load finds no room and what gives way.
+
+**CoD Xe plugin installed**: `codxe.xex` = `codxe.xex.fair` (md5 bff5d321): the fairer streamer above,
+eighths, the notetrack patch, the vertex declaration guard (`codxe.xex.eighth`, md5 ae21d5a2: before the
+streamer fixes). Backups next to it: `.notetracks`
+(before the guard and eighths), `.declguard`, `.pre-notetracks`, `.pre-streaming`. The guard checked:
+Kino Rezurrection converted with `T4FF_ALLOW_UNSAFE_TECHSETS=1` (the grass on CoD Xenon's set) plays
+its intro into round 1 with it, three shaders logged once each ("bound without a vertex
+declaration"); before, it froze at the first frame. Leviathan's grass clumps could not be reached
+for a test (outside its playable area: it moves the player back).
+
+**Open, in order:**
+
+1. Real hardware: everything was checked in Xenia (with a console's memory pool now). The user's
+   RGH console is the next test of Kino Rezurrection.
+2. What the eighths cost: past 300 units of a texture's box it shows an eighth, not a quarter (a
+   band where the GPU would sample a quarter is softer). Applying the half size texture farther
+   (a "far" use band) would help; applied blocks cannot be evicted, so it needs care with the 64 MB.
+3. Committing (when asked): t4ff here; CoD Xe on `merge-upstream-r351`.
+4. The older items below (2026-10-03's list).
+
+## State on 2026-10-03
+
+**Where the code is: two working trees, both with uncommitted work (commit only when asked).**
+
+| Tree | Branch | What is uncommitted |
+| --- | --- | --- |
+| `Downloads\codxe` (this repository) | `claude/charming-ptolemy-rahr6b` | all of t4ff's work since 2026-10-01: `t4ff/stream.py` (new), `memory.py`, `merge.py`, `scripts.py`, `named.py`, `assets.py`, `library.py`, `menu.py`, `gui.py`, `__main__.py`, tests, README, this file, `dev/xenia/` (new); also turret diagnostics in `src/game/t4/sp` (`turret_view.*`, `main.cpp`, `codxe.vcxproj`) that are not meant to ship |
+| `Downloads\codxe-build` (a worktree) | `merge-upstream-r351` | CoD Xe: `src/game/t4/sp/components/streaming.cpp`/`.h` (new), `fastfiles.cpp`/`.h` (images.pak, highmip redirect, `dump_executable`), `gsc.cpp` (`ExecuteCommand`), `main.cpp`, `symbols.h`, `codxe.vcxproj` |
+
+Build CoD Xe in the worktree: `echo | cmd //c 'tools\build-codxe.bat'` (VS2010 + XDK), then copy
+`build\Release\bin\codxe.xex` over `Downloads\Compressed\xenia_canary_windows\plugins\4156081C\codxe.xex`
+(installed now; `codxe.xex.pre-streaming` there is the build before the streaming work).
+
+**What the last sessions built** (2026-10-02/03; details in [Memory and texture streaming](#memory-and-texture-streaming-2026-10-02)):
+texture streaming for converted maps that goes past what WaW shipped, after Black Ops 1's methods,
+built a step at a time and each step checked in Xenia (color-marked texture levels, logs, screenshots):
+
+1. **World streaming tree** (`GfxWorld.streamInfo`) and the disc linker's box formula: static models and
+   world surfaces stream at all (before, only entities did).
+2. **`images.pak`**: one pack per map instead of a `highmip` folder; CoD Xe serves it.
+3. **Two levels at once** (`--deep-stream all`): the fastfile keeps a quarter size texture.
+4. **Extra stream pool**: CoD Xe runs the streamer's slots itself and gives it the main memory the map
+   leaves (Black Ops' `extraRStreamBuffer`; Kino: 56 MB more than the game's 64 MB).
+5. **PC originals** (`--upgrade-budget`): every stock texture the console had smaller is the PC game's.
+6. **Levels in steps**: half size first, base level inside the texture's box.
+
+**Kino Der Toten** (installed in the game folder, `usermaps\kinodertoten`, with its 395 MB `images.pak`;
+needs the new CoD Xe build) is the test map: 128.4 MiB of main memory, every texture with a PC source at
+its PC size (77% identical data, 22.5% normal maps repacked to DXN, 2 textures re-encoded; 29 are
+console only), 645 textures streamed (627 in steps). Converted from `tools/t4ff` with (Git Bash; about
+6 minutes; the disc's campaign zones give its campaign assets):
+
+```bash
+W="C:/Users/Hunter/Downloads/Compressed/Call of Duty - World at War (axekin.com).iso/WaW"
+Z=(); for f in ber1 ber2 ber3 ber3b mak nazi_zombie_prototype oki2 oki3 pby_fly pel1 pel1a pel1b pel2 see1 see2 sniper; do Z+=(--console-zone "$W/$f.ff"); done
+python -m t4ff convert "C:/Users/Hunter/Downloads/kinodertoten_updated/kinodertoten.ff" -o "$W"   --iwd "C:/Users/Hunter/Downloads/Compressed/Call of Duty World at War B252004~AG/Call of Duty World at War"   --xma-encoder "C:/Program Files (x86)/Microsoft Xbox 360 SDK/bin/win32/xma2encode.exe" --xma-quality 67   --max-loaded-sounds 1500 --stream-textures --deep-stream all   --console-zone "C:/Users/Hunter/Downloads/Compressed/codxe-t4-fastfiles-v0.2.0" "${Z[@]}"
+```
+
+**Testing** without anyone at the controller: [`dev/xenia/README.md`](dev/xenia/README.md) (test mod,
+`codxe.json` settings, tour scripts, screenshots, `mark_pak.py`). Always put the user's `codxe.json`
+back (`mod_menu`; a copy is `dev/xenia/codxe.json.user-backup`).
+
+**Reverse engineering**: IDA databases in `Downloads\ida_dbs` (`waw_disc_default_xex.i64`: the disc
+executable, for logic; `waw_tu7_dump.i64`: Title Update 7, which Xenia runs, for addresses;
+`bo1_sp_default_xex.i64`: Black Ops 1). TU7 addresses differ from the disc's (see Title Update 7
+below). Black Ops 1's 360 fastfiles: `Downloads\bo1_tools\t5ff.py` decrypts all 48 of the disc's
+(the key is Activision's: kept out of the public repositories).
+
+**Open, in order of the user's interest:**
+
+1. The CoD Xe dev asked whether the **packed mip tail** drop was tried: not yet. Measured on Kino: 11.9
+   MiB less (936 textures; Xenos packs levels 16x16 and down into one 4 KiB aligned tail). Offered as a
+   t4ff option to test in Xenia; Kino does not need it (66 MiB under its target), big maps may.
+2. The user's **500+ MB map** (an .exe installer the user downloads): the real test of the extra pool.
+3. **Real hardware**: everything streaming was checked in Xenia only (disc/HDD speed, GPU timing).
+4. **Freeze Gun** (`freezegun_sp` or a variant) does not fire and disables the knife (user report, not
+   looked at).
+5. Committing (when asked): t4ff on this branch; CoD Xe on `merge-upstream-r351` (the turret diagnostics
+   in this tree stay out).
+6. The older open problems below (The Simpsons, Dead Sand, Mini-Labor console tests).
 
 ## The goal
 
@@ -49,8 +222,8 @@ CoD Xe mod `mod_menu` stays enabled in all tests.
   what is only likely. The console `nazi_zombie_aztec.ff` used as a reference is CoD Xenon's
   conversion of a community map, not a Treyarch zone.
 - **Tests.** `python -m unittest discover -s tests` in `tools/t4ff`, with `T4FF_SAMPLES` set for
-  the sample based tests (layout below). Run them before every push; 70 as of this writing, all
-  passing on Windows too.
+  the sample based tests (layout below). Run them before every push; 108 as of 2026-10-04 (21 skip
+  without samples), all passing on Windows.
 
 ## Environment
 
@@ -145,6 +318,9 @@ lacks are added (from its files, the console fastfiles, the PC files). Script fi
 - in splitscreen the map keeps its own fog, not the yellow placeholder fog of the game's `_load.gsc`
   (`level.splitscreen_fog`), and its `SetVolFog` calls set the game's splitscreen fog there
   (`splitscreen_fog`; The Simpsons played washed in yellow, reported by CoD Xenon's developer);
+- on zombie maps the MG42 turrets are held guns (`mounted_guns`): on the console the client draws
+  a player's view on one far from the gun (Dead Sand's first room, reported by players; CoD Xenon's
+  Airport and stock Nacht with one placed too; see Open problems, 3);
 - the level and client scripts, loaded by name, come from the map's files when no zone has them,
   and a script the game has too comes from the map's files when it has its own
   (`missing_scripts_zone` roots; Mini-Labor, 7);
@@ -173,6 +349,132 @@ confirmed in Xenia with CoD Xe r422: up from the first row goes to the last, 7-1
 place of the zones' copies), a usermap's options in the Custom Maps menu (`options.txt`), the dynamic usermaps list, a mod menu entry for music boxes, VS2010
 build script.
 
+## Memory and texture streaming (2026-10-02)
+
+- **The real memory limit.** The game allocates a map's large runtime (textures), large and physical
+  zone blocks from its "main" physical memory, which has about 202.7 MiB free when a map loads
+  (Kino in Xenia: "Need 58631667 more bytes of 'main' physical ram" with 258.6 MiB of textures;
+  168.8 + 24.2 + 1.5 MiB loads and plays). The virtual block comes from elsewhere. `memory.py`'s
+  target (194 MiB) is now that memory, not the total; CoD Xenon's "200 MiB total" was only their known
+  good range. GUI settings version 4 drops saved targets of the old meaning.
+- **Texture streaming** (`--stream-textures`, `t4ff/stream.py`). A `.hi` file is the full texture's
+  tiled top level, no header, padded with zeros to 4 times the half size texture's (padded) base level:
+  the streamer reads that much (verified on 1474 streamed images of four disc zones; the split itself on
+  all 239 of `pby_fly.ff`). The fastfile keeps a half size texture whose layout is the full one's mips
+  (`split` checks it byte for byte), `streaming` 1, `streamSlot` 0xFFFF. Images named like one of the
+  game's zones' don't stream (requests are by name).
+- **What loads a top level** (disc executable, `R_Stream*` around 0x82429B28): the streamer loads, one at
+  a time, the closest image whose top level is missing, of the materials of
+  - the entities drawn: `XModel.streamInfo.highMipBounds` (per LOD 0 surface, model space);
+  - the world: `GfxWorld.streamInfo` is a tree (`aabbTrees`, 32 bytes a node: ushort first leaf
+    reference, reference count, first child, child count; float mins[3], maxs[3]) walked from node 0,
+    pruning nodes farther than `r_streamMaxDist` (600). Leaves list `leafRefs`: a world surface index
+    (its box: `GfxSurface.boundsCopy`, at +16) or `~index` of a static model (its model's boxes).
+    **Static models and the world stream only through the tree**: before it was written (2026-10-02
+    morning) Kino's streamed props never loaded (14 files served in a test, all entities').
+  The boxes are where the top level is needed: the disc's linker grows each triangle's box by 1931.2 /
+  its texels per unit (world surfaces of nazi_zombie_prototype.ff: half exact, 90% within 75 units;
+  model boxes vary with which image it measured), an empty box (131072, -131072) when nothing streams.
+  t4ff writes all three (`write_stream_bounds`). The disc's tree holds every surface and static model
+  with a streamed image (t4ff picks 2122 surfaces and 1085 static models of prototype; the disc 2122
+  and 1096).
+- **The streaming buffer**: 64 MB (`lis r3, 0x400`, "Streaming Texture Buffer", TU7 0x82445D04, render
+  init), a buddy allocator of 16 regions of 4 MB down to 128 KiB slots, slot address = base + slot <<
+  17. It is reserved at boot whatever the map: a map that streams nothing leaves it unused. Cinematics
+  borrow its first 24 MB (0x82411208 on the disc). `r_streamSize` (MB, 0: no limit) caps the slots'
+  addresses. Black Ops does better (`extraRStreamBuffer`, below).
+- **PC stock textures**: with `--stream-textures` a stock texture the console has smaller (a console
+  library copy) is the PC game's (`--iwd`) when its streamed half takes no more memory than the console
+  copy (`stream_textures(stock_texture=...)`): memory neutral, the top level streams.
+- Kino (2026-10-02, evening): 364 textures stream (127 PC stock), the world's tree has 858 surfaces and
+  314 static models, 156.4 MiB of main physical memory; a scripted tour (teleports to 10 places) had 142
+  `.hi` files served, none failed (scratchpad `t4ff_test_tour.gsc`).
+- **`images.pak`** (2026-10-02, night): a map's streamed levels are one file in its folder, not a
+  `highmip` folder (`stream.PakWriter`, version 2, big endian): a 32 byte header (`T4FFPAK1`, version,
+  count, index offset, index size), the entries 4 KiB aligned (TU7's loader opens with
+  `FILE_FLAG_NO_BUFFERING` and share mode 0), then the index (24 bytes an entry: name offset, name
+  length, flags, offset, size, level 1 offset, 0) and the names. CoD Xe's `Sys_CreateFile` hook opens
+  the pack (adding read sharing) and seeks to the entry; TU7's read (0x82397B70, `ReadFile` without
+  an offset) reads from there. Checked on the Kino tour: 142 reads from the pack, none failed.
+- **Two levels at once** (`--deep-stream`): the fastfile keeps a quarter size texture, the pack the
+  whole texture (level 0 then its mips: the GPU wants the mips contiguous after level 1). CoD Xe
+  (`streaming.cpp`) hooks TU7's loader 0x824457D0 (sets the image's `baseSize` to a quarter of the
+  entry: the streamer allocates and reads 4 times `baseSize`), the swap queue's consumer 0x824536A8
+  (queue: lock 0x84F6B748, count 0x84F6B764, entries 0x84F6B768 of image and slot address or 0) and
+  the revert 0x824535F0 (also called when the streamer takes a slot back). For a deep image it
+  saves the fetch constant and writes pitch x4, base = slot, size x4, max mip level +2, mip
+  address = slot + level 1 offset; dropping restores the saved constant. The game's own swap (for
+  reference): pitch x2, base = slot, size x2, max mip +1, mips = old base; its revert: base = mips,
+  mips = base + `baseSize` (the runtime one: bytes of the fastfile copy's base level). Checked in
+  Xenia with a color-marked entry (level 0 green, mips red: green walls, red at grazing angles; with
+  `r_stream 0` the quarter texture, with `r_stream 1` the colors again; scripts cannot set internal
+  dvars: `ExecuteCommand("r_stream 0")`). Kino with `all`: 356 of 364 deep, 119.8 MiB (was 156.3);
+  the tour had 232 reads for 142 files (the 64 MB pool fills sooner: bigger entries), none failed.
+- **The extra stream pool** (Black Ops' `extraRStreamBuffer`, CoD Xe `streaming.cpp`): CoD Xe now manages
+  the streamer's slots itself (TU7: init 0x824655B0, alloc 0x824656A8, free 0x824658B0, assign 0x82465988,
+  lock/unlock 0x82465B08/0x82465B38, per frame update 0x82465BE0, evict all 0x82465C78, record use
+  0x82445568 (slot, frame, squared distance: bands 0 / 10000 / 90000), the loader for images.pak images;
+  the game's state machine 0x82445AC0 rewritten as `RateBlock`; its frame counter 0x84F3B9A8, buffer
+  0x84F3B9AC, loading image 0x84F3B9E0, stream lock 0x84F3B9B4) with the game's rules (priority 5
+  applied, 4 dropped but kept, 1-3 loaded ahead, 0 free; an allocation evicts below its priority, never
+  4 or 5, the least recently changed first) over ranges of slots: the game's buffer (slots 0-511) and,
+  once a map of images.pak streams, the main memory it leaves less 16 MB (PMem side 1: TU7 begin
+  0x822916A0, end 0x822916F8, free 0x82291718 (newest first, by name pointer), alloc 0x82291840,
+  get free 0x82291BD8; the pool is 480 MB in TU7). It is given back before any other PMem begin or free
+  (the load zone `<map>_load` is on side 1 too). Checked: the same tour gives the game's numbers (232
+  reads, 328 deep loads, 272 drops); Kino gets 64 MB at B0070000 (slots 512-1023, 18.2 MB left); with
+  the extra pool searched first 141 of 145 loads go there and render; `devmap` again gives it back
+  (84175 KiB free) and takes it again. Kino's tour never fills the game's 64 MB (0 evictions): the
+  232 reads of earlier runs came from the test's own `r_stream 0`/`1` (142 without).
+- **PC originals for every stock texture** (2026-10-02, night): Kino still had 323 streamable stock textures
+  below their PC size (the disc's campaign copies: `char_marine_new_c` 128x128 for the PC's 1024x1024). The
+  rule was memory neutral; now a stock texture is the PC game's when it streams (deep) and the bytes it adds
+  to the fastfile fit `--upgrade-budget` (96 MiB; the memory loop lowers it first), and the ones that cannot
+  stream (too small for a slot, effects) are the PC game's whole in the fastfile within the same budget.
+  Kino: 463 PC originals (408 streamed, 55 whole) for 9.4 MiB, 645 textures streamed (627 deep), the world's
+  tree 1625 surfaces and 746 static models, 128.4 MiB; every texture with a PC source at its PC size
+  (`$white`, `$black` aside). The tour now reads 321 files; the game's 64 MB fills and 408 loads go to the
+  extra pool (56 MB), none failed. With `r_stream 0` the walls show the fastfile's quarter copies (blurred),
+  with `r_stream 1` the PC originals (scratchpad `compare_wall.png`).
+- **Levels in steps** (step 5, Black Ops' streamed parts): a deep pack entry also has the offset of level 2
+  in its mip region (index field 6; t4ff's `deep_split`: the half size texture's base level, 0 unless
+  4 KiB aligned). CoD Xe loads a deep image's half size texture first (the entry from `mipOffset` on: a
+  self contained texture, a quarter of the memory; applied with pitch and size x2, max mip +1, mips at
+  half + level 2 offset) and its base level (the entry up to `mipOffset`, a second block; applied x4, +2,
+  its mips the half size block) once the view is inside its box: its hook on the game's material scanner
+  (TU7 0x82445C00: material r3, squared distance f1, frame r5, the image being loaded r6; the candidate
+  at 0x84F3B9D0/0x84F3B9D4) proposes it again for that; inside the box already when first loaded, both
+  come in the same load. Out of reach an image goes back a step, then to the fastfile's copy; the base
+  level is the first to go when memory is short (its half size takes it along). Queued swaps of an
+  evicted image are purged; a swap naming a block that went is ignored. Checked in Xenia with marked
+  levels (green level 0, red level 1, blue the rest): a test build that never loads base levels shows red
+  walls, the real one green. Kino's tour: 712 reads, 153.8 MB (whole textures: 519 reads, 201.0 MB);
+  re-read 28.5 MB instead of 75.6 MB; as sharp as whole textures 5 seconds after arriving. Test switches
+  in streaming.cpp: STREAM_TEST_WHOLE, STREAM_TEST_HALF_ONLY, STREAM_LOG_SWAPS.
+- **Packed mip tail** (the CoD Xe dev's idea): dropping the levels from 16x16 down (Xenos packs them in
+  one tail, each texture's data 4 KiB aligned) would save 9.6 MiB on Kino (759 textures); far surfaces
+  would sample a 32x32 level instead of a smaller one. Done 2026-10-04: dropped when a map is over its
+  memory target (`--keep-mip-tail` keeps it), before any texture loses a level.
+- **CoD Xe serves the map's `highmip` folder**: its `Sys_CreateFile` hook (0x823972F0) is, in Title
+  Update 7, the CRT's CreateFileA; a request starting `D:\highmip` and ending `.hi` gets
+  `usermaps\<map>\highmip\<file>` when that exists (`ResolveHighmipPath`, fastfiles.cpp; logs
+  `highmip: <path>`). The dev's choice: the game's files stay untouched.
+- **Title Update 7 vs the disc executable.** Xenia runs TU7 (`content\0000000000000000\4156081C\000B0000`);
+  `scratchpad/ida/default.xex.i64` is the disc's original executable, whose addresses differ (CoD Xe's
+  TU7 symbols land mid-function there). Game logic found there holds; addresses for hooks must come
+  from TU7: CoD Xe dumps the running image when a file `_codxe	4\dump_executable` exists
+  (`dump_executable.bin`, 50.6 MB, then the copy stalls on the unmapped tail: kill Xenia, delete the
+  marker), loaded in IDA as `idat -A -c -TBinary -pppc -b8200000 dump.bin` (`scratchpad/ida/tu7.bin.i64`).
+  TU7's highmip path is `%s\highmip%s\%s.hi` (an optional subfolder), its loader 0x824457D0.
+- **Black Ops (T5, 360 disc in Downloads)**: its fastfiles are Salsa20 encrypted (`PHEEBs71`); textures
+  stream in mip parts from `images.pak` (2.3 GB) and `images_low.pak` (lowest mips), sounds from
+  `snd.all.pak`; its zombie maps are 50-55 MB fastfiles. After a level loads it hands **all the free
+  physical memory** to the texture streamer (`extraRStreamBuffer`, sub_8259CA50 of its default.xex),
+  released when the level goes. A CoD Xe hook could do the same for WaW (a second pool after the 64 MB
+  one: the allocator's table is fixed at 16 regions, so its alloc and slot address functions would need
+  replacing).
+- **Next**: the steps of the user's plan are done (pak, two levels, extra pool, PC originals, levels in steps); open: the user's 500+ MB map, hardware tests, committing the CoD Xe changes, optionally the mip tail drop.
+
 ## Maps tested in game
 
 | Map | State |
@@ -182,6 +484,8 @@ build script.
 | The Simpsons (`simpsons`, 2010, mod heavy) | converts and plays; voices, music box, airstrike (tester), rounds and dog rounds (Xenia) work. The window crash (1) is fixed but awaits a console test; Moe's (2) not looked into |
 | Dead Sand (`nazi_zombie_dead_sand`, 2009) | converts and plays; commissars, marines, SS, Nebelwerfer (Xenia). Objective picture (3) |
 | Mini-Labor (`nazi_zombie_002c`, 2014, PhilMod) | converts and plays; weapon choice, doors, power, box, Pack-a-Punch, Perk-o-Matic (Xenia). PhilMod's core scripts from the map's scripts folder (needs the new CoD Xe; 7) |
+| Kino Der Toten (`kinodertoten`, 2013, A-Grand, UGX Mod 1.0.3) | converted 2026-10-01 (with the disc's campaign zones as console fastfiles: 1377 of its anim tree's animations came from them), 199.0 MiB with UGX's `localized_common.ff` (its guns) merged; UGX's vote menus kept (CoD Xenon's 0.3.0 conversion of the same map forces Classic). Tested: loads, vote menu works with the D-pad (wraps since the 4th conversion), gungame has its guns (no knife and unlimited ammo are UGX's: `AllowMelee(false)` and `giveMaxAmmo` every 0.05 s). Pause menu Options/Challenges only closed it: UGX's PC `pausedmenu` (Options opens `options_new_pc`, Challenges `menu_challenges`) took the place of the console's. Renaming its lists (`*_mod.txt`) didn't help (tested): menus are found by name whatever list holds them, so the mod's menus of console names are renamed `<name>_mod` too (`merge.rename_game_menus`, 102 in Kino); 5th conversion: Options works, Challenges gone (the console's pause menu has none). 6th: UGX's pause menu stays Kino's own (`merge.bind_pause_menu`), Options opens the console's `ingameoptions`, `menu_challenges`/`popup_tier` load with the precached `ugxm_vote_host` list (IDA: script menus and `ui/ingame.txt` share the UI's menu context, `Menus_FindByName` takes the first, 120 menus at most); not tested yet. Firing either Thundergun froze the game (CoD Xenon's Kino too): UGX's `ugx_thundergun.csc` plays effects for local clients 3, 2, 1 (`playfx( i, ...)`), split screen slots the console has but nobody plays; t4ff's `local_client_effects` makes them the script's own local client. Found in Xenia with a test mod (`_codxe/t4/mods/t4ff_test`: `startup_command` "devmap kinodertoten", a script answering UGX's vote and firing through CoD Xe's new `ExecuteCommand("+attack")`); 11th conversion fires 8 shots without freezing. "Objectives: Disabled" is UGX's own setting for Kino (`set_gamemode("objectives", false)` in `ugxm_user_settings.gsc`), the same on PC. Mini-Labor had the same (PC `ui/hud.txt` with its `pausedmenu`, the testers' "options menu" report): its installed zone and zip are patched in place (76 menus; Overkill scripts kept). 13 missing textures (lens/spec composites, `m60_gold_col`) are missing from UGX's iwds on PC too. Installed now: `--stream-textures --deep-stream all` with every stock texture's PC original (645 streamed, 627 two levels, 128.4 MiB; its `images.pak`, 395 MB, ships with the map; needs t4ff's CoD Xe build) |
+| The Matrix (`matrix`, 2017, Black Ops perks and wave gun) | stopped at load: "animation 'ai_zombie_crawl_microwave_death_walking_c' not defined in anim tree 'generic_human'" (the game's tree won; the map's is in its .iwd). Its anim trees now go to the scripts folder (needs the new CoD Xe); reconverted 2026-10-01, not tested in game yet |
 
 ## Open problems
 
@@ -273,6 +577,18 @@ only with `--iwd`. Fixed, each checked in Xenia (scripts.py):
   so a per zombie idle set does not hold; `zombie_idles_for_zombies` moves the zombie idles to
   `"zombie_stand"`/`"zombie_crouch"` and gives each zombie a `stop_immediate` exception (run at the
   start of `stop.gsc`'s `main()`, per AI) that plays them in a copy of its loop.
+- **Only sky on the MG42 turrets** (players: "when you mount it you can't see anything"): not the
+  conversion. A test script put the player on each turret (`UseBy`): the server has the eye at the
+  turret's `tag_player`, but the console's `viewpos` (the game's console, CoD Xe, keyboard passed
+  through with a controller plugged in) gave coordinates of 1e24. CoD Xenon's Airport (the view at
+  the world's origin) and stock Nacht with one MG42 placed in its map entities (a patched copy, the
+  view black) do the same; see1's placed MG42s (campaign) and The Simpsons' .30 cals work. Ruled out,
+  A/B each: the model (the .30 cal's on the MG42 weapon, the campaign's on see1), overheating
+  (`overheatWeapon` 0 on Nacht), the player's weapons, the AI, the zombie mode's depth of field
+  (on see1), `cg_thirdPerson`/`cg_fov` (unchanged while on it). The client's turret view is
+  `sub_8212A0E0` (the turret's `tag_player` from its client DObj, plus the weapon's `vProneOfs`),
+  called from `sub_8212BB98`; why its pose is wrong in zombie mode was not found. `mounted_guns`
+  makes the MG42 turrets of zombie maps held guns (see the README).
 
 Not bugs of the conversion, found on the way (tracker script, see the toolbox):
 
@@ -380,6 +696,17 @@ ballistic knife, crossbow, traps, an objective ending, five difficulties). Fixed
   game's as on PC. Checked in Xenia: all 18 used load, no script error, `player_damageMultiplier`
   ends at PhilMod's 1 (the game's sets about 0.36), the systems above work.
 
+Console testers (2026-10-01) report endless ammo and grenades ("easy is infinite ammo") and no
+options menu. Endless ammo, likely (not reproduced): PhilMod's Unlimited Ammo power-up turns the
+saved dvar `player_sustainammo` on and off after 30 seconds, and a game ending meanwhile left it on
+for the next one; `reset_sustain_ammo` (scripts.py) turns it off as the level starts. Also possible:
+CoD Xe's mod menu "Engine Infinite Ammo" (`sf_use_ignoreammo`), which the game's `maps/_cheat.gsc`
+applies in every game on CoD Xe builds without the scripts folder (the game's `_load.gsc` runs
+`_cheat::init()`, PhilMod's does not). Options: the Custom Maps menu's X / Y options need the new CoD
+Xe build; the in-game difficulty popup worked in Xenia on an older build. Ask testers which build
+they run. The distributed Mini-Labor has a harder Overkill patched into its fastfile (health 1000
++250 a round, every zombie sprints, one hit downs, the third with Juggernog): a reconversion drops it.
+
 Not checked yet: the objective chain
 (wrench, uranium, C4, the Endgame-O-Matic, `end_game`), the saw blades, the Amm-O-Matic, the
 zipline. Its ending is Treyarch's game over; PhilMod's `maps/credits.gsc` only backs its main
@@ -387,11 +714,20 @@ menu's "About this map", which the console does not show.
 
 ## Next steps
 
+0. Streaming (2026-10-03): see [State on 2026-10-03](#state-on-2026-10-03-read-this-first): the mip
+   tail option, the 500+ MB map, hardware, the Freeze Gun.
 1. The Simpsons on a console: the window crash (1) after an airstrike and barrier repairs, rounds
    in the TV room and dog rounds (2); then Moe's (2).
 2. Dead Sand on a console (3), public testing; its objective picture.
 3. Mini-Labor: public testing (with the CoD Xe build that loads usermap scripts); its objective chain (7).
 4. Stock assets: named materials, then the PC game's fastfiles as a source (4).
+   Technique sets: every map converted so far names 2-5 that no console zone given has (`mc_unlit`,
+   `effect_zfeather_add_nofog_eyeoffset`...), left as references nothing loads. Most are in the
+   disc's campaign zones (`ber1.ff`, `mak.ff`, `see1.ff`...): give the disc folder as a console zone.
+   The rest could be assembled from the disc's individual shaders (a library of every shader of its
+   zones, by name) instead of whole technique sets of the same name; not in t4ff yet.
+   CoD Xe r351 (merged on `merge-upstream-r351`, not yet here) has its own custom maps list
+   (`map.json`, `preview.dds`), which t4ff now writes too (README, map list).
 5. Das Herrenhaus (Der Riese scripts, Black Ops perks, a boss, buildables, Harry's shield) as the
    next complex map.
 
@@ -501,6 +837,12 @@ Format facts learned in this work that are not in the README:
 
 | Path | What |
 | --- | --- |
+| `tools/t4ff/t4ff/stream.py` | texture streaming: split, deep split, `images.pak` (`PakWriter`), PC originals, streaming boxes and the world's tree |
+| `tools/t4ff/t4ff/memory.py` | the main memory measure (194 MiB target) |
+| `tools/t4ff/dev/xenia/` | headless Xenia tests and measuring scripts (README there) |
+| `codxe-build: src/game/t4/sp/components/streaming.cpp` | CoD Xe: the streamer's slots, extra pool, deep images in steps, the swap queue (TU7 addresses inside) |
+| `codxe-build: src/game/t4/sp/components/fastfiles.cpp` | CoD Xe: usermap fastfiles, loose sounds, `images.pak` and `highmip` serving, `dump_executable` |
+| `Downloads\ida_dbs`, `Downloads\bo1_tools` | IDA databases (WaW disc, WaW TU7, Black Ops 1); the Black Ops 1 fastfile decrypter |
 | `tools/t4ff/t4ff/zone.py` | zone reader and writer, `Node`, `Ptr` |
 | `tools/t4ff/t4ff/convert.py` | the converter, pointer fixing, shared data adoption |
 | `tools/t4ff/t4ff/assets.py` | per asset rules (images, materials, sounds, weapons...) |

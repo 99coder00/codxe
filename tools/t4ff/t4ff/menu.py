@@ -380,6 +380,35 @@ def make_dynamic(p: Platform, zone: Zone, rows: int = ROWS) -> List[dict]:
     return found
 
 
+# CoD Xe's own custom maps list (release r351), in the menu zones made for it: CoD Xenon's 0.3.0
+# patch_ui.ff replaces the game's whole menu list (ui/menus.txt), which can add a menu, and has the menu
+# codxe_usermaps, whose rows CoD Xe fills from the usermaps folder (map.json, preview.dds). With such a
+# menu zone nothing is patched: t4ff gives the maps what that list reads.
+OWN_USERMAPS_MENU = "codxe_usermaps"
+
+
+def has_own_usermaps_list(p: Platform, zone: Zone) -> bool:
+    """Whether the menu zone ``zone`` has CoD Xe's own custom maps list."""
+    return any(a.type == "menu" and a.name == OWN_USERMAPS_MENU for a in zone.assets)
+
+
+def menu_zone_candidates(paths: List[str]) -> List[str]:
+    """The patch_ui.ff files of ``paths`` (fastfiles, or folders: a game's or a release's _codxe\\t4,
+    its zone folder, or the folder of the release around it)."""
+    import os
+
+    found = []
+    for path in paths:
+        if os.path.isfile(path):
+            found.append(path)
+            continue
+        for sub in ("", "zone", os.path.join("_codxe", "t4", "zone"), os.path.join("t4", "zone")):
+            candidate = os.path.join(path, sub, "patch_ui.ff")
+            if os.path.isfile(candidate) and candidate not in found:
+                found.append(candidate)
+    return found
+
+
 def not_cod_xenon_menu(p: Platform, zone: Zone) -> Optional[str]:
     """Why ``zone`` is not CoD Xenon's own patch_ui.ff (the menu :func:`make_dynamic` starts from),
     or None when it is."""
@@ -616,6 +645,84 @@ def preview_file(rgba) -> bytes:
     texture as the console holds it, which CoD Xe copies as is into the preview slot."""
     tex = preview_texture(rgba)
     return PREVIEW_MAGIC + struct.pack(">HHHHII", 1, tex.width, tex.height, 0, tex.format.gpu, len(tex.pixels)) + tex.pixels
+
+
+# CoD Xe's own custom maps list (release r351: a menu zone's menu codxe_usermaps, with its image
+# codxe_usermap_preview) names the maps of the usermaps folder after their map.json (version 1, name,
+# description) and shows their preview.dds: a DXT1 picture without mipmaps, which CoD Xe copies into
+# that image and so must be its size (512x256 in the menu zone that has it), or the map has none. The
+# maps of other converters (Wonderland's) come with both. t4ff writes them from description.txt,
+# which stays where a map's name is changed, and from the loading screen, as preview.bin.
+MAP_JSON = "map.json"
+PREVIEW_DDS = "preview.dds"
+PREVIEW_DDS_SIZE = (512, 256)
+
+
+def _ascii(text: str) -> str:
+    """``text`` in ASCII, accents dropped, as the JSON reader of the console reads it safely."""
+    import unicodedata
+
+    text = "".join(c for c in unicodedata.normalize("NFKD", text) if not unicodedata.combining(c))
+    return text.encode("ascii", "replace").decode("ascii")
+
+
+def map_json(description: str) -> str:
+    """A map's map.json from the content of its description.txt (its name, then its description)."""
+    import json
+
+    lines = [line.strip() for line in description.splitlines()]
+    name = next((line for line in lines if line), "")
+    rest = lines[lines.index(name) + 1 :] if name else []
+    text = " ".join(line for line in rest if line)
+    return json.dumps({"version": 1, "name": _ascii(name), "description": _ascii(text)}, indent=2) + "\n"
+
+
+def preview_dds(rgba) -> bytes:
+    """preview.dds: the picture ``rgba`` filling PREVIEW_DDS_SIZE (cut to its shape around its middle)
+    as a DXT1 DDS file without mipmaps."""
+    import numpy as np
+
+    from . import dxt
+    from .loadscreen import resize
+
+    width, height = PREVIEW_DDS_SIZE
+    h, w = rgba.shape[:2]
+    scale = max(width / w, height / h)
+    sw, sh = max(width, round(w * scale)), max(height, round(h * scale))
+    picture = np.array(resize(rgba, sw, sh), dtype=np.uint8, copy=True)
+    x, y = (sw - width) // 2, (sh - height) // 2
+    picture = np.ascontiguousarray(picture[y : y + height, x : x + width])
+    picture[:, :, 3] = 255
+    pixels = dxt.encode(picture, "DXT1")
+    flags = 0x1 | 0x2 | 0x4 | 0x1000 | 0x80000  # caps, height, width, pixel format, linear size
+    header = struct.pack("<4s7I44x", b"DDS ", 124, flags, height, width, len(pixels), 0, 0)
+    header += struct.pack("<2I4s5I", 32, 0x4, b"DXT1", 0, 0, 0, 0, 0)  # pixel format: four CC
+    header += struct.pack("<5I", 0x1000, 0, 0, 0, 0)  # caps: a texture
+    return header + pixels
+
+
+def write_map_info(map_dir: str, map_name: str, metadata: bool = True, picture: bool = True) -> List[str]:
+    """map.json (from description.txt) and preview.dds (from the loading screen zone) in the map's
+    folder, for CoD Xe's own custom maps list. Returns the names of the files written."""
+    import os
+
+    from .loadscreen import load_zone_picture
+
+    written = []
+    description = os.path.join(map_dir, "description.txt")
+    if metadata and os.path.exists(description):
+        with open(description, "r", encoding="latin-1") as f:
+            text = map_json(f.read())
+        with open(os.path.join(map_dir, MAP_JSON), "w", encoding="ascii", newline="\r\n") as f:
+            f.write(text)
+        written.append(MAP_JSON)
+    if picture:
+        rgba = load_zone_picture(os.path.join(map_dir, f"{map_name}_load.ff"))
+        if rgba is not None:
+            with open(os.path.join(map_dir, PREVIEW_DDS), "wb") as f:
+                f.write(preview_dds(rgba))
+            written.append(PREVIEW_DDS)
+    return written
 
 
 def add_preview_slot(p: Platform, zone: Zone, template_material: Optional[str]):
@@ -904,7 +1011,16 @@ def decorate_inert_items(p: Platform, zone: Zone, log=print, script_menus: Optio
 # own key handlers come first (then the default moves): every button of the map's menus gets one per
 # direction, D-pad and stick, giving the focus to the nearest button that way ("setfocus"), or
 # keeping it. Buttons without a name get one ("t4ff_focus_<n>") for "setfocus" to find them.
+# Menus show one of several buttons in one place by a condition (UGX's vote: a "Gamemode: ..." button
+# per mode, the one chosen shown): "setfocus" on one not shown fails ("could not accept focus") and
+# the D-pad did nothing, so a direction tries every button that way, the nearest last (see
+# _focus_chain); the action of such a button, which shows another in its place, gives that one the
+# focus. A menu opens on its top-most button shown, not its first (UGX's first is "Exit to Main
+# Menu", off the screen, and A on the vote left the game). The focused button's text takes the menu's
+# focus colour (the console marks the focus only in the highlights of its own menus' layouts).
 KEY_APAD_UP, KEY_APAD_DOWN, KEY_APAD_LEFT, KEY_APAD_RIGHT = 28, 29, 30, 31
+MAX_FOCUS_CHAIN = 24
+FOCUS_COLOR_FALLBACK = (1.0, 0.85, 0.3)  # when the menu's focus colour is the button's own
 _DIRECTIONS = (
     ((0.0, -1.0), (KEY_DPAD_UP, KEY_APAD_UP)),
     ((0.0, 1.0), (KEY_DPAD_DOWN, KEY_APAD_DOWN)),
@@ -932,29 +1048,65 @@ def _set_string(owner: Node, off: int, text: str, template: Node):
     _sorted_children(owner)
 
 
+# The console draws menus within its safe area (90% of the screen): the alignments "left", "top",
+# "right" and "bottom" are its edges, not the screen's. UGX's "Exit to Main Menu" (top aligned, y 450)
+# is below the screen there, and the D-pad going down to it lost the focus to nothing shown.
+SAFE_MARGIN = (32.0, 24.0)
+
+
 def _screen_rect(item: Node, rect_off: int) -> Tuple[float, float, float, float]:
     x, y, w, h = struct.unpack_from(">4f", item.data, rect_off)
     horz, vert = struct.unpack_from(">2i", item.data, rect_off + 16)
-    # the alignments place the rectangle on a 640 by 480 screen (center 2, right / bottom 3)
-    x += {2: 320.0, 3: 640.0}.get(horz, 0.0)
-    y += {2: 240.0, 3: 480.0}.get(vert, 0.0)
+    # the alignments place the rectangle on a 640 by 480 screen: left / top 1, center 2, right / bottom 3
+    mx, my = SAFE_MARGIN
+    x += {1: mx, 2: 320.0, 3: 640.0 - mx}.get(horz, 0.0)
+    y += {1: my, 2: 240.0, 3: 480.0 - my}.get(vert, 0.0)
     return x, y, w, h
 
 
-def _nearest(centers: List[Tuple[float, float]], i: int, direction: Tuple[float, float]) -> int:
-    """The item nearest to ``i`` that way: within 45 degrees of it first, then anywhere that side."""
+def _on_screen(rect: Tuple[float, float, float, float]) -> bool:
+    x, y, w, h = rect
+    return x >= -2.0 and y >= -2.0 and x + w <= 642.0 and y + h <= 482.0
+
+
+def _ordered(centers: List[Tuple[float, float]], i: int, direction: Tuple[float, float]) -> List[int]:
+    """The items that way from ``i``, nearest first: within 45 degrees of it first, then anywhere that side."""
     dx, dy = direction
-    best, best_score = i, None
+    scored = []
     for j, (x, y) in enumerate(centers):
         vx, vy = x - centers[i][0], y - centers[i][1]
         along = vx * dx + vy * dy
         if j == i or along <= 0.5:
             continue
         across = abs(vx * dy - vy * dx)
-        score = along + 2 * across + (0 if across <= along else 100000)
-        if best_score is None or score < best_score:
-            best, best_score = j, score
-    return best
+        scored.append((along + 2 * across + (0 if across <= along else 100000), j))
+    return [j for _, j in sorted(scored)]
+
+
+def _wrapped(centers: List[Tuple[float, float]], i: int, direction: Tuple[float, float]) -> List[int]:
+    """The items the other way from ``i``, farthest first (the focus wraps around to them when none
+    that way is shown): those in its row or column first, then anywhere that side."""
+    dx, dy = direction
+    scored = []
+    for j, (x, y) in enumerate(centers):
+        vx, vy = x - centers[i][0], y - centers[i][1]
+        back = -(vx * dx + vy * dy)
+        if j == i or back <= 0.5:
+            continue
+        across = abs(vx * dy - vy * dx)
+        scored.append((0 if across <= 25.0 else 1, -back, across, j))
+    return [j for *_, j in sorted(scored)]
+
+
+def _focus_chain(names: List[str]) -> str:
+    """Menu script giving the focus to the first of ``names`` shown: "setfocus" leaves the focus where
+    it is on a button that is not shown (the console says so), so the last one shown that the script
+    reaches keeps it, and they are tried from the last to the first."""
+    return "".join(f'"setfocus" "{name}" ; ' for name in reversed(names[:MAX_FOCUS_CHAIN]))
+
+
+def _color(rgba) -> str:
+    return " ".join(f"{c:g}" for c in rgba)
 
 
 def controller_navigation(p: Platform, zone: Zone, log=print, script_menus: Optional[Set[str]] = None) -> Dict[str, int]:
@@ -967,10 +1119,17 @@ def controller_navigation(p: Platform, zone: Zone, log=print, script_menus: Opti
     window = find_field(irec, "window").offset
     name_off, flags_off = window + find_field(wrec, "name").offset, window + find_field(wrec, "staticFlags").offset
     rect_off = window + find_field(wrec, "rect").offset
-    action_off, focus_off, on_key = (find_field(irec, f).offset for f in ("action", "onFocus", "onKey"))
+    action_off, focus_off, leave_off, on_key = (find_field(irec, f).offset for f in ("action", "onFocus", "leaveFocus", "onKey"))
     key_off, key_action, key_next = (find_field(krec, f).offset for f in ("key", "action", "next"))
+    open_off, focus_color_off = find_field(mrec, "onOpen").offset, find_field(mrec, "focusColor").offset
+    fore_off = window + find_field(wrec, "foreColor").offset
     # strings other pointers refer into (the PC linker shares them) stay where they are
     shared = {id(ptr.node) for node in zone.extra_root.walk() for ptr in node.relocs.values() if ptr.kind in ("ref", "alias") and ptr.node is not None}
+    pointers: Dict[int, List[Tuple[int, int]]] = {}  # string -> (owner, offset) of every pointer to it
+    for node in zone.extra_root.walk():
+        for off, ptr in node.relocs.items():
+            if ptr.node is not None and ptr.node.string:
+                pointers.setdefault(id(ptr.node), []).append((id(node), off))
     changed: Dict[str, int] = {}
     for menu in list(zone.extra_root.walk()):
         if menu.type.name != "menuDef_t":
@@ -1002,10 +1161,13 @@ def controller_navigation(p: Platform, zone: Zone, log=print, script_menus: Opti
                 names[i] = f"t4ff_focus_{n}"
                 taken.add(names[i])
                 _set_string(item, name_off, names[i], template)
-        centers = []
+        centers, shown = [], []
         for item in buttons:
             x, y, w, h = _screen_rect(item, rect_off)
             centers.append((x + w / 2, y + h / 2))
+            shown.append(_on_screen((x, y, w, h)))
+        if not any(shown):
+            shown = [True] * len(buttons)  # a layout of its own: all of it
         for i, item in enumerate(buttons):
             # the item's key handlers: those it has keep their keys
             chain: List[Node] = []
@@ -1015,7 +1177,12 @@ def controller_navigation(p: Platform, zone: Zone, log=print, script_menus: Opti
                 ptr = chain[-1].relocs.get(key_next)
             bound = {struct.unpack_from(">i", h.data, key_off)[0] for h in chain}
             for direction, keys in _DIRECTIONS:
-                target = names[_nearest(centers, i, direction)]
+                # the nearest button shown that way, else around to the farthest the other way (the
+                # bottom one goes to the top), or this one (the key does nothing else); buttons off
+                # the screen are no targets
+                ahead = [j for j in _ordered(centers, i, direction) if shown[j]]
+                around = [j for j in _wrapped(centers, i, direction) if shown[j]]
+                script = _focus_chain([names[j] for j in ahead + around] or [names[i]])
                 for key in keys:
                     if key in bound:
                         continue
@@ -1023,7 +1190,7 @@ def controller_navigation(p: Platform, zone: Zone, log=print, script_menus: Opti
                     handler.data = bytearray(krec.size)
                     handler.extra["align"] = 4
                     struct.pack_into(">i", handler.data, key_off, key)
-                    _set_string(handler, key_action, f'"setfocus" "{target}" ; ', template)
+                    _set_string(handler, key_action, script, template)
                     handler.relocs[key_next] = _ptr("null", handler, key_next)
                     owner, off = (chain[-1], key_next) if chain else (item, on_key)
                     owner.relocs[off] = _ptr("follow", owner, off, handler)
@@ -1045,6 +1212,51 @@ def controller_navigation(p: Platform, zone: Zone, log=print, script_menus: Opti
             for i in choices:
                 _set_string(buttons[i], focus_off, actions[i], template)
                 _set_string(buttons[i], action_off, actions[confirms[0]], template)
+        else:
+            choices = []
+
+        # the scripts to add to: {(owner, offset): script}
+        scripts: Dict[Tuple[int, int], str] = {}
+        partner: Dict[Tuple[int, int], Tuple[int, int]] = {}
+        owners: Dict[int, Node] = {id(menu): menu}
+        stacked: Dict[Tuple[float, ...], List[int]] = {}
+        for i, item in enumerate(buttons):
+            stacked.setdefault(tuple(round(v, 1) for v in _screen_rect(item, rect_off)), []).append(i)
+        focus_rgb = struct.unpack_from(">4f", menu.data, focus_color_off)[:3]
+        for i, item in enumerate(buttons):
+            owners[id(item)] = item
+            # the focused button's text in the focus colour, back to its own as the focus leaves
+            fore = struct.unpack_from(">4f", item.data, fore_off)
+            rgb = focus_rgb if max(abs(a - b) for a, b in zip(focus_rgb, fore[:3])) > 0.15 else FOCUS_COLOR_FALLBACK
+            on, off = (id(item), focus_off), (id(item), leave_off)
+            scripts[on] = f'"setitemcolor" "{names[i]}" "forecolor" {_color((*rgb, fore[3]))} ; '
+            scripts[off] = f'"setitemcolor" "{names[i]}" "forecolor" {_color(fore)} ; '
+            partner[on], partner[off] = off, on
+            # a button shown in the place of others: after its action (which may show another there),
+            # the focus goes to the one shown
+            others = [names[j] for j in stacked[tuple(round(v, 1) for v in _screen_rect(item, rect_off))] if j != i]
+            if others and i not in choices:
+                scripts[(id(item), action_off)] = _focus_chain(others)
+        # the menu opens on its top-most button shown (then the left-most)
+        top = sorted((i for i in range(len(buttons)) if shown[i]), key=lambda i: (centers[i][1], centers[i][0]))
+        scripts[(id(menu), open_off)] = _focus_chain([names[i] for i in top])
+        # a string another pointer refers into is replaced only when that pointer's is too (it would
+        # point to nothing), else its script stays as it is
+        settled = False
+        while not settled:
+            settled = True
+            for key in list(scripts):
+                ptr = owners[key[0]].relocs.get(key[1])
+                if ptr is None or ptr.kind != "follow" or ptr.node is None:
+                    continue
+                if all(other in scripts for other in pointers.get(id(ptr.node), [])):
+                    continue
+                for gone in (key, partner.get(key)):
+                    scripts.pop(gone, None)
+                settled = False
+        for (owner_id, off), script in scripts.items():
+            owner = owners[owner_id]
+            _set_string(owner, off, (_text_of(owner, off) or "") + script, template)
         changed[_text_of(menu, menu_name) or "?"] = len(buttons)
     if changed:
         log(f"menus: the D-pad moves between buttons as they are laid out ({', '.join(f'{n} {c}' for n, c in sorted(changed.items()))})")
@@ -1057,8 +1269,13 @@ def controller_navigation(p: Platform, zone: Zone, log=print, script_menus: Opti
 # menu shows for the focused map (X / Y change them) and sets before loading the map:
 #   option <dvar> <default value> <label>
 #   choice <value> <name>
+# The game's own settings that a mod's options menu shows too are the player's, not the map's: UGX's
+# sets the field of view (cg_fov), which its scripts read, and Kino Der Toten asked "Cg Fov" as it
+# started, restarting the level on a change.
 ITEM_TYPE_TEXT, ITEM_TYPE_MULTI = 0, 12
 OPTIONS_FILE = "options.txt"
+GAME_SETTING_PREFIXES = ("cg_", "r_", "snd_", "ui_", "g_", "sv_", "cl_", "com_", "bg_", "player_", "in_", "input_", "gpad_",
+                         "hud_", "con_", "loc_", "sensitivity", "m_")  # fmt: skip
 
 
 def _format_value(value: float) -> str:
@@ -1092,7 +1309,7 @@ def menu_options(p: Platform, zones: List[Zone], read_dvars: Set[str], menu_valu
                 dvar = (_text_of(item, dvar_off) or "").lower()
                 ptr = item.relocs.get(data_off)
                 multi = ptr.target() if ptr is not None and ptr.kind != "null" else None
-                if dvar not in read_dvars or multi is None:
+                if dvar not in read_dvars or multi is None or dvar.startswith(GAME_SETTING_PREFIXES):
                     continue
                 n = p.u32.unpack_from(multi.data, count_off_m)[0]
                 strings = p.u32.unpack_from(multi.data, strdef_off)[0] != 0

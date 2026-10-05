@@ -9,8 +9,11 @@ earlier ones on PC); for other assets the first one.
 
 from __future__ import annotations
 
+import re
+import struct
 from typing import Dict, List, Optional, Set, Tuple
 
+from .commands import find_field
 from .layout import TypeRef
 from .zone import BLOCK_VIRTUAL, Node, Platform, Ptr, Zone, ZoneAsset
 
@@ -304,29 +307,160 @@ def _set_asset_list(zone: Zone, keep: List[Tuple[ZoneAsset, Optional[Ptr], Optio
     zone.assets = assets
 
 
-def drop_frontend_menus(p: Platform, zone: Zone, is_stock_menu, log=print) -> List[str]:
+def scripted_menu_names(p: Platform, zone: Zone) -> set:
+    """Lowercase names of the menus the zone's scripts open, close or precache."""
+    import re
+
+    from .scripts import _rawfiles, rawfile_text
+
+    names = set()
+    for name, raw in _rawfiles(p, zone):
+        if name.lower().endswith((".gsc", ".csc")):
+            text = rawfile_text(raw).decode("latin-1")
+            names.update(m.lower() for m in re.findall(r'(?i)(?:openmenu|precachemenu|closemenu)\s*\(\s*"([^"]+)"', text))
+    return names
+
+
+def _menu_name_string(menu: Node) -> Optional[Node]:
+    ptr = menu.relocs.get(0)  # menuDef_t.window.name
+    string = ptr.target() if ptr is not None else None
+    return string if string is not None and string.string else None
+
+
+def menu_names(node: Node) -> List[str]:
+    """Names of the menus a menu list (or any node) loads, references (``,name``) without their comma."""
+    names, seen = [], set()
+    for n in node.walk():
+        # the console's lists point to their menus' asset slots (the menus are assets of their own)
+        for menu in [n] + [ptr.target() for ptr in n.relocs.values()]:
+            if menu is None or menu.type.name != "menuDef_t" or id(menu) in seen:
+                continue
+            seen.add(id(menu))
+            string = _menu_name_string(menu)
+            if string is not None:
+                names.append(bytes(string.data).split(b"\0")[0].decode("latin-1").lstrip(","))
+    return names
+
+
+PAUSE_MENU = "pausedmenu"
+CONSOLE_OPTIONS_MENU = "ingameoptions"
+_OPEN = re.compile(r'"open"\s+"([^"]+)"', re.I)
+
+
+def bind_pause_menu(p: Platform, zone: Zone, ingame_menus, log=print) -> Tuple[set, List[str]]:
+    """Keep the mod's pause menu as the map's own when it offers more than the console's.
+
+    The console opens the pause menu by name, and the map's ``pausedmenu`` takes the place of the
+    game's while the map is loaded (UGX Mod's showed on Kino), so a map can have its own. The game's
+    in-game menus (``ingame_menus``: those of its ``ui/ingame.txt``) are the only ones the pause menu
+    can open, besides the script menus the map precaches: a PC pause menu's Options opened
+    ``options_new_pc`` and only closed it. The mod's pause menu stays when it opens menus the game's
+    has not and the zone has (UGX's Challenges: ``menu_challenges``, then ``popup_tier``): its options
+    menus become the console's ``ingameoptions``, and those menus join a menu list the scripts
+    precache, which the game loads with the in-game menus. Otherwise the console's pause menu stays
+    (see :func:`rename_game_menus`). Returns (ids of the menus that keep their names, names of the
+    menus that joined a script menu list).
+    """
+    ingame = {name.lower() for name in ingame_menus}
+    menus = {}  # name -> [(menu node, the pointer that loads it, index of its list)]
+    for i, asset in enumerate(zone.assets):
+        if asset.type != "menulist" or asset.node is None:
+            continue
+        for n in asset.node.walk():
+            for ptr in n.relocs.values():
+                menu = ptr.node if ptr.kind in ("follow", "insert") else None
+                if menu is not None and menu.type.name == "menuDef_t":
+                    string = _menu_name_string(menu)
+                    if string is not None:
+                        name = bytes(string.data).split(b"\0")[0].decode("latin-1").lower()
+                        menus.setdefault(name, []).append((menu, ptr, i))
+    if PAUSE_MENU not in menus or not ingame:
+        return set(), []
+    # the mod's in-game list's pause menu, else the first one (UGX also has one in its ui/hud.txt)
+    pause, _, _ = next((m for m in menus[PAUSE_MENU] if "ingame" in zone.assets[m[2]].name.lower()), menus[PAUSE_MENU][0])
+
+    def opened(menu: Node) -> List[str]:
+        return [m.lower() for s in menu.walk() if s.string for m in _OPEN.findall(bytes(s.data).decode("latin-1"))]
+
+    extras, todo = [], [m for m in opened(pause) if m not in ingame and "options" not in m]
+    while todo:
+        name = todo.pop(0)
+        if name in extras or name in ingame or name == PAUSE_MENU:
+            continue
+        if name not in menus:
+            log(f"menus: the mod's pause menu opens '{name}', which the map has not: the console's pause menu stays")
+            return set(), []
+        extras.append(name)
+        todo += opened(menus[name][0][0])
+    if not extras:
+        return set(), []
+    scripted = scripted_menu_names(p, zone)
+    owners = [menus[name][0][2] for name in extras]
+    hosts = [i for i, a in enumerate(zone.assets)
+             if a.type == "menulist" and a.node is not None and i > max(owners)
+             and a.name.lower().startswith("ui/scriptmenus/") and a.name.lower()[len("ui/scriptmenus/"):].rsplit(".", 1)[0] in scripted]  # fmt: skip
+    if not hosts:
+        log(f"menus: the mod's pause menu opens {', '.join(extras)}, but no menu list the scripts precache comes after them: the console's pause menu stays")
+        return set(), []
+    host = zone.assets[hosts[0]]
+
+    # its options menus: the console's
+    for s in pause.walk():
+        if s.string:
+            text = bytes(s.data).decode("latin-1")
+            new = _OPEN.sub(lambda m: f'"open" "{CONSOLE_OPTIONS_MENU}"' if "options" in m.group(1).lower() and m.group(1).lower() not in ingame else m.group(0), text)
+            if new != text:
+                s.data = bytearray(new.encode("latin-1"))
+                s.count = len(s.data)
+                s.segments = [(s.type, s.count, s.count, False)]
+    # the menus it opens: in the precached list too (pointing to the copies the zone loads)
+    rec = p.record("MenuList")
+    array_ptr = host.node.relocs.get(find_field(rec, "menus").offset)
+    array = array_ptr.node if array_ptr is not None else None
+    if array is None:
+        return set(), []
+    for name in extras:
+        offset = len(array.data)
+        array.data += b"\0\0\0\0"
+        array.count += 1
+        ptr = Ptr("alias", None)
+        ptr.owner, ptr.offset, ptr.slot, ptr.index = array, offset, menus[name][0][1], 0
+        array.relocs[offset] = ptr
+        # PC hints name the keyboard: the controller's button closes them
+        for s in menus[name][0][0].walk():
+            if s.string and b"Press ESC" in s.data:
+                s.data = bytearray(bytes(s.data).replace(b"Press ESC", b"Press B"))
+                s.count = len(s.data)
+                s.segments = [(s.type, s.count, s.count, False)]
+    array.segments = [(array.segments[0][0], array.count, len(array.data), False)]
+    struct.pack_into(p.endian + "i", host.node.data, find_field(rec, "menuCount").offset, array.count)
+    log(f"menus: the mod's pause menu stays the map's own (its {', '.join(extras)}), its options are the console's; "
+        f"{', '.join(extras)} load with {host.name}, which the scripts precache")
+    kept = {id(pause)} | {id(menus[name][0][0]) for name in extras}
+    return kept, extras
+
+
+def drop_frontend_menus(p: Platform, zone: Zone, is_stock_menu, log=print, is_stock_list=None, keep_menus=()) -> List[str]:
     """Remove the menu lists made of the mod's versions of the console's own menus.
 
     PC mods restyle the main menu and the lobbies with their own versions of the stock menus
     (``ui/main.menu``, ``ui/xboxlive_lobby.menu``), loaded with the mod. On the console the map's
     zone is loaded in game, where they would only take memory and replace the console's menus
     of the same names. A list goes when most of its menus are the console's and the map's scripts
-    open or precache none of them: script menus (a music box...) stay.
+    open or precache none of them: script menus (a music box...) stay. So does a list of the name of
+    one of the game's own (``is_stock_list``, the console's ``common.ff`` has ``ui/ingame.txt`` and
+    ``ui/hud.txt``), which takes the place of the game's: UGX Mod's ``ui/ingame.txt`` (88 menus,
+    mostly PC ones) had the PC's pause menu, whose Options and Challenges open menus the console has
+    not in game ("Could not find menu 'options_new_pc'") and only closed it.
     """
-    import re
-
-    from .scripts import _rawfiles, rawfile_text
     from .zone import asset_name
 
     node = zone.assets_node
     if node is None:
         return []
-    scripted = set()
-    for name, raw in _rawfiles(p, zone):
-        if name.lower().endswith((".gsc", ".csc")):
-            text = rawfile_text(raw).decode("latin-1")
-            scripted.update(m.lower() for m in re.findall(r'(?i)(?:openmenu|precachemenu|closemenu)\s*\(\s*"([^"]+)"', text))
+    scripted = scripted_menu_names(p, zone)
     candidates = {}
+    game_lists = {}  # the mod's copies of the game's own lists: index -> list node
     for i, asset in enumerate(zone.assets):
         ptr = node.relocs.get(8 * i + 4)
         target = ptr.node if ptr is not None and ptr.kind in ("follow", "insert") else None
@@ -334,9 +468,19 @@ def drop_frontend_menus(p: Platform, zone: Zone, is_stock_menu, log=print) -> Li
             continue
         menus = [(asset_name(p, n) or "").lstrip(",").lower() for n in target.walk() if n.type.name == "menuDef_t"]
         stock = sum(1 for m in menus if is_stock_menu(m))
-        if menus and 2 * stock > len(menus) and not scripted.intersection(menus):
+        game_list = is_stock_list is not None and is_stock_list(asset.name.lstrip(","))
+        # a menu file the scripts load by name (precacheMenu("x"): ui/scriptmenus/x.menu) stays
+        base = asset.name.lstrip(",").lower().rsplit("/", 1)[-1].rsplit(".", 1)[0]
+        if base in scripted or scripted.intersection(menus):
+            continue
+        # a list without menus of its own points into others' (the PC linker loads a menu shared by
+        # menu files once): UGX's options menu files into its ui/ingame.txt, which they kept
+        if not menus or 2 * stock > len(menus) or game_list:
             candidates[i] = {id(n) for n in target.walk()}
+            if game_list:
+                game_lists[i] = target
     if not candidates:
+        rename_game_menus(zone, is_stock_menu, scripted, log, keep_menus)
         return []
     # a list something that stays points into stays too (the lists often share strings and items,
     # e.g. the lobby points into the main menu): repeat until no more lists are kept
@@ -353,18 +497,145 @@ def drop_frontend_menus(p: Platform, zone: Zone, is_stock_menu, log=print) -> Li
             break
         for i in kept:
             del candidates[i]
-    if not candidates:
-        return []
+    # a copy of a game's list something else needs (UGX's vote menus share strings and items with
+    # its ui/ingame.txt) stays under a name of its own: the game loads its lists by name, and the
+    # console's own pause menu and HUD then stay the game's
+    renamed = []
+    pinned = {i for i in game_lists if i not in candidates}
+    names = {id(game_lists[i].relocs[0].node): i for i in pinned if 0 in game_lists[i].relocs and game_lists[i].relocs[0].node is not None}
+    shared = set()  # name strings something else points to too (the linker stores a string once)
+    for n in zone.extra_root.walk() if names else ():
+        for off, ptr in n.relocs.items():
+            string = ptr.target()
+            if string is not None and id(string) in names and not (off == 0 and n is game_lists[names[id(string)]]):
+                shared.add(names[id(string)])
+    for i in sorted(pinned):
+        name_ptr = game_lists[i].relocs.get(0)  # MenuList.name
+        old = zone.assets[i].name.lstrip(",")
+        if name_ptr is None or name_ptr.node is None or not name_ptr.node.string or i in shared:
+            log(f"warning: menus: the mod's {old} stays and takes the place of the game's (its name is shared)")
+            continue
+        stem, dot, ext = old.rpartition(".")
+        new = f"{stem}_mod.{ext}" if dot else f"{old}_mod"
+        string = name_ptr.node
+        string.data = bytearray(new.encode("latin-1") + b"\0")
+        string.count = len(string.data)
+        string.segments = [(string.type, string.count, string.count, False)]
+        zone.assets[i].name = new
+        renamed.append(f"{old} as {new}")
+    if renamed:
+        log(f"menus: the mod's versions of the game's own menu lists stay under names of their own ({', '.join(renamed)}): "
+            f"its menus point into them, and the console's own lists (its pause menu, its HUD) stay the game's")
     dropped = [zone.assets[i].name for i in sorted(candidates)]
+    if candidates:
+        keep = []
+        for i, asset in enumerate(zone.assets):
+            if i in candidates:
+                continue
+            ptr = node.relocs.get(8 * i + 4)
+            keep.append((asset, ptr, ptr.node if ptr is not None and ptr.kind in ("follow", "insert") else None))
+        _set_asset_list(zone, keep)
+        log(f"menus: left out {', '.join(dropped)}, the mod's versions of menus the console has (its main menu, lobbies, pause menu...)")
+    rename_game_menus(zone, is_stock_menu, scripted, log, keep_menus)
+    return dropped
+
+
+def drop_unused_videos(p: Platform, zone: Zone, log=print) -> List[str]:
+    """Remove the Bink videos (``*.bik`` raw files) that no menu or script left in the zone names.
+
+    PC mods put their main menu's background video in the mod's fastfile (Kino Rezurrection's
+    ``bik/kino_menu.bik``, 9.8 MiB, played by its ``ui/main.menu`` with ``ui_cinematic kino_menu``).
+    On the console the main menu is the game's (:func:`drop_frontend_menus`), and every block of the
+    map's zone takes the game's main memory (see memory.py)."""
+    from .scripts import _rawfiles, rawfile_text
+    from .zone import asset_name
+
+    node = zone.assets_node
+    if node is None:
+        return []
+    videos = [i for i, asset in enumerate(zone.assets) if asset.type == "rawfile" and asset.name.lower().endswith(".bik")]
+    if not videos:
+        return []
+    texts = [rawfile_text(raw).lower() for name, raw in _rawfiles(p, zone) if not name.lower().endswith(".bik")]
+    for i, asset in enumerate(zone.assets):
+        ptr = node.relocs.get(8 * i + 4)
+        target = ptr.node if ptr is not None and ptr.kind in ("follow", "insert") else None
+        if asset.type in ("menu", "menulist") and target is not None:
+            texts.extend(bytes(n.data).lower() for n in target.walk() if n.string)
+    unused = set()
+    for i in videos:
+        stem = zone.assets[i].name.lstrip(",").replace("\\", "/").rsplit("/", 1)[-1][: -len(".bik")].lower().encode("latin-1")
+        if not any(stem in text for text in texts):
+            unused.add(i)
+    if not unused:
+        return []
     keep = []
     for i, asset in enumerate(zone.assets):
-        if i in candidates:
+        if i in unused:
             continue
         ptr = node.relocs.get(8 * i + 4)
         keep.append((asset, ptr, ptr.node if ptr is not None and ptr.kind in ("follow", "insert") else None))
+    dropped = [zone.assets[i].name.lstrip(",") for i in sorted(unused)]
     _set_asset_list(zone, keep)
-    log(f"menus: left out {', '.join(dropped)}, the mod's versions of menus the console has (its main menu and lobbies)")
+    log(f"videos: left out {', '.join(dropped)}, which no menu or script of the map plays (the mod's main menu's)")
     return dropped
+
+
+def rename_game_menus(zone: Zone, is_stock_menu, keep_names=(), log=print, keep_menus=()) -> List[str]:
+    """Give the mod's menus that have the name of one of the console's their own (``<name>_mod``).
+
+    The console opens menus by name, and a menu the map's zone loads takes the place of the game's
+    of the same name, whichever list it is in: UGX Mod's PC ``pausedmenu`` (in its ``ui/ingame.txt``
+    and ``ui/hud.txt``, which stay because its vote menus and weapons point into them) replaced the
+    console's even with its lists renamed, and its Options and Challenges open PC menus the console's
+    in-game list has not (``options_new_pc``, ``menu_challenges``), so they only closed it. Menus the
+    scripts open by name (``keep_names``) and references (``,name``) keep theirs; so does a menu whose
+    name string something outside the renamed menus uses too (the PC linker stores a string once).
+    """
+    keep_names = {name.lower() for name in keep_names}
+    menus = {}  # id(menu) -> (menu, its name string, its name)
+    seen = set()
+    for asset in zone.assets:
+        if asset.type != "menulist" or asset.node is None:
+            continue
+        for n in asset.node.walk():
+            if n.type.name != "menuDef_t" or id(n) in seen or id(n) in keep_menus:
+                continue
+            seen.add(id(n))
+            ptr = n.relocs.get(0)  # menuDef_t.window.name
+            string = ptr.target() if ptr is not None else None
+            if string is None or not string.string:
+                continue
+            name = bytes(string.data).split(b"\0")[0].decode("latin-1")
+            if name and not name.startswith(",") and name.lower() not in keep_names and is_stock_menu(name):
+                menus[id(n)] = (n, string, name)
+    if not menus:
+        return []
+    owner = {id(m): key for key, (menu, _, _) in menus.items() for m in menu.walk()}
+    strings = {id(string): string for _, string, _ in menus.values()}
+    shared = set()
+    for n in zone.extra_root.walk():
+        for ptr in n.relocs.values():
+            target = ptr.target()
+            if target is not None and id(target) in strings and id(n) not in owner:
+                shared.add(id(target))
+    renamed, kept = [], []
+    for menu, string, name in menus.values():
+        if id(string) in shared:
+            kept.append(name)
+            continue
+        if not bytes(string.data).startswith(f"{name}_mod\0".encode("latin-1")):  # menus sharing one name string
+            string.data = bytearray(f"{name}_mod".encode("latin-1") + b"\0")
+            string.count = len(string.data)
+            string.segments = [(string.type, string.count, string.count, False)]
+        renamed.append(name)
+    if renamed:
+        names = sorted(set(renamed))
+        log(f"menus: {len(names)} of the mod's menus have the name of one of the console's and would take its place "
+            f"({', '.join(names[:8])}{', ...' if len(names) > 8 else ''}): they are named <name>_mod, the console's own stay")
+    if kept:
+        log(f"warning: menus: {', '.join(sorted(set(kept)))} keep the console's names (their name strings are shared) and take the place of its own")
+    return renamed
 
 
 def _is_reference(p: Platform, node: Node) -> bool:

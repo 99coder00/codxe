@@ -8,7 +8,7 @@ import zipfile
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from . import xenos
+from . import wavelet, xenos
 
 # IWI v6 (World at War) image formats
 IWI_FORMATS = {
@@ -115,13 +115,19 @@ def parse_iwi(name: str, data: bytes) -> ImageData:
         raise ImageError(f"{name}: unsupported IWI version {version}")
     fmt_code, flags = data[4], data[5]
     width, height, depth = struct.unpack_from("<3H", data, 6)
-    fmt = IWI_FORMATS.get(fmt_code)
-    if fmt is None:
-        raise ImageError(f"{name}: unsupported IWI format {fmt_code:#x}")
     if flags & IWI_FLAG_VOLMAP:
         raise ImageError(f"{name}: volume maps are not supported yet")
     # a cube map stores its six faces one after the other in every level
     faces = 6 if flags & IWI_FLAG_CUBEMAP else 1
+    if fmt_code in wavelet.FORMATS:
+        try:
+            fmt, levels = wavelet.decode(fmt_code, width, height, faces, not flags & IWI_FLAG_NOMIPMAPS, data[28:])
+        except wavelet.WaveletError as e:
+            raise ImageError(f"{name}: wavelet IWI: {e}")
+        return ImageData(name, fmt, width, height, levels, flags, "iwi", faces)
+    fmt = IWI_FORMATS.get(fmt_code)
+    if fmt is None:
+        raise ImageError(f"{name}: unsupported IWI format {fmt_code:#x}")
 
     count = 1 if flags & IWI_FLAG_NOMIPMAPS else mip_count(width, height)
     sizes = []
@@ -304,17 +310,25 @@ def normal_map_to_dxn(image: ImageData) -> ImageData:
     """A PC normal map in the console's normal map format, DXN.
 
     PC normal maps keep x in alpha and y in green (DXT5: a grey colour block, x in the alpha
-    block); the console's shaders read x and y from the two channels of DXN, which all of its
-    normal maps use. Other formats are returned as they are."""
+    block; A8L8, as wavelet IWIs of Black Ops weapons decode: y in the luminance, which the PC
+    samples as green); the console's shaders read x and y from the two channels of DXN, which all
+    of its normal maps use. Other formats are returned as they are."""
+    import numpy as np
+
     from . import dxt
 
-    if image.format not in ("DXT5", "A8R8G8B8"):
+    if image.format not in ("DXT5", "A8R8G8B8", "A8L8"):
         return image
     levels = []
     w, h = image.width, image.height
     for level in image.levels:
         if image.format == "DXT5":
             levels.append(dxt.dxt5_normal_to_dxn(level, w, h))
+        elif image.format == "A8L8":
+            la = np.frombuffer(level, dtype=np.uint8).reshape(h, w, 2)
+            xy = np.zeros((h, w, 4), dtype=np.uint8)
+            xy[:, :, 0], xy[:, :, 1], xy[:, :, 3] = la[:, :, 1], la[:, :, 0], 255
+            levels.append(dxt.encode(xy, "DXN"))
         else:
             rgba = dxt.bgra_to_rgba(level, w, h)
             levels.append(dxt.encode(rgba[:, :, [3, 1, 2, 0]], "DXN"))
@@ -330,12 +344,23 @@ def _drop_count(image: ImageData, max_size: int, drop_levels: int) -> int:
     return count
 
 
-def build_console_texture(image: ImageData, max_size: int = 0, keep_mips: bool = True, drop_levels: int = 0, compress: bool = True, normal_map: bool = False) -> ConsoleTexture:
+def keeps_level(width: int, height: int) -> bool:
+    """Whether a mip level of this size stays when the mip tail goes: the GPU packs the levels of 16
+    texels or less on a side into one tile of their own (xenos.packed_mip_level), the same memory as
+    a 128x128 DXT level's; without them the smallest level shows for what is farther (a little shimmer
+    at a distance, not a blur up close as a dropped top level)."""
+    return min(width, height) > 16
+
+
+def build_console_texture(image: ImageData, max_size: int = 0, keep_mips: bool = True, drop_levels: int = 0, compress: bool = True, normal_map: bool = False,
+                          mip_tail: bool = True) -> ConsoleTexture:
     """Tile ``image`` for the Xbox 360.
 
     ``max_size`` limits the base level dimensions and ``drop_levels`` removes additional top
     levels. Uncompressed colour textures are compressed to DXT when ``compress`` is set.
     ``normal_map``: a PC normal map, made DXN (see :func:`normal_map_to_dxn`).
+    ``mip_tail``: False leaves out the levels of 16 texels or less on a side (the GPU's packed mip tail,
+    a tile of its own: see :func:`keeps_level`).
     Cube maps up to 64 texels (the maps' reflection probes, small skies) stay uncompressed, as CoD
     Xenon's.
     """
@@ -367,7 +392,7 @@ def build_console_texture(image: ImageData, max_size: int = 0, keep_mips: bool =
         for level in image.levels[1:]:
             w, h = max(w >> 1, 1), max(h >> 1, 1)
             # stop before levels smaller than one compression block
-            if min(w, h) < fmt.block:
+            if min(w, h) < fmt.block or not (mip_tail or keeps_level(w, h)):
                 break
             levels.append(level)
 
@@ -386,10 +411,12 @@ def _compresses(image: ImageData) -> bool:
     return image.faces == 1 or max(image.width, image.height) > 64
 
 
-def console_texture_size(image: ImageData, max_size: int = 0, keep_mips: bool = True, drop_levels: int = 0, compress: bool = True, normal_map: bool = False) -> int:
-    """Size of the console texture :func:`build_console_texture` would produce (without tiling)."""
+def console_texture_size(image: ImageData, max_size: int = 0, keep_mips: bool = True, drop_levels: int = 0, compress: bool = True, normal_map: bool = False,
+                         make_mips: bool = False, mip_tail: bool = True) -> int:
+    """Size of the console texture :func:`build_console_texture` would produce (without tiling).
+    ``make_mips``: of a single level image, as with the mips streaming makes for it."""
     fmt_name = image.format
-    if normal_map and image.faces == 1 and fmt_name in ("DXT5", "A8R8G8B8"):
+    if normal_map and image.faces == 1 and fmt_name in ("DXT5", "A8R8G8B8", "A8L8"):
         fmt_name = "DXN"
     if compress and _compresses(image) and fmt_name in ("A8R8G8B8", "X8R8G8B8", "R8G8B8"):
         fmt_name = "DXT5"  # upper bound, DXT1 when opaque
@@ -401,12 +428,12 @@ def console_texture_size(image: ImageData, max_size: int = 0, keep_mips: bool = 
     drop = _drop_count(image, max_size, drop_levels)
     width, height = max(image.width >> drop, 1), max(image.height >> drop, 1)
     count = 1
-    available = max(len(image.levels) - drop, 1)
+    available = mip_count(width, height) if make_mips else max(len(image.levels) - drop, 1)
     if keep_mips and min(width, height) > 16:
         w, h = width, height
         for _ in range(available - 1):
             w, h = max(w >> 1, 1), max(h >> 1, 1)
-            if min(w, h) < fmt.block:
+            if min(w, h) < fmt.block or not (mip_tail or keeps_level(w, h)):
                 break
             count += 1
     return xenos.mip_chain_layout(width, height, fmt, count, image.faces)[2]

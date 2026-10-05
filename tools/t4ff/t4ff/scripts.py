@@ -25,12 +25,18 @@ from .layout import TypeRef
 from .zone import Node, Platform, Ptr, Zone, ZoneAsset, asset_name
 
 SCRIPT_EXTENSIONS = (".gsc", ".csc")
+# What the game reads by name through its script loader: the scripts, and the anim trees
+# (animtrees/*.atr) the scripts compile their %animations against
+SOURCE_EXTENSIONS = SCRIPT_EXTENSIONS + (".atr",)
 
 # Client scripts the game loads by name for a zombie map, which no script names: it calls
 # clientscripts/_callbacks::sound_notify and loads clientscripts/_zombie_mode. The console's own
 # _callbacks.csc has no sound_notify and none of its zones used by usermaps has _zombie_mode.csc, so
 # every map of CoD Xenon's carries both; PC maps made with the first mod tools (Dead Sand) have
 # neither, as the PC game's own zones had them ("Could not find script 'clientscripts/_zombie_mode'").
+# the player animation script, which the engine runs by name
+PLAYER_ANIM_SCRIPT = "mp/playeranim.script"
+
 ZOMBIE_ENGINE_SCRIPTS = ("clientscripts/_callbacks.csc", "clientscripts/_zombie_mode.csc")
 
 _COMMENTS = re.compile(r"/\*.*?\*/|//[^\n]*", re.S)
@@ -48,6 +54,15 @@ def script_references(name: str, text: bytes) -> Set[str]:
     source = _COMMENTS.sub("", text.decode("latin-1"))
     refs = {m.group(1) for m in _INCLUDE.finditer(source)} | {m.group(1) for m in _CALL.finditer(source)}
     return {normalize(r) + ext for r in refs}
+
+
+_USING_ANIMTREE = re.compile(r'#using_animtree\s*\(\s*"([\w\\/]+)"\s*\)')
+
+
+def anim_tree_references(text: bytes) -> Set[str]:
+    """The anim trees (``animtrees/<name>.atr``) a script compiles its %animations against."""
+    source = _COMMENTS.sub("", text.decode("latin-1"))
+    return {f"animtrees/{normalize(m.group(1))}.atr" for m in _USING_ANIMTREE.finditer(source)}
 
 
 _STRING_LITERAL = re.compile(rb'"([^"\\\n]{1,64})"')
@@ -89,12 +104,15 @@ def set_rawfile_text(p: Platform, node: Node, text: bytes):
 
 
 def override_scripts(p: Platform, zones: List[Zone], loose, log=print) -> int:
-    """Give the scripts of ``zones`` (PC) the content of the map's loose scripts (``loose``: an
-    images.IwdLibrary of the map's .iwd files and folder)."""
+    """Give the scripts and anim trees of ``zones`` (PC) the content of the map's loose ones
+    (``loose``: an images.IwdLibrary of the map's .iwd files and folder). The Matrix's
+    animtrees/generic_human.atr in its .iwd has the wave gun's animations, the one in its _patch.ff
+    not: the console stopped with "animation 'ai_zombie_crawl_microwave_death_walking_c' not
+    defined in anim tree 'generic_human'"."""
     replaced = set()
     for zone in zones:
         for name, node in _rawfiles(p, zone):
-            if name.startswith(",") or not name.lower().endswith(SCRIPT_EXTENSIONS):
+            if name.startswith(",") or not name.lower().endswith(SOURCE_EXTENSIONS):
                 continue
             text = loose.read(normalize(name))
             buffer = _buffer(node)
@@ -227,6 +245,74 @@ def valid_cursor_hints(p: Platform, zone: Zone, log=print) -> List[str]:
             changed.append(normalize(name))
     if changed:
         log(f"scripts: hint types the console has not are HINT_NOICON (its SetCursorHint crashes on others) ({', '.join(changed)})")
+    return changed
+
+
+# Client script effects and sounds name the local client they are for first. UGX Mod's Thundergun
+# (clientscripts/ugx_thundergun.csc) plays its steam with "playfx( i, fx, ... )" in a loop over its
+# three vents: local clients 3, 2 and 1. The PC has one local client and does nothing with them; the
+# console has four (split screen), and an effect for one that is not playing froze the game on the
+# Thundergun's first shot (Kino Der Toten, CoD Xenon's conversion of it too). In a function given its
+# local client, such a call whose local client is the counter of a loop not over the players uses it.
+_LOCAL_CLIENT_CALL = re.compile(
+    rb"\b(playfx|playfxontag|playviewmodelfx|playsound|playloopsound|spawnfx|stopfx|deletefx)(\s*\(\s*)([A-Za-z_]\w*)(\s*,)", re.I)
+_LOCAL_CLIENT_PARAM = re.compile(rb"^(?:local_?)?client_?num$", re.I)
+_FUNCTION_PARAMS = re.compile(rb"(?m)^[ \t]*([A-Za-z_]\w*)[ \t]*\(([^)]*)\)\s*\{")
+_FOR_COUNTER = re.compile(rb"\bfor\s*\(\s*([A-Za-z_]\w*)\s*=[^;]*;([^;]*);", re.I)
+
+
+def _body_end(source: bytes, start: int) -> int:
+    """The offset of the brace closing the block opened just before ``start``."""
+    depth, i, in_string = 1, start, False
+    while i < len(source) and depth:
+        c = source[i : i + 1]
+        if in_string:
+            if c == b"\\":
+                i += 1
+            elif c == b'"':
+                in_string = False
+        elif c == b'"':
+            in_string = True
+        elif c == b"{":
+            depth += 1
+        elif c == b"}":
+            depth -= 1
+        i += 1
+    return i - 1
+
+
+def local_client_effects(p: Platform, zone: Zone, log=print) -> List[str]:
+    """Client scripts play effects for their own local client, not a loop counter's (see above).
+    Returns the names of the scripts changed."""
+    changed = []
+    for name, node in _rawfiles(p, zone):
+        if name.startswith(",") or not name.lower().endswith(".csc") or _buffer(node) is None:
+            continue
+        text = rawfile_text(node)
+        source = _blank_comments(text)
+        edits = []  # (start, end, replacement)
+        for m in _FUNCTION_PARAMS.finditer(source):
+            params = [p_.strip() for p_ in m.group(2).split(b",")]
+            local = next((p_ for p_ in params if _LOCAL_CLIENT_PARAM.match(p_)), None)
+            if local is None:
+                continue
+            start, end = m.end(), _body_end(source, m.end())
+            body = source[start:end]
+            counters = {c.group(1).lower() for c in _FOR_COUNTER.finditer(body) if b"player" not in c.group(2).lower()}
+            for call in _LOCAL_CLIENT_CALL.finditer(body):
+                arg = call.group(3)
+                if arg.lower() in counters and arg.lower() != local.lower():
+                    edits.append((start + call.start(3), start + call.end(3), local))
+        if not edits:
+            continue
+        new = bytearray(text)
+        for s, e, replacement in sorted(edits, reverse=True):
+            new[s:e] = replacement
+        set_rawfile_text(p, node, bytes(new))
+        changed.append(normalize(name))
+    if changed:
+        log(f"scripts: client effects for local clients that are loop counters are for the script's own local client "
+            f"(the console's other split screen clients froze it: UGX's Thundergun) ({', '.join(changed)})")
     return changed
 
 
@@ -760,6 +846,219 @@ def splitscreen_fog(p: Platform, zone: Zone, level_script: str, is_game_script=l
     return changed
 
 
+# On the console a player on an MG42 turret of a zombie map sees no world: the client draws the
+# turret's view far from the gun (viewpos: coordinates of 1e24 on Dead Sand, the world's origin on
+# CoD Xenon's Airport; the server has the player's eye at the gun). Stock Nacht with one placed does
+# the same, the campaign's (see1) and The Simpsons' .30 cals do not, and neither the gun's model,
+# overheating, the player's weapons nor the AI change it. So a player getting on one gets off it at
+# once and holds the gun instead: in its place (the eye at its tag_player, as the console puts it)
+# and within its arcs, with the portable MG42 of the map's weapons and endless ammo, until the use
+# button again, going down or leaving; the turret hides meanwhile. AI still use the turrets.
+_MOUNTED_GUN_TURRETS = re.compile(r"^mg42_bipod_(stand|crouch|prone)$", re.I)
+_MOUNTED_GUN_WEAPONS = ("mg42", "mg42_bipod")  # the portable MG42s, first found
+_MOUNTED_GUNS_MARK = b"// t4ff: the MG42 turrets are held guns"
+_MOUNTED_GUN_FUNCTIONS = rb"""
+// t4ff: the MG42 turrets of zombie maps show the console's players no world once used (the client
+// draws their view far from the gun): a player getting on one holds the gun instead (see t4ff)
+t4ff_mounted_guns()
+{
+	guns = [];
+	stances = [];
+%(guns)s	wait 0.05;
+	turrets = GetEntArray( "misc_turret", "classname" );
+	for( i = 0; i < turrets.size; i++ )
+	{
+		for( j = 0; j < guns.size; j++ )
+		{
+			if( DistanceSquared( turrets[i].origin, guns[j] ) < 16 )
+				turrets[i] thread t4ff_gun_watch( stances[j] );
+		}
+	}
+}
+
+t4ff_gun_watch( stance )
+{
+	self endon( "death" );
+	for( ;; )
+	{
+		wait 0.05;
+		player = self GetTurretOwner();
+		if( IsDefined( player ) && IsPlayer( player ) )
+			self t4ff_gun_hold( player, stance );
+	}
+}
+
+t4ff_gun_hold( player, stance )
+{
+	gun = "%(gun)s";
+	eye = self GetTagOrigin( "tag_player" );
+	self UseBy( player );
+	self MakeTurretUnusable();
+	self Hide();
+	height = 60;
+	if( stance == "crouch" )
+		height = 40;
+	else if( stance == "prone" )
+		height = 11;
+	spot = Spawn( "script_origin", eye - ( 0, 0, height ) );
+	spot.angles = ( 0, self.angles[1], 0 );
+	right = 45;
+	left = 45;
+	top = 15;
+	bottom = 15;
+	if( IsDefined( self.rightArc ) )
+		right = self.rightArc;
+	if( IsDefined( self.leftArc ) )
+		left = self.leftArc;
+	if( IsDefined( self.topArc ) )
+		top = self.topArc;
+	if( IsDefined( self.bottomArc ) )
+		bottom = self.bottomArc;
+	player AllowStand( stance == "stand" );
+	player AllowCrouch( stance == "crouch" );
+	player AllowProne( stance == "prone" );
+	player SetStance( stance );
+	player SetOrigin( spot.origin );
+	player SetPlayerAngles( spot.angles );
+	player PlayerLinkTo( spot, "", 0, right, left, top, bottom );
+	previous = player GetCurrentWeapon();
+	owned = player HasWeapon( gun );
+	clip = 0;
+	stock = 0;
+	if( owned )
+	{
+		clip = player GetWeaponAmmoClip( gun );
+		stock = player GetWeaponAmmoStock( gun );
+	}
+	else
+	{
+		player GiveWeapon( gun );
+	}
+	player SwitchToWeapon( gun );
+	while( IsDefined( player ) && player UseButtonPressed() )
+		wait 0.05;
+	for( ;; )
+	{
+		wait 0.05;
+		if( !IsDefined( player ) || player.sessionstate != "playing" || IsDefined( player.revivetrigger ) || player UseButtonPressed() )
+			break;
+		if( player GetCurrentWeapon() != gun )
+			player SwitchToWeapon( gun );
+		player SetWeaponAmmoClip( gun, WeaponClipSize( gun ) );
+	}
+	spot Delete();
+	if( IsDefined( player ) )
+	{
+		player Unlink();
+		if( owned )
+		{
+			player SetWeaponAmmoClip( gun, clip );
+			player SetWeaponAmmoStock( gun, stock );
+		}
+		else
+		{
+			player TakeWeapon( gun );
+		}
+		if( previous != "none" && player HasWeapon( previous ) )
+			player SwitchToWeapon( previous );
+		player AllowStand( true );
+		player AllowCrouch( true );
+		player AllowProne( true );
+		while( IsDefined( player ) && player UseButtonPressed() )
+			wait 0.05;
+	}
+	self Show();
+	wait 0.5;
+	self MakeTurretUsable();
+}
+"""
+
+
+def _map_entities(p: Platform, zone: Zone) -> List[Dict[str, str]]:
+    """The entities (key -> value) of the zone's map entities."""
+    entities = []
+    f = find_field(p.record("MapEnts"), "entityString")
+    for node in zone.extra_root.walk():
+        if node.type.name != "MapEnts" or (node.extra.get("origin") or ("",))[0] != "asset" or f is None:
+            continue
+        ptr = node.relocs.get(f.offset)
+        target = ptr.target() if ptr is not None else None
+        if target is not None:
+            text = bytes(target.data).rstrip(b"\0").decode("latin-1")
+            entities += [dict(re.findall(r'"([^"]+)"\s+"([^"]*)"', e)) for e in re.findall(r"\{[^{}]*\}", text)]
+    return entities
+
+
+def _weapon_names(p: Platform, zone: Zone) -> Set[str]:
+    return {asset_name(p, n).lower() for n in zone.extra_root.walk() if n.type.name == "WeaponDef" and (n.extra.get("origin") or ("",))[0] == "asset"}
+
+
+def mounted_guns(p: Platform, zone: Zone, level_script: str, log=print) -> int:
+    """On zombie maps, the MG42 turrets are held guns (see above). Returns the number of turrets."""
+    nodes = {normalize(name): node for name, node in _rawfiles(p, zone) if not name.startswith(",") and _buffer(node) is not None}
+    level_script = level_script.lower()
+    if level_script not in nodes or not is_zombie_map({name: rawfile_text(node) for name, node in nodes.items() if name.endswith(".gsc")}):
+        return 0
+    text = rawfile_text(nodes[level_script])
+    body = _function_body(text, "main")
+    if body is None or _MOUNTED_GUNS_MARK in text:
+        return 0
+    guns = []
+    for entity in _map_entities(p, zone):
+        m = _MOUNTED_GUN_TURRETS.match(entity.get("weaponinfo", ""))
+        origin = entity.get("origin", "").split()
+        if entity.get("classname", "").lower() == "misc_turret" and m and len(origin) == 3:
+            guns.append((tuple(float(v) for v in origin), m.group(1).lower()))
+    if not guns:
+        return 0
+    weapons = _weapon_names(p, zone)
+    gun = next((w for w in _MOUNTED_GUN_WEAPONS if w in weapons), None)
+    if gun is None:
+        log(f"scripts: the map's {len(guns)} MG42 turrets show the console no world once used, and the map has no portable MG42 to hold instead")
+        return 0
+    newline = b"\r\n" if b"\r\n" in text else b"\n"
+    start = [b"\t" + _MOUNTED_GUNS_MARK + b" (t4ff_mounted_guns)", f'\tPrecacheItem( "{gun}" );'.encode("latin-1"), b"\tlevel thread t4ff_mounted_guns();"]
+    text = text[: body[0]] + newline + newline.join(start) + newline + text[body[0] :]
+    lines = b"".join(f"\tguns[{i}] = ( {x:g}, {y:g}, {z:g} );\n\tstances[{i}] = \"{stance}\";\n".encode("latin-1")
+                     for i, ((x, y, z), stance) in enumerate(guns))  # fmt: skip
+    functions = _MOUNTED_GUN_FUNCTIONS % {b"guns": lines, b"gun": gun.encode("latin-1")}
+    set_rawfile_text(p, nodes[level_script], text.rstrip() + newline + functions.replace(b"\n", newline))
+    log(f"scripts: the map's {len(guns)} MG42 turrets show the console no world once used: a player on one holds the gun instead ({gun}, see t4ff_mounted_guns)")
+    return len(guns)
+
+
+# Timed power-ups (PhilMod's Unlimited Ammo) turn player_sustainammo on, endless ammo and grenades,
+# and off when their time is up. A game that ends or restarts meanwhile (the last player down, the
+# options' fast_restart) never turns it off, and a saved dvar keeps its value into the next game
+# (console testers of Mini-Labor: "easy is infinite ammo"). Nothing else does: the game's
+# maps/_cheat.gsc only acts on cheats that are on, and PhilMod's _load does not run it. So the level
+# script of a map whose scripts turn it on turns it off as it starts; a cheat that is on
+# (sf_use_ignoreammo) turns it on again after that.
+_SUSTAIN_AMMO_ON = re.compile(rb'\bSet(?:Saved)?Dvar\s*\(\s*"player_sustainammo"\s*,(?!\s*"?0"?\s*\))', re.I)
+_SUSTAIN_AMMO_MARK = b"// t4ff: no endless ammo left on by an earlier game"
+
+
+def reset_sustain_ammo(p: Platform, zone: Zone, level_script: str, log=print) -> bool:
+    """The level script turns player_sustainammo off as it starts, when the map's scripts turn it on
+    for a while (see above). Returns whether it was changed."""
+    nodes = {normalize(name): node for name, node in _rawfiles(p, zone) if not name.startswith(",") and _buffer(node) is not None}
+    users = sorted(name for name, node in nodes.items()
+                   if name.endswith(".gsc") and name != "maps/_cheat.gsc" and _SUSTAIN_AMMO_ON.search(_blank_comments(rawfile_text(node))))  # fmt: skip
+    level_script = level_script.lower()
+    if not users or level_script not in nodes:
+        return False
+    text = rawfile_text(nodes[level_script])
+    body = _function_body(text, "main")
+    if body is None or _SUSTAIN_AMMO_MARK in text:
+        return False
+    newline = b"\r\n" if b"\r\n" in text else b"\n"
+    insert = newline + b"\t" + _SUSTAIN_AMMO_MARK + b" (player_sustainammo)" + newline + b'\tSetSavedDvar( "player_sustainammo", 0 );' + newline
+    set_rawfile_text(p, nodes[level_script], text[: body[0]] + insert + text[body[0] :])
+    log(f"scripts: the level script turns endless ammo (player_sustainammo) off as it starts: {', '.join(users)} turn it on for a while, "
+        f"and a game ending meanwhile left it on for the next one")
+    return True
+
+
 # The game runs the first script of a name it loads, and the console loads its own zones (common.ff,
 # patch.ff, ...) before the map: a script both have is the game's there. On PC, with the map's mod
 # active, the mod's scripts (its mod.ff, its .iwd and loose files) win over the game's instead. The
@@ -855,19 +1154,22 @@ def keep_mod_scripts(p: Platform, zone: Zone, mod_scripts: Set[str], console_lib
 # game's own scripts call them too, or the engine runs them by name: PhilMod's _load, _gameskill,
 # _laststand, _callbackglobal, animscripts/death, its client scripts...), go to the map's folder
 # (usermaps/<map>/scripts/<name>), from which CoD Xe loads a script in place of the zones' one, as
-# the PC loads a mod's loose scripts. Older CoD Xe builds run the game's.
+# the PC loads a mod's loose scripts. Older CoD Xe builds run the game's. So do the mod's anim trees,
+# which the game loads through the same loader: The Matrix's animtrees/generic_human.atr has some 250
+# animations more than the game's (the wave gun's deaths, a boss...), and its scripts using them do
+# not compile against the game's ("animation ... not defined in anim tree 'generic_human'").
 USERMAP_SCRIPTS = "scripts"
 
 
 def usermap_scripts(p: Platform, zone: Zone, mod_scripts: Set[str], console_library, renamed: Dict[str, str]) -> Dict[str, bytes]:
-    """{name: text} of the mod's scripts (``mod_scripts``) the game's own zones have too and that
-    differ, but the renamed ones (see above)."""
+    """{name: text} of the mod's scripts and anim trees (``mod_scripts``) the game's own zones have
+    too and that differ, but the renamed ones (see above)."""
     if console_library is None:
         return {}
     scripts = {}
     for name, node in _rawfiles(p, zone):
         key = normalize(name)
-        if name.startswith(",") or key not in mod_scripts or key in renamed or not key.endswith(SCRIPT_EXTENSIONS) or _buffer(node) is None:
+        if name.startswith(",") or key not in mod_scripts or key in renamed or not key.endswith(SOURCE_EXTENSIONS) or _buffer(node) is None:
             continue
         found = console_library.find_in_game_zones("RawFile", key)
         text = rawfile_text(node)
@@ -892,6 +1194,10 @@ def write_usermap_scripts(scripts: Dict[str, bytes], out_dir: str, log=print) ->
     if scripts:
         log(f"scripts: {len(scripts)} of the mod's versions of the game's scripts go to {USERMAP_SCRIPTS}/, which CoD Xe loads in place of "
             f"the game's ({', '.join(sorted(scripts)[:6])}{', ...' if len(scripts) > 6 else ''})")
+    trees = sorted(n for n in scripts if n.endswith(".atr"))
+    if trees:
+        log(f"warning: the map has its own {', '.join(trees)}: it needs a CoD Xe build that loads {USERMAP_SCRIPTS}/ (older ones compile "
+            f"its scripts against the game's and stop with \"Server script compile error ... not defined in anim tree\")")
     return sorted(scripts)
 
 
@@ -1048,6 +1354,11 @@ def missing_scripts_zone(p: Platform, zone: Zone, sources: List, console_library
             defined[ref] = node
             added.append(("rawfile", asset_name(p, node), node))
             queue.append((ref, rawfile_text(node)))
+    # the player animation script, which the engine runs by name, is read against the multiplayer anim
+    # tree: a mod's version of the script wants the mod's tree (Kino Rezurrection's has
+    # pb_rifle_prone_shellshock, which the game's tree has not: "not defined in anim tree 'multiplayer'")
+    if defined.get(PLAYER_ANIM_SCRIPT) is not None:
+        queue.append((PLAYER_ANIM_SCRIPT, b'#using_animtree( "multiplayer" );'))
     by_name: List[str] = []
     for ref in roots:
         ref = normalize(ref)
@@ -1061,7 +1372,10 @@ def missing_scripts_zone(p: Platform, zone: Zone, sources: List, console_library
         queue.append((ref, rawfile_text(node)))
     while queue:
         user, text = queue.pop()
-        for ref in sorted(script_references(user, text)):
+        # the anim trees too: Kino Rezurrection's vehicles.atr, only in its .iwd, has its helicopter's
+        # rotor animation, which the game's own has not ("not defined in anim tree 'vehicles'")
+        refs = script_references(user, text) | (anim_tree_references(text) if user.endswith(SCRIPT_EXTENSIONS) or user == PLAYER_ANIM_SCRIPT else set())
+        for ref in sorted(refs):
             if ref in defined or ref in unknown:
                 continue
             in_game = console_library is not None and console_library.in_game_zones("RawFile", ref)

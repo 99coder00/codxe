@@ -263,7 +263,8 @@ def image_hook(conv, asset_type, node, name):
 
     drop = conv.image_drop_levels.get(name, 0)
     try:
-        tex = img.build_console_texture(source, conv.options.max_texture_size, conv.options.keep_mips, drop, conv.options.compress_textures, _pc_normal_map(source, semantic))
+        tex = img.build_console_texture(source, conv.options.max_texture_size, conv.options.keep_mips, drop, conv.options.compress_textures, _pc_normal_map(source, semantic),
+                                        mip_tail=conv.options.mip_tail)
     except img.ImageError as e:
         conv.warn(str(e) + ", emitting a reference")
         return _reference(conv, asset_type, node, name)
@@ -442,6 +443,36 @@ def _ui_images(conv) -> set:
     return names
 
 
+def choose_drops(names, size, can_drop, budget: int, last=(), tier=None) -> Tuple[Dict[str, int], int, bool]:
+    """The steps each image takes so their sizes fit ``budget`` (a step: a top level dropped):
+    ``size(name, steps)``, the bytes of an image after that many; ``can_drop(name, steps)``, whether
+    it may take one more. The image whose next step saves the most goes first: one whose next step
+    saves nothing (a streamed one that would stop streaming) keeps its levels; ``tier(name, steps)``
+    of the next step, when given: the lowest first (the cheaper to the eye); those of ``last`` (the 2D
+    materials') only once no other can. Returns (steps, total, whether it fits)."""
+    drops = {n: 0 for n in names}
+    sizes = {n: size(n, 0) for n in names}
+    total = sum(sizes.values())
+    saving = {n: sizes[n] - size(n, 1) for n in names if can_drop(n, 0)}
+    rank = (lambda n: tier(n, drops[n])) if tier is not None else (lambda n: 0)
+    while total > budget:
+        candidates = [n for n in saving if n not in last and saving[n] > 0] or [n for n in saving if saving[n] > 0]
+        if not candidates:
+            return drops, total, False
+        lowest = min(rank(n) for n in candidates)
+        candidates = [n for n in candidates if rank(n) == lowest]
+        best = max(candidates, key=lambda n: (saving[n], sizes[n]))
+        drops[best] += 1
+        new = size(best, drops[best])
+        total += new - sizes[best]
+        sizes[best] = new
+        if can_drop(best, drops[best]):
+            saving[best] = new - size(best, drops[best] + 1)
+        else:
+            del saving[best]
+    return drops, total, True
+
+
 def plan_textures_shared(convs):
     """Choose how many top mip levels to drop per image so the textures of all the zones of
     ``convs`` (e.g. a map and its mod, merged later) fit one memory budget.
@@ -452,6 +483,7 @@ def plan_textures_shared(convs):
     sources = {}
     normal_maps = set()  # PC normal maps, made DXN
     fixed = set()  # textures counted but not reduced
+    copies = set()  # textures the console library's copies of (the console's own)
     map_type = find_field(convs[0].src.record("GfxImage"), "mapType").offset
     semantic = find_field(convs[0].src.record("GfxImage"), "semantic").offset
     for conv in convs:
@@ -470,6 +502,7 @@ def plan_textures_shared(convs):
                     kind, src = image_choice(conv, node, plain)
                 if kind == "library" and options.texture_budget:
                     src = console_image(conv, plain)
+                    copies.add(plain)
                 if src is not None and src.format in ("DXT1", "DXT3", "DXT5", "DXN", "A8R8G8B8", "R8G8B8", "A8L8", "A8", "L8"):
                     sources[plain] = src
                     if _pc_normal_map(src, node.data[semantic]):
@@ -503,34 +536,65 @@ def plan_textures_shared(convs):
                             src = console_image(conv, image_name)
                             if src is not None:
                                 sources[image_name] = src
+                                copies.add(image_name)
 
-    drops = {n: 0 for n in sources}
+    steps = options.stream_steps
 
-    def size(n):
-        # pixel data is 4 KiB aligned in the zone
-        return (img.console_texture_size(sources[n], options.max_texture_size, options.keep_mips, drops[n], options.compress_textures, n in normal_maps) + 4095) & ~4095
-
-    def can_drop(n):
-        if n in fixed:
-            return False
+    def eighth(n, drop):
+        # a deep streamed image may keep an eighth of its size (stream.deep_split): more than 16
+        # texels a side
         src = sources[n]
-        level = drops[n] + 1
-        return min(src.width >> level, src.height >> level) >= 64
+        return options.eighth_levels and steps.get(n.lower(), 0) >= 2 and min(src.width >> (drop + 3), src.height >> (drop + 3)) > 16
 
-    total = sum(size(n) for n in sources)
-    before = total
-    if options.texture_budget:
+    def state(n, k):
+        """(top levels dropped, levels streamed) of image ``n`` after ``k`` steps: a deep streamed one's
+        first step keeps an eighth of its size (the top level stays: only farther than its half
+        size reaches it shows smaller), the next ones drop top levels."""
+        streamed = steps.get(n.lower(), 0)
+        if k and eighth(n, 0):
+            return k - 1, 3 if eighth(n, k - 1) else 2
+        return k, streamed
+
+    def size(n, k):
+        """The fastfile's bytes of image ``n`` after ``k`` steps: one that streamed in an earlier
+        conversion keeps the levels below its streamed ones, while its top level still fills a stream
+        slot (stream.MIN_HIGHMIP_BYTES)."""
+        from .stream import MIN_HIGHMIP_BYTES
+
+        drop, streamed = state(n, k)
+        src = sources[n]
+        args = (options.max_texture_size, options.keep_mips)
+        rest = (options.compress_textures, n in normal_maps)
+        if streamed and img.console_texture_size(src, options.max_texture_size, False, drop, *rest) >= MIN_HIGHMIP_BYTES:
+            drop += streamed
+        # pixel data is 4 KiB aligned in the zone
+        return (img.console_texture_size(src, *args, drop, *rest, make_mips=bool(streamed), mip_tail=options.mip_tail) + 4095) & ~4095
+
+    def can_drop(n, k):
+        src = sources[n]
+        drop = state(n, k + 1)[0]
+        return n not in fixed and min(src.width >> drop, src.height >> drop) >= 64
+
+    def tier(n, k):
+        # an eighth kept before any top level goes
+        return 0 if k == 0 and eighth(n, 0) else 1
+
+    before = sum(size(n, 0) for n in sources)
+    drops, total = {n: 0 for n in sources}, before
+    budget = max(before - options.texture_cut, 1) if options.texture_cut else options.texture_budget
+    if budget:
         ui = set().union(*(_ui_images(conv) for conv in convs))
-        while total > options.texture_budget:
-            candidates = [n for n in sources if can_drop(n) and n not in ui] or [n for n in sources if can_drop(n)]
-            if not candidates:
-                convs[0].warn(f"textures need {total / 1048576:.1f} MiB, over the {options.texture_budget / 1048576:.1f} MiB budget, and cannot be reduced further")
-                break
-            largest = max(candidates, key=size)
-            old = size(largest)
-            drops[largest] += 1
-            total += size(largest) - old
+        # a console copy that streamed is the PC game's texture (stream_textures: what that keeps in
+        # the fastfile takes no more than the copy): the copy a level smaller, it would not be, and
+        # stay the copy a level smaller (512x512 textures of Kino Rezurrection's ended 64x64)
+        upgraded = {n for n in copies if steps.get(n.lower())}
+        drops, total, fits = choose_drops(list(sources), size, can_drop, budget, ui | upgraded, tier)
+        if not fits:
+            convs[0].warn(f"textures need {total / 1048576:.1f} MiB, over the {budget / 1048576:.1f} MiB budget, and cannot be reduced further")
+    eighths = {n.lower() for n, k in drops.items() if state(n, k)[1] == 3}
+    drops = {n: state(n, k)[0] for n, k in drops.items()}
     for conv in convs:
+        conv.eighth_images = eighths
         conv.image_drop_levels = drops
         conv.textures_planned = True
         conv.planned_texture_bytes = total
@@ -560,7 +624,8 @@ def rebuild_console_image(conv, name: str, library_node: Node) -> Optional[Node]
         return struct.unpack_from(conv.dst.endian + {1: "B", 2: "H", 4: "I"}[f.type.size], library_node.data, f.offset)[0]
 
     try:
-        tex = img.build_console_texture(source, conv.options.max_texture_size, conv.options.keep_mips, conv.image_drop_levels.get(name, 0), conv.options.compress_textures)
+        tex = img.build_console_texture(source, conv.options.max_texture_size, conv.options.keep_mips, conv.image_drop_levels.get(name, 0), conv.options.compress_textures,
+                                        mip_tail=conv.options.mip_tail)
     except img.ImageError:
         return None
     conv.stats.texture_bytes += len(tex.pixels)
@@ -581,11 +646,73 @@ def _reference(conv, asset_type, node, name):
         conv.node_map[id(node)] = copy
         conv.offset_maps[id(node)] = lambda off: off
         return copy
+    if asset_type == "techset" and not name.startswith(","):
+        substitute = _techset_substitute(conv, node, name)
+        if substitute is not None:
+            copy = conv.from_library(asset_type, substitute, node)
+            if copy is not None:
+                conv.node_map[id(node)] = copy
+                conv.offset_maps[id(node)] = lambda off: off
+                return copy
+            name = substitute  # the game's own zones have it: a reference by that name
+        else:
+            # nothing safe to use instead: the copy there is, as before (it may draw: Kino's effects do)
+            copy = conv.from_library(asset_type, name, node, unsafe_ok=True)
+            if copy is not None:
+                conv.node_map[id(node)] = copy
+                conv.offset_maps[id(node)] = lambda off: off
+                return copy
     conv.stats.count(conv.stats.referenced, asset_type)
     new = build_reference(conv, asset_type, node, name if name.startswith(",") else "," + name)
     conv.node_map[id(node)] = new
     conv.offset_maps[id(node)] = lambda off: off
     return new
+
+
+def _techset_substitute(conv, node, name: str) -> Optional[str]:
+    """The console technique set to use for the PC one ``name`` when no console fastfile has it (see
+    techsets.py): the closest of the same world vertex format; None when the game's zones have it,
+    when no material of the zone uses it (the PC's high quality shadow variants, which only other
+    technique sets point to: they go, see merge.prune_references), or when nothing fits (a reference
+    by its name then, as before)."""
+    from .techsets import closest_techset, techset_info
+
+    library = getattr(conv, "console_library", None)
+    if library is None or library.in_game_zones("MaterialTechniqueSet", name):
+        return None
+    used = conv.__dict__.get("_material_techsets")
+    if used is None:
+        used = set()
+        offset = find_field(conv.src.record("Material"), "techniqueSet").offset
+        for material in conv.zone.extra_root.walk():
+            if material.type.name == "Material" and not material.string:
+                for i in range(material.count):
+                    ptr = material.relocs.get(i * conv.src.record("Material").size + offset)
+                    target = ptr.target() if ptr is not None else None
+                    if target is not None:
+                        used.add((asset_name(conv.src, target) or "").lstrip(",").lower())
+        conv._material_techsets = used
+    if name.lstrip(",").lower() not in used:
+        return None
+    candidates = getattr(library, "_techset_candidates", None)
+    if candidates is None:
+        candidates = {}
+        for found in library.names("MaterialTechniqueSet"):
+            entry = library.find("MaterialTechniqueSet", found)
+            if entry is not None and library.techset_safe(entry[1]):
+                candidates[found] = techset_info(conv.dst, entry[1])
+        library._techset_candidates = candidates
+    wvf = node.data[find_field(conv.src.record("MaterialTechniqueSet"), "worldVertFormat").offset]
+    substitute = closest_techset(name, wvf, candidates)
+    if substitute is not None:
+        found = library.find("MaterialTechniqueSet", name)
+        why = (
+            "the console fastfiles given have it only with shaders CoD Xenon compiled, which froze the game drawing them"
+            if found is not None
+            else "no console fastfile given has it (the game would draw with its default, which lacks most vertex shaders)"
+        )
+        conv.warn(f"technique set '{name.lstrip(',')}': {why}: using '{substitute}', the closest of the same vertex format")
+    return substitute  # none: a reference by its name, as before (PC only sets nothing uses go later)
 
 
 def _image_from_load_def(p, name: str, load_def: Node) -> Optional[img.ImageData]:
@@ -701,8 +828,7 @@ def xanim_hook(conv, asset_type, node, name):
     return new
 
 
-# High mip streaming bounds of a surface whose textures are never streamed (an empty box):
-# converted images are always fully resident.
+# High mip streaming bounds of a surface whose textures are never streamed (an empty box).
 NO_STREAM_BOUNDS = (131072.0, 131072.0, 131072.0, -131072.0, -131072.0, -131072.0)
 
 # XModel members streamed after streamInfo (the console inserts highMipBounds before them)
@@ -727,7 +853,14 @@ def xmodel_hook(conv, asset_type, node, name):
         bounds = Node(t, numsurfs, BLOCK_VIRTUAL)
         bounds.extra["align"] = bounds_rec.align
         bounds.extra["origin"] = ("member", "XModelStreamInfo", "highMipBounds")
-        bounds.data = bytearray(struct.pack(dst.endian + "6f", *NO_STREAM_BOUNDS) * numsurfs)
+        # each surface the model's box: the streamer loads the top level of its streamed textures
+        # (stream.py) when the view is close to it (the disc's models have each surface's own box)
+        from .stream import model_bounds
+
+        box = model_bounds(dst, new)
+        if not all(lo <= hi for lo, hi in zip(box[:3], box[3:])):
+            box = NO_STREAM_BOUNDS
+        bounds.data = bytearray(struct.pack(dst.endian + "6f", *box) * numsurfs)
         bounds.segments.append((t, numsurfs, len(bounds.data), False))
         offset = find_field(rec, "streamInfo").offset + find_field(dst.record("XModelStreamInfo"), "highMipBounds").offset
         pos = len(new.children)

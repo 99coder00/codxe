@@ -13,6 +13,7 @@ Run with ``python -m unittest discover -s tests`` from tools/t4ff.
 
 import collections
 import os
+import re
 import stat
 import struct
 import sys
@@ -307,6 +308,11 @@ knob
         self.assertEqual(anim_tree_animations(tree), ["german_shepherd_attack_player", "german_shepherd_idle", "german_shepherd_look_down", "leaf_a", "leaf_b"])
         scripts = [("maps/_zombiemode_dogs.gsc", b'#using_animtree( "dog" );\n// #using_animtree("commented");'), ("x.gsc", b'#using_animtree("zombie_cymbal_monkey");')]
         self.assertEqual(anim_trees_used(scripts), ["animtrees/dog.atr", "animtrees/zombie_cymbal_monkey.atr"])
+        # the animations scripts play: only those of a tree are added (a campaign tree's others are not)
+        from t4ff.named import played_animations
+
+        played = [("animscripts/dog_move.gsc", b'self setanim( %German_Shepherd_Run, 1 );\n/* %patrol_bored_walk */ x = % leaf_a;')]
+        self.assertEqual(played_animations(played), {"german_shepherd_run", "leaf_a"})
 
     def test_named_assets(self):
         """What the game looks up by name: the animations of the player animation script and the
@@ -527,6 +533,61 @@ death
             write_usermap_scripts({}, out, log=lambda msg: None)
             self.assertFalse(os.path.exists(os.path.join(out, "scripts")))
 
+    def test_usermap_anim_trees(self):
+        """The mod's own version of an anim tree the game's zones have (The Matrix's generic_human with
+        the wave gun's animations) goes to the scripts folder too, with a warning: older CoD Xe builds
+        compile the map's scripts against the game's tree and stop; the game's other raw files stay out."""
+        import tempfile
+        from unittest import mock
+
+        from t4ff.scripts import make_rawfile, usermap_scripts, write_usermap_scripts
+
+        p, template = self._rawfile_template()
+        mine = {"animtrees/generic_human.atr": b"ai_zombie_walk_v1\nai_zombie_crawl_microwave_death_walking_c\n",
+                "animtrees/dog.atr": b"german_shepherd_run\n", "mp/zombiemode.csv": b"zombie_health_start,150\n"}
+        game = {"animtrees/generic_human.atr": b"ai_zombie_walk_v1\n", "animtrees/dog.atr": b"german_shepherd_run\n",
+                "mp/zombiemode.csv": b"zombie_health_start,100\n"}
+        files = [(n, make_rawfile(p, template, n, t)) for n, t in mine.items()]
+
+        class Library:
+            def find_in_game_zones(self, asset_type, name):
+                return (None, make_rawfile(p, template, name, game[name])) if name in game else None
+
+        with mock.patch("t4ff.scripts._rawfiles", lambda p, z: files):
+            scripts = usermap_scripts(p, None, set(mine), Library(), {})
+        self.assertEqual(scripts, {"animtrees/generic_human.atr": mine["animtrees/generic_human.atr"]})
+        logged = []
+        with tempfile.TemporaryDirectory() as out:
+            self.assertEqual(write_usermap_scripts(scripts, out, log=logged.append), ["animtrees/generic_human.atr"])
+            with open(os.path.join(out, "scripts", "animtrees", "generic_human.atr"), "rb") as f:
+                self.assertEqual(f.read(), mine["animtrees/generic_human.atr"])
+        self.assertTrue(any(msg.startswith("warning:") and "animtrees/generic_human.atr" in msg for msg in logged))
+
+    def test_loose_anim_trees(self):
+        """The map's loose scripts and anim trees (in its .iwd files) replace those of its fastfiles, as
+        the PC game reads them: The Matrix's tree in its .iwd has the wave gun's animations, the one
+        in its _patch.ff not. Other raw files stay as the fastfiles have them."""
+        from unittest import mock
+
+        from t4ff.scripts import make_rawfile, override_scripts, rawfile_text
+
+        p, template = self._rawfile_template()
+        zone = {"maps/mymap.gsc": b"main() { }\n", "animtrees/generic_human.atr": b"ai_zombie_walk_v1\n", "mp/table.csv": b"a,1\n"}
+        loose = {"maps/mymap.gsc": b"main() { new(); }\n", "animtrees/generic_human.atr": b"ai_zombie_walk_v1\nai_zombie_microwave_death_a\n",
+                 "mp/table.csv": b"a,2\n"}
+        files = [(n, make_rawfile(p, template, n, t)) for n, t in zone.items()]
+
+        class Loose:
+            def read(self, name):
+                return loose.get(name)
+
+        with mock.patch("t4ff.scripts._rawfiles", lambda p, z: files):
+            self.assertEqual(override_scripts(p, [None], Loose(), log=lambda msg: None), 2)
+        texts = {n: rawfile_text(node) for n, node in files}
+        self.assertEqual(texts["maps/mymap.gsc"], loose["maps/mymap.gsc"])
+        self.assertEqual(texts["animtrees/generic_human.atr"], loose["animtrees/generic_human.atr"])
+        self.assertEqual(texts["mp/table.csv"], zone["mp/table.csv"])
+
     def test_options_asked_in_game(self):
         """The map's options are asked as the level starts: the level script precaches their menus
         and the restart menu first thing, starts the thread asking them, and gets its functions; a
@@ -677,6 +738,87 @@ death
         self.assertEqual(rawfile_text(files[2][1]), treyarch)
         self.assertEqual(rawfile_text(files[3][1]), game)
 
+    def test_mounted_guns(self):
+        """A zombie map's MG42 turrets (not its other turrets) become held guns: the level script
+        precaches the portable MG42 it has and starts the thread knowing each turret's place and
+        stance; maps without a portable MG42, campaign maps and a second run change nothing."""
+        from unittest import mock
+
+        from t4ff.scripts import make_rawfile, mounted_guns, rawfile_text
+
+        p, template = self._rawfile_template()
+        level = b"main()\r\n{\r\n\tmaps\\_zombiemode::main();\r\n}\r\n"
+        entities = [{"classname": "misc_turret", "weaponinfo": "mg42_bipod_stand", "origin": "-1957.6 1362.9 1628.4"},
+                    {"classname": "misc_turret", "weaponinfo": "mg42_bipod_crouch", "origin": "3471.9 1360.1 1569"},
+                    {"classname": "misc_turret", "weaponinfo": "30cal_bipod_stand", "origin": "0 0 0"},
+                    {"classname": "script_model", "weaponinfo": "mg42_bipod_stand", "origin": "1 1 1"}]
+        files = [("maps/mymap.gsc", make_rawfile(p, template, "maps/mymap.gsc", level))]
+        with mock.patch("t4ff.scripts._rawfiles", lambda p, z: files), mock.patch("t4ff.scripts._map_entities", lambda p, z: entities):
+            with mock.patch("t4ff.scripts._weapon_names", lambda p, z: {"mg42_bipod_stand", "colt"}):
+                self.assertEqual(mounted_guns(p, None, "maps/mymap.gsc", log=lambda msg: None), 0)  # no portable MG42
+            with mock.patch("t4ff.scripts._weapon_names", lambda p, z: {"mg42_bipod_stand", "mg42_bipod", "mg42"}):
+                self.assertEqual(mounted_guns(p, None, "maps/mymap.gsc", log=lambda msg: None), 2)
+                self.assertEqual(mounted_guns(p, None, "maps/mymap.gsc", log=lambda msg: None), 0)  # once
+        text = rawfile_text(files[0][1])
+        self.assertTrue(text.startswith(b'main()\r\n{\r\n\t// t4ff: the MG42 turrets are held guns (t4ff_mounted_guns)\r\n'
+                                        b'\tPrecacheItem( "mg42" );\r\n\tlevel thread t4ff_mounted_guns();\r\n\r\n\tmaps\\_zombiemode::main();\r\n}\r\n'))
+        self.assertIn(b'\tguns[0] = ( -1957.6, 1362.9, 1628.4 );\r\n\tstances[0] = "stand";\r\n'
+                      b'\tguns[1] = ( 3471.9, 1360.1, 1569 );\r\n\tstances[1] = "crouch";\r\n\twait 0.05;\r\n', text)
+        self.assertIn(b'\tgun = "mg42";\r\n', text)
+        self.assertNotIn(b"\r\r", text)
+        self.assertNotIn(b"\n\n\n", text.replace(b"\r", b""))
+        # a campaign map keeps its turrets
+        campaign = [("maps/mymap.gsc", make_rawfile(p, template, "maps/mymap.gsc", b"main()\r\n{\r\n\tmaps\\_load::main();\r\n}\r\n"))]
+        with mock.patch("t4ff.scripts._rawfiles", lambda p, z: campaign), mock.patch("t4ff.scripts._map_entities", lambda p, z: entities):
+            with mock.patch("t4ff.scripts._weapon_names", lambda p, z: {"mg42"}):
+                self.assertEqual(mounted_guns(p, None, "maps/mymap.gsc", log=lambda msg: None), 0)
+
+    def test_reset_sustain_ammo(self):
+        """A map whose scripts turn endless ammo on for a while (PhilMod's Unlimited Ammo) turns it off
+        as its level script starts: a game ending meanwhile left it on for the next one. Maps turning it
+        off only, or only the game's cheats turning it on, change nothing; a second run neither."""
+        from unittest import mock
+
+        from t4ff.scripts import make_rawfile, rawfile_text, reset_sustain_ammo
+
+        p, template = self._rawfile_template()
+        level = b"main()\r\n{\r\n\tmaps\\_zombiemode::main();\r\n}\r\n"
+        powerup = b'start()\r\n{\r\n\tSetSavedDvar("player_sustainammo", 1);\r\n\twait(30);\r\n\tSetSavedDvar("player_sustainammo", 0);\r\n}\r\n'
+        cheat = b'ignore_ammoMode( on )\r\n{\r\n\tsetsaveddvar ( "player_sustainAmmo",  1 );\r\n}\r\n'
+        off_only = b'stop()\r\n{\r\n\t// SetSavedDvar("player_sustainammo", 1);\r\n\tSetSavedDvar( "player_sustainammo", "0" );\r\n}\r\n'
+        for others, expected in (([("maps/_cheat.gsc", cheat), ("maps/_x.gsc", off_only)], False), ([("maps/_zombiemode_powerups.gsc", powerup)], True)):
+            files = [("maps/mymap.gsc", make_rawfile(p, template, "maps/mymap.gsc", level))]
+            files += [(n, make_rawfile(p, template, n, t)) for n, t in others]
+            with mock.patch("t4ff.scripts._rawfiles", lambda p, z: files):
+                self.assertEqual(reset_sustain_ammo(p, None, "maps/mymap.gsc", log=lambda msg: None), expected)
+                self.assertFalse(reset_sustain_ammo(p, None, "maps/mymap.gsc", log=lambda msg: None))  # once
+        self.assertEqual(rawfile_text(files[0][1]), b"main()\r\n{\r\n\t// t4ff: no endless ammo left on by an earlier game (player_sustainammo)\r\n"
+                                                    b'\tSetSavedDvar( "player_sustainammo", 0 );\r\n\r\n\tmaps\\_zombiemode::main();\r\n}\r\n')
+
+    def test_local_client_effects(self):
+        """UGX's Thundergun plays its steam for local clients 3, 2 and 1 (its vents' loop counter), which
+        froze the console on its first shot: in a function given its local client, the effect is for
+        that client. Loops over the local players, and other scripts, stay."""
+        from unittest import mock
+
+        from t4ff.scripts import local_client_effects, make_rawfile, rawfile_text
+
+        p, template = self._rawfile_template()
+        ugx = (b"thundergun_fx_fire( localclientnum )\r\n{\r\n\tfx = level._effect[\"steam\"];\r\n"
+               b"\tfor ( i = level.thundergun_steam_vents; i > 0; i-- )\r\n\t{\r\n\t\tplayfx( i, fx, (392, 154, 10) );\r\n\t}\r\n"
+               b"\tplaysound(localclientnum,\"wpn_thunder_breath\", (0,0,0));\r\n}\r\n")
+        players = (b"fx_all( localClientNum )\r\n{\r\n\tplayers = getlocalplayers();\r\n"
+                   b"\tfor ( i = 0; i < players.size; i++ )\r\n\t\tplayfx( i, level._effect[\"x\"], (0,0,0) );\r\n}\r\n")
+        server = b"f( localclientnum )\r\n{\r\n\tfor ( i = 0; i < 3; i++ )\r\n\t\tplayfx( i, fx, (0,0,0) );\r\n}\r\n"
+        files = [(n, make_rawfile(p, template, n, t)) for n, t in
+                 (("clientscripts/ugx_thundergun.csc", ugx), ("clientscripts/fx.csc", players), ("maps/x.gsc", server))]
+        with mock.patch("t4ff.scripts._rawfiles", lambda p, z: files):
+            self.assertEqual(local_client_effects(p, None, log=lambda msg: None), ["clientscripts/ugx_thundergun.csc"])
+            self.assertEqual(local_client_effects(p, None, log=lambda msg: None), [])  # once
+        self.assertEqual(rawfile_text(files[0][1]), ugx.replace(b"playfx( i,", b"playfx( localclientnum,"))
+        self.assertEqual(rawfile_text(files[1][1]), players)
+        self.assertEqual(rawfile_text(files[2][1]), server)
+
     def test_valid_cursor_hints(self):
         """The console's SetCursorHint crashes the game on a hint type it has not (it lists the valid
         ones past the end of their table): Dead Sand's "HINT_NONE" becomes "HINT_NOICON"; valid ones,
@@ -820,6 +962,65 @@ class UsermapTests(unittest.TestCase):
             # everything in one folder
             os.rename(os.path.join(mods, "mod.ff"), os.path.join(maps, "mod.ff"))
             self.assertEqual(find_usermap(os.path.join(maps, "mod.ff"))[1]["mod"], os.path.join(maps, "mod.ff"))
+            # the mod's language zone (UGX Mod's guns): merged too, not taken for the map
+            open(os.path.join(maps, "localized_common.ff"), "wb").close()
+            name, files, _ = find_usermap(maps)
+            self.assertEqual(name, "nazi_zombie_aztec")
+            self.assertEqual(files["localized"], [os.path.join(maps, "localized_common.ff")])
+
+    def test_own_usermaps_list(self):
+        """A menu zone with CoD Xe's own custom maps list (the menu codxe_usermaps) is recognised, and
+        the patch_ui.ff files of a release folder, a game's _codxe\\t4 or a zone folder are found."""
+        import types
+
+        from t4ff.menu import has_own_usermaps_list, menu_zone_candidates
+
+        zone = types.SimpleNamespace(assets=[types.SimpleNamespace(type="menu", name="main"), types.SimpleNamespace(type="menu", name="codxe_usermaps")])
+        self.assertTrue(has_own_usermaps_list(None, zone))
+        zone.assets.pop()
+        self.assertFalse(has_own_usermaps_list(None, zone))
+        with tempfile.TemporaryDirectory() as tmp:
+            release = os.path.join(tmp, "codxe-t4-fastfiles-v0.3.0")
+            os.makedirs(os.path.join(release, "_codxe", "t4", "zone"))
+            menu = os.path.join(release, "_codxe", "t4", "zone", "patch_ui.ff")
+            open(menu, "wb").close()
+            single = os.path.join(tmp, "patch_ui.ff")
+            open(single, "wb").close()
+            for path in (release, os.path.join(release, "_codxe", "t4"), os.path.join(release, "_codxe", "t4", "zone"), menu):
+                self.assertEqual(menu_zone_candidates([path]), [menu])
+            self.assertEqual(menu_zone_candidates([single, os.path.join(tmp, "missing")]), [single])
+
+    def test_map_json(self):
+        """map.json for CoD Xe's own custom maps list: version 1, the name (the first line of
+        description.txt) and the description (the next lines), in ASCII."""
+        import json
+
+        from t4ff.menu import map_json
+
+        self.assertEqual(json.loads(map_json("Mini-Labor\r\n")), {"version": 1, "name": "Mini-Labor", "description": ""})
+        data = json.loads(map_json('\nVerr\xfcckt "Remix"\nA map by Team 00.\nHave fun!\n'))
+        self.assertEqual(data, {"version": 1, "name": 'Verruckt "Remix"', "description": "A map by Team 00. Have fun!"})
+        self.assertTrue(map_json("Caf\xe9\n").isascii())
+
+    def test_preview_dds(self):
+        """preview.dds: a DXT1 DDS of 512x256 without mipmaps, as CoD Xe checks it (magic, header and
+        pixel format sizes, four CC, the size of the menu's picture), the picture cut to that shape."""
+        from t4ff import dxt
+        from t4ff.menu import PREVIEW_DDS_SIZE, preview_dds
+
+        rgba = np.zeros((720, 1280, 4), dtype=np.uint8)
+        rgba[:, :640] = (255, 0, 0, 255)  # red left half, blue right half
+        rgba[:, 640:] = (0, 0, 255, 255)
+        data = preview_dds(rgba)
+        width, height = PREVIEW_DDS_SIZE
+        self.assertEqual((width, height), (512, 256))
+        magic, size, _, h, w, linear, _, mips = struct.unpack_from("<4s7I", data, 0)
+        self.assertEqual((magic, size, h, w, linear, mips), (b"DDS ", 124, height, width, width * height // 2, 0))
+        pf_size, pf_flags, fourcc = struct.unpack_from("<2I4s", data, 76)
+        self.assertEqual((pf_size, pf_flags & 4, fourcc), (32, 4, b"DXT1"))
+        self.assertEqual(len(data), 128 + width * height // 2)
+        decoded = dxt.decode(data[128:], width, height, "DXT1")
+        self.assertTrue((decoded[:, :200, 0] > 200).all() and (decoded[:, 312:, 2] > 200).all())
 
 
 class LibraryTests(unittest.TestCase):
@@ -861,6 +1062,27 @@ class LibraryTests(unittest.TestCase):
 
 
 class TechsetTests(unittest.TestCase):
+    def test_closest_techset(self):
+        """A technique set no console fastfile has is replaced by the closest one of the same world
+        vertex format (with its vertex shaders), sampling no map the original does not: the game's
+        default has no shader for world formats above 0, and Kino Rezurrection froze drawing its
+        three layer blends with it."""
+        from t4ff.techsets import closest_techset, techset_features
+
+        self.assertEqual(techset_features("l_sm_r0c0s0_b1c1s1_b2c2s2"), (("l", "sm"), {"c0", "s0", "c1", "s1", "c2", "s2"}, {"r0", "b1", "b2"}))
+        candidates = {
+            "wc_l_sm_r0c0n0": (0, True, False), "wc_l_sm_r0c0n0s0": (0, True, False), "wc_l_sm_r0c0": (0, True, False),
+            "l_sm_b0c0s0_b1c1s1_b2c2s2": (3, True, False), "l_sm_r0c0n0s0_b1c1_b2c2": (3, True, False),
+            "l_sm_r0c0s0_b1c1s1": (1, True, False), "l_sm_r0c0s0_b1c1s1_b2c2_x": (3, False, False),
+            "wc_unlit": (0, True, False), "mc_l_sm_r0c0": (0, False, True),
+        }
+        self.assertEqual(closest_techset("wc_l_sm_r0c0d0n0", 0, candidates), "wc_l_sm_r0c0n0")  # no detail map, the normal map kept
+        self.assertEqual(closest_techset("l_sm_r0c0s0_b1c1s1_b2c2s2", 3, candidates), "l_sm_b0c0s0_b1c1s1_b2c2s2")
+        self.assertIsNone(closest_techset("l_sm_r0c0_b1c1_b2c2", 3, candidates))  # each one samples a map it has not
+        self.assertIsNone(closest_techset("l_sm_r0c0s0_b1c1s1", 3, candidates))  # not of its world format
+        self.assertEqual(closest_techset("wc_unlit_blend", 0, candidates), "wc_unlit")
+        self.assertEqual(closest_techset("mc_l_sm_r0c0d0", 0, candidates), "mc_l_sm_r0c0")  # a model set: the model shader
+
     # the sun lit pass of mc_l_sm_b0c0d0n0s0 in CoD Xenon's maps (type, dest, value), and the
     # counts of its sections: the dynamic shadow texture (code sampler 0x12) is a stable argument
     XENON_LIT_SUN = [
@@ -935,6 +1157,302 @@ class MemoryTests(unittest.TestCase):
         # not below the floor, and no further once there
         self.assertEqual(next_texture_budget(300 * MIB, 200 * MIB, 96 * MIB, 96 * MIB), MIN_TEXTURE_BUDGET_MIB * MIB)
         self.assertIsNone(next_texture_budget(250 * MIB, 200 * MIB, 24 * MIB, MIN_TEXTURE_BUDGET_MIB * MIB))
+        # streamed textures keep only a part in memory: a quarter of each byte cut is saved, so four
+        # times as much is cut (Kino Rezurrection, deep streamed: 1.7 MiB less saved 0.1 MiB)
+        self.assertEqual(next_texture_budget(280 * MIB, 278 * MIB, 500 * MIB, 4096 * MIB, 0.25), 488 * MIB)
+        self.assertEqual(next_texture_budget(280 * MIB, 278 * MIB, 500 * MIB, 4096 * MIB, 0.001), 452 * MIB)  # 1/16 at least
+
+    def test_texture_drops_by_what_they_save(self):
+        """The texture that saves the most loses a level first: a whole one before a streamed one of
+        the same size, which keeps a sixteenth in the fastfile; a streamed one whose next level would
+        stop it streaming (its top level under a slot: whole again) keeps it; 2D images go last."""
+        from t4ff.assets import choose_drops
+
+        KIB = 1024
+        whole = {"fxt_smoke": 1024 * KIB, "hud_icon": 1024 * KIB}  # each level a quarter
+        streamed = {"wall_c": 64 * KIB}  # what a deep streamed 1024x1024 DXT5 keeps
+
+        def size(n, drop):
+            if n == "edge_c":  # streamed now, whole (512 KiB) once a level smaller
+                return 32 * KIB if drop == 0 else 512 * KIB >> (2 * (drop - 1))
+            return (whole.get(n) or streamed[n]) >> (2 * drop)
+
+        names = ["fxt_smoke", "hud_icon", "wall_c", "edge_c"]
+        can = lambda n, drop: drop < 3
+        drops, total, fits = choose_drops(names, size, can, 2000 * KIB, last={"hud_icon"})
+        self.assertTrue(fits)
+        self.assertEqual(drops, {"fxt_smoke": 1, "hud_icon": 0, "wall_c": 0, "edge_c": 0})
+        self.assertEqual(total, (256 + 1024 + 64 + 32) * KIB)
+        # tighter: the others lose what they can first, then the 2D image; the edge stays streamed
+        drops, total, fits = choose_drops(names, size, can, 300 * KIB, last={"hud_icon"})
+        self.assertEqual(drops["edge_c"], 0)
+        self.assertGreater(drops["hud_icon"], 0)
+        self.assertEqual(drops["fxt_smoke"], 3)
+        self.assertTrue(fits)
+        # nothing left to drop: it says so
+        drops, total, fits = choose_drops(["edge_c"], size, can, 1 * KIB)
+        self.assertEqual((drops, total, fits), ({"edge_c": 0}, 32 * KIB, False))
+        # tiers: a deep streamed texture keeping an eighth (its first step) goes before any texture
+        # loses a top level, though a whole one would save more
+        tier = lambda n, k: 0 if n == "wall_c" and k == 0 else 1
+        drops, total, fits = choose_drops(["fxt_smoke", "wall_c"], size, can, (1024 + 16) * KIB, tier=tier)
+        self.assertEqual(drops, {"fxt_smoke": 0, "wall_c": 1})
+        drops, total, fits = choose_drops(["fxt_smoke", "wall_c"], size, can, (256 + 16) * KIB, tier=tier)
+        self.assertEqual(drops, {"fxt_smoke": 1, "wall_c": 1})
+
+    def test_main_memory(self):
+        """The game allocates every block of a map's zone from its main memory, the virtual one too
+        (about 286.7 MiB free): Kino Der Toten's 278.5 MiB loads; Kino Rezurrection's 293.6 MiB was
+        5494799 bytes short at its large block, as Kino's was 15300623 bytes with 193.1 MiB of
+        textures (the blocks are allocated in order, the shortfall counts those up to the failing one)."""
+        from t4ff.memory import FREE_MIB, MEMORY_TARGET_MIB, MIB, memory_bytes
+
+        kino = [0, int(0.1 * MIB), int(168.8 * MIB), 0, int(83.9 * MIB), int(24.2 * MIB), int(1.5 * MIB)]
+        self.assertAlmostEqual(memory_bytes(kino) / MIB, 278.5, places=1)
+        self.assertLess(memory_bytes(kino) / MIB, FREE_MIB)
+        rezurrection = [0, int(0.85 * MIB), int(144.73 * MIB), 0, int(126.27 * MIB), int(20.08 * MIB), int(1.62 * MIB)]
+        self.assertAlmostEqual(memory_bytes(rezurrection[:6] + [0]) / MIB - 5494799 / MIB, FREE_MIB, delta=0.1)
+        kino_over = [0, int(0.1 * MIB), int(193.1 * MIB), 0, int(83.9 * MIB), int(24.2 * MIB), 0]
+        self.assertAlmostEqual(memory_bytes(kino_over) / MIB - 15300623 / MIB, FREE_MIB, delta=0.1)
+        self.assertLess(MEMORY_TARGET_MIB, FREE_MIB)
+        # Xenia's patch for the game makes its memory pool 480 MB instead of 414: a console has 66 MiB
+        # less, and the default target is a console's
+        from t4ff.memory import FREE_CONSOLE_MIB
+
+        self.assertAlmostEqual(FREE_CONSOLE_MIB, 220.7, places=1)
+        self.assertLess(MEMORY_TARGET_MIB, FREE_CONSOLE_MIB)
+
+    def test_streamed_texture_split(self):
+        """A streamed image keeps its top level in a .hi file (the full texture's tiled base level)
+        and the rest as a texture of half its size, whose layout is the full texture's mip levels'
+        (the disc's 239 streamed images of pby_fly.ff split back to their .hi and fastfile data).
+        Small, single level or non power of two textures do not stream."""
+        import os
+
+        from t4ff import xenos
+        from t4ff.stream import split
+
+        fmt = xenos.FORMATS["DXT1"]
+        levels = [os.urandom(((max(1, 512 >> i) + 3) // 4) ** 2 * 8) for i in range(10)]
+        full = xenos.tile_mip_chain(levels, 512, 512, fmt)
+        base = xenos.mip_chain_layout(512, 512, fmt, 10)[0]
+        top, half, header = split(full, 512, 512, fmt, 10)
+        self.assertEqual(top, full[:base])
+        self.assertEqual(len(top), 128 * 1024)
+        self.assertEqual(half, xenos.tile_mip_chain(levels[1:], 256, 256, fmt))
+        self.assertEqual(header, xenos.texture_header_mips(256, 256, fmt, 9))
+        small = xenos.tile_mip_chain(levels[2:], 128, 128, fmt)
+        self.assertIsNone(split(small, 128, 128, fmt, 8))  # a top level under a streaming slot
+        self.assertIsNone(split(full, 512, 512, fmt, 1))  # no mip chain
+        # a wide texture: the streamer reads the half texture's padded rows doubled (Kino's
+        # see2_hzn_a: 262144 bytes for a 1024x128 level of 131072), zeros after the level
+        dxn = xenos.FORMATS["DXN"]
+        wide = [os.urandom(((max(1, 1024 >> i) + 3) // 4) * ((max(1, 128 >> i) + 3) // 4) * 16) for i in range(8)]
+        tiled = xenos.tile_mip_chain(wide, 1024, 128, dxn)
+        top, half, _ = split(tiled, 1024, 128, dxn, 8)
+        self.assertEqual(len(top), 262144)
+        self.assertEqual(top[:131072], tiled[:131072])
+        self.assertEqual(top[131072:], bytes(131072))
+
+    def test_images_pak(self):
+        """A map's images.pak: entries 4 KiB aligned (the game reads unbuffered), the index after
+        them, names lower case, a deep entry's flag and level 1 offset; read back as written."""
+        import os
+        import struct
+        import tempfile
+
+        from t4ff.stream import PAK_ALIGN, PAK_DEEP, PakWriter, read_pak
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "images.pak")
+            pak = PakWriter(path)
+            pak.add("Wall_C", b"\x01" * 5000)
+            pak.add("~floor_s-rgb&floor_g~1a2b3c4d", b"\x02" * PAK_ALIGN, PAK_DEEP, 0x20000, 0x8000)
+            self.assertEqual(pak.close(), 2)
+            self.assertFalse(os.path.exists(path + ".part"))
+            entries = read_pak(path)
+            self.assertEqual(sorted(entries), ["wall_c", "~floor_s-rgb&floor_g~1a2b3c4d"])
+            self.assertTrue(entries["wall_c"] == (b"\x01" * 5000, 0, 0, 0))
+            self.assertTrue(entries["~floor_s-rgb&floor_g~1a2b3c4d"] == (b"\x02" * PAK_ALIGN, PAK_DEEP, 0x20000, 0x8000))
+            data = open(path, "rb").read()
+            magic, version, count, index_offset, index_size = struct.unpack_from(">8sIIII", data, 0)
+            self.assertEqual((magic, version, count), (b"T4FFPAK1", 2, 2))
+            self.assertEqual(index_offset + index_size, len(data))
+            for i in range(count):
+                offset = struct.unpack_from(">I", data, index_offset + 24 * i + 8)[0]
+                self.assertEqual(offset % PAK_ALIGN, 0)
+            empty = PakWriter(os.path.join(folder, "empty.pak"))
+            self.assertEqual(empty.close(), 0)
+            self.assertFalse(os.path.exists(os.path.join(folder, "empty.pak")))
+
+    def test_deep_split(self):
+        """Two levels streamed at once: the pack holds the whole texture (level 1 at the base
+        level's size), the fastfile the quarter size texture, laid out as the full one's levels
+        from 2 on. A texture over the streamer's largest block streams one level."""
+        import os
+
+        from t4ff import xenos
+        from t4ff.stream import deep_split
+
+        fmt = xenos.FORMATS["DXT1"]
+        levels = [os.urandom(((max(1, 1024 >> i) + 3) // 4) ** 2 * 8) for i in range(11)]
+        full = xenos.tile_mip_chain(levels, 1024, 1024, fmt)
+        base, _, total = xenos.mip_chain_layout(1024, 1024, fmt, 11)
+        data, mip_offset, level2, quarter, header = deep_split(full, 1024, 1024, fmt, 11)
+        self.assertTrue((data, mip_offset) == (full[:total], base))
+        # the half size texture (from level 1 on) has its own mips at its base level's size
+        self.assertEqual(level2, xenos.mip_chain_layout(512, 512, fmt, 10)[0])
+        self.assertTrue(data[base + level2:] == xenos.tile_mip_chain(levels[1:], 512, 512, fmt)[level2:])
+        self.assertTrue(quarter == xenos.tile_mip_chain(levels[2:], 256, 256, fmt))
+        self.assertEqual(header, xenos.texture_header_mips(256, 256, fmt, 9))
+        dxt5 = xenos.FORMATS["DXT5"]
+        big = [bytes(((max(1, 2048 >> i) + 3) // 4) ** 2 * 16) for i in range(12)]
+        self.assertIsNone(deep_split(xenos.tile_mip_chain(big, 2048, 2048, dxt5), 2048, 2048, dxt5, 12))
+        # three levels: the same pack entry, the fastfile keeping the eighth size texture (the levels
+        # from 3 on, a texture of their own: CoD Xe takes the mips of what streams in from the pack)
+        data8, mip8, level2_8, eighth, header8 = deep_split(full, 1024, 1024, fmt, 11, eighth=True)
+        self.assertTrue((data8, mip8, level2_8) == (data, mip_offset, level2))
+        self.assertTrue(eighth == xenos.tile_mip_chain(levels[3:], 128, 128, fmt))
+        self.assertEqual(header8, xenos.texture_header_mips(128, 128, fmt, 8))
+        # a 512x512 one too, though its eighth's rows are padded as its quarter's (128 texels: CoD Xe
+        # takes the pitch from the width)
+        small = [os.urandom(((max(1, 512 >> i) + 3) // 4) ** 2 * 8) for i in range(8)]
+        _, _, _, eighth, header8 = deep_split(xenos.tile_mip_chain(small, 512, 512, fmt), 512, 512, fmt, 8, eighth=True)
+        self.assertTrue(eighth == xenos.tile_mip_chain(small[3:], 64, 64, fmt))
+        self.assertEqual(xenos.pitch_units(64, fmt) << 3, 2 * xenos.pitch_units(512, fmt))  # shifted: twice the pitch
+        # not when the eighth would be 16 texels a side or less (no levels below it)
+        wide = [os.urandom((1024 >> i) // 4 * (128 >> i) // 4 * 16) for i in range(6)]  # 1024x128 to 32x4
+        tiled = xenos.tile_mip_chain(wide, 1024, 128, dxt5)
+        self.assertIsNotNone(deep_split(tiled, 1024, 128, dxt5, 6))
+        self.assertIsNone(deep_split(tiled, 1024, 128, dxt5, 6, eighth=True))  # its eighth: 128x16
+
+    def test_images_pak_eighth(self):
+        """A pack with entries whose fastfile copy is an eighth is version 3: CoD Xe builds that know
+        only quarters refuse it (they would apply those two levels too small); others stay version 2."""
+        import os
+        import struct
+        import tempfile
+
+        from t4ff.stream import PAK_DEEP, PAK_EIGHTH, PakWriter, read_pak
+
+        with tempfile.TemporaryDirectory() as folder:
+            for flags, version in ((PAK_DEEP, 2), (PAK_DEEP | PAK_EIGHTH, 3)):
+                path = os.path.join(folder, f"{version}.pak")
+                pak = PakWriter(path)
+                pak.add("wall_c", b"\x01" * 8192, flags, 4096, 0)
+                pak.close()
+                with open(path, "rb") as f:
+                    self.assertEqual(struct.unpack_from(">I", f.read(12), 8)[0], version)
+                self.assertEqual(read_pak(path)["wall_c"][1], flags)
+
+    def test_single_level_textures_get_mips(self):
+        """A texture saved without mips (the IWI's no-mipmaps flag; Kino Rezurrection has 80) cannot
+        stream: it gets a box filtered mip chain, its top level kept as it is, and then splits as the
+        others. Down to the last level of whole blocks, as converted textures keep."""
+        import os
+
+        import numpy as np
+
+        from t4ff import dxt, xenos
+        from t4ff.stream import split, with_mips
+
+        for name, w, h, count in (("DXT1", 512, 512, 8), ("DXT3", 256, 512, 7), ("DXN", 256, 512, 7), ("A8R8G8B8", 256, 256, 9), ("L8", 512, 256, 10)):
+            fmt = xenos.FORMATS[name]
+            top = os.urandom((w // fmt.block) * (h // fmt.block) * fmt.bytes_per_block)
+            pixels, levels = with_mips(xenos.tile_level(top, w, h, 0, fmt), w, h, fmt)
+            self.assertEqual(levels, count, name)
+            self.assertTrue(xenos.untile_mip_chain(pixels, w, h, fmt, levels)[0] == top, name)
+            self.assertIsNotNone(split(pixels, w, h, fmt, levels), name)
+        # each level is the one above box filtered: a flat colour stays the same colour
+        fmt = xenos.FORMATS["DXT5"]
+        flat = np.zeros((256, 512, 4), dtype=np.uint8)
+        flat[...] = (200, 100, 50, 128)
+        pixels, levels = with_mips(xenos.tile_level(dxt.encode(flat, "DXT5"), 512, 256, 0, fmt), 512, 256, fmt)
+        level3 = dxt.decode(xenos.untile_mip_chain(pixels, 512, 256, fmt, levels)[3], 64, 32, "DXT5")
+        self.assertTrue((np.abs(level3.astype(int) - (200, 100, 50, 128)) <= 4).all())
+        self.assertIsNone(with_mips(xenos.tile_level(bytes(256), 16, 16, 0, fmt), 16, 16, fmt))  # too small for mips
+
+    def test_mip_tail_left_out(self):
+        """Without the mip tail a texture stops at its last level over 16 texels a side: the GPU
+        packs the smaller ones into a tile of their own (a 512x512 DXT5's 16 KiB, as its 128x128
+        level). The planned size is the built one's, and a texture without it still streams."""
+        import os
+
+        from t4ff import images, xenos
+        from t4ff.stream import deep_split, split
+
+        levels = [os.urandom(((512 >> i) // 4) ** 2 * 16) for i in range(8)]  # 512 to 4
+        image = images.ImageData("wall_c", "DXT5", 512, 512, levels)
+        full = images.build_console_texture(image)
+        short = images.build_console_texture(image, mip_tail=False)
+        self.assertEqual((full.levels, short.levels), (8, 5))  # 512 to 4, 512 to 32
+        self.assertEqual(len(full.pixels) - len(short.pixels), 16384)
+        self.assertEqual(images.console_texture_size(image, mip_tail=False), len(short.pixels))
+        self.assertEqual(xenos.untile_mip_chain(short.pixels, 512, 512, short.format, 5)[4], levels[4])
+        self.assertIsNotNone(split(short.pixels, 512, 512, short.format, 5))
+        self.assertIsNotNone(deep_split(short.pixels, 512, 512, short.format, 5))
+        # a texture of 16 texels or less a side keeps its levels: they are all the tail
+        tiny = images.ImageData("dot", "DXT1", 16, 16, [bytes(128), bytes(32), bytes(8)])
+        self.assertEqual(images.build_console_texture(tiny, mip_tail=False).levels, 1)
+
+    def test_dxt3_encoding(self):
+        """DXT3: 4 bits of alpha a texel (decoded back to 17 steps), the colour block as DXT5's."""
+        import numpy as np
+
+        from t4ff import dxt
+
+        rgba = np.zeros((8, 8, 4), dtype=np.uint8)
+        rgba[..., 0] = 255
+        rgba[..., 3] = (np.arange(64).reshape(8, 8) * 4).astype(np.uint8)
+        back = dxt.decode(dxt.encode(rgba, "DXT3"), 8, 8, "DXT3")
+        self.assertTrue((np.abs(back[..., 3].astype(int) - rgba[..., 3]) <= 8).all())
+        self.assertTrue((back[..., 0] >= 248).all())
+
+    def test_streaming_boxes(self):
+        """A triangle needs the top level within 1931.2 / its texels per unit of it (the disc's
+        world surfaces: 482.8 for a wall of 512 texels over 128 units); one of no texture area grows
+        by the default, one of no area does not count."""
+        import numpy as np
+
+        from t4ff.stream import DEFAULT_STREAM_GROWTH, grown_box
+
+        p = np.array([[0.0, 0, 0], [0, 0, 0]])
+        q = np.array([[128.0, 0, 0], [0, 0, 0]])
+        r = np.array([[0.0, 128, 0], [0, 0, 0]])
+        uv0, uv1, uv2 = np.array([[0.0, 0], [0, 0]]), np.array([[1.0, 0], [0, 0]]), np.array([[0.0, 1], [0, 0]])
+        box = grown_box(p, q, r, uv0, uv1, uv2, 512 * 512)
+        self.assertEqual([round(v, 1) for v in box], [-482.8, -482.8, -482.8, 610.8, 610.8, 482.8])
+        flat = grown_box(p[:1], q[:1], r[:1], uv0[:1], uv0[:1], uv0[:1], 512 * 512)
+        self.assertEqual([round(v, 1) for v in flat], [-DEFAULT_STREAM_GROWTH] * 3 + [128 + DEFAULT_STREAM_GROWTH] * 2 + [DEFAULT_STREAM_GROWTH])
+        self.assertIsNone(grown_box(p[1:], q[1:], r[1:], uv0[1:], uv1[1:], uv2[1:], 512 * 512))
+        # a console's memory: half the growth (CONSOLE_STREAM_GROWTH)
+        half = grown_box(p, q, r, uv0, uv1, uv2, 512 * 512, 0.5)
+        self.assertEqual([round(v, 1) for v in half], [-241.4, -241.4, -241.4, 369.4, 369.4, 241.4])
+
+    def test_streaming_tree(self):
+        """The world's streaming tree: node 0 the root, children consecutive, each node's references
+        those of its subtree, consecutive (the streamer reads a node's only when it has no children),
+        the boxes holding them."""
+        import struct
+
+        from t4ff.stream import LEAF_REFS, stream_tree
+
+        items = [(i if i % 3 else ~i, (i * 10.0, 0, 0, i * 10.0 + 5, 5, 5)) for i in range(100)]
+        data, refs = stream_tree(items)
+        nodes = [struct.unpack_from(">HHHH6f", data, i * 32) for i in range(len(data) // 32)]
+        self.assertEqual(sorted(refs), sorted(ref for ref, _ in items))
+        self.assertEqual(nodes[0][:2], (0, 100))
+        boxes = dict(items)
+        for first, count, child, children, *box in nodes:
+            if children:
+                kids = nodes[child: child + children]
+                self.assertEqual(sum(k[1] for k in kids), count)
+                self.assertEqual(kids[0][0], first)
+            else:
+                self.assertLessEqual(count, LEAF_REFS)
+                for ref in refs[first: first + count]:
+                    self.assertTrue(all(box[k] <= boxes[ref][k] and boxes[ref][k + 3] <= box[k + 3] for k in range(3)))
+        self.assertEqual(stream_tree(items[:5])[0], struct.pack(">HHHH6f", 0, 5, 0, 0, 0, 0, 0, 45, 5, 5))
 
     def test_block_sizes_of_a_written_zone(self):
         import struct
@@ -1101,6 +1619,242 @@ class MenuTests(unittest.TestCase):
         self.assertEqual([a.name for a in zone.assets], ["ui/shared.menu", "ui/scriptmenus/music.menu", "ui/briefing.menu", "maps/zombie.gsc"])
         self.assertEqual(sorted(assets_node.relocs), [4, 12, 20, 28])
         self.assertEqual(assets_node.children, [lists["ui/shared.menu"], lists["ui/scriptmenus/music.menu"], lists["ui/briefing.menu"], rawfile])
+
+    def test_game_menu_lists_left_out(self):
+        """A mod's list of the name of one of the game's own (UGX's ui/ingame.txt, mostly PC menus: its
+        pause menu opened PC options the console has not) is left out, unless the scripts open one of
+        its menus; other lists keep the rule of most menus being the console's."""
+        from unittest import mock
+
+        import t4ff.scripts  # noqa: F401
+        from t4ff.layout import TypeRef
+        from t4ff.merge import drop_frontend_menus
+        from t4ff.platforms import x360
+        from t4ff.zone import BLOCK_VIRTUAL, Node, Ptr, Zone, ZoneAsset
+
+        names = {}
+
+        def node(type_name, *children, name=None):
+            n = Node(TypeRef("record", type_name), 1, BLOCK_VIRTUAL)
+            n.children = list(children)
+            names[id(n)] = name
+            return n
+
+        def zone_of(lists):
+            assets_node = Node(TypeRef("scalar", "uint", 4, 4), 0, BLOCK_VIRTUAL)
+            assets = []
+            for name, target in lists.items():
+                ptr = Ptr("follow", target)
+                ptr.owner, ptr.offset = assets_node, 8 * len(assets) + 4
+                assets_node.relocs[ptr.offset] = ptr
+                assets_node.children.append(target)
+                assets.append(ZoneAsset("menulist", ptr, name))
+            assets_node.data = bytearray(8 * len(assets))
+            assets_node.count = 2 * len(assets)
+            zone = Zone(x360().name, [], assets, [], 0, 0, None, assets_node)
+            zone.extra_root = node("root", assets_node)
+            return zone
+
+        def run(script):
+            lists = {"ui/ingame.txt": node("MenuList", node("menuDef_t", name="pausedmenu"), node("menuDef_t", name="options_new_pc"),
+                                           node("menuDef_t", name="popup_dw_retrieve_accounts")),
+                     "ui/ugx_extras.menu": node("MenuList", node("menuDef_t", name="ugx_extra"))}
+            zone = zone_of(lists)
+            with mock.patch("t4ff.zone.asset_name", lambda p, n: names.get(id(n))), \
+                 mock.patch("t4ff.scripts._rawfiles", lambda p, z: [("maps/zombie.gsc", script)]), \
+                 mock.patch("t4ff.scripts.rawfile_text", lambda raw: raw):
+                return drop_frontend_menus(x360(), zone, lambda m: m == "pausedmenu", log=lambda msg: None,
+                                           is_stock_list=lambda name: name == "ui/ingame.txt")
+
+        self.assertEqual(run(b""), ["ui/ingame.txt"])
+        self.assertEqual(run(b'self openMenu("options_new_pc");'), [])  # the scripts use it: it stays
+
+    def test_game_menu_list_kept_is_renamed(self):
+        """A mod's copy of a game's list that a kept list points into (UGX's vote menus share strings
+        with its ui/ingame.txt) stays under a name of its own, so the game loads the console's list;
+        not when its name string is shared too."""
+        from unittest import mock
+
+        import t4ff.scripts  # noqa: F401
+        from t4ff.layout import TypeRef
+        from t4ff.merge import drop_frontend_menus
+        from t4ff.platforms import x360
+        from t4ff.zone import BLOCK_VIRTUAL, Node, Ptr, Zone, ZoneAsset
+
+        names = {}
+
+        def node(type_name, *children, name=None):
+            n = Node(TypeRef("record", type_name), 1, BLOCK_VIRTUAL)
+            n.children = list(children)
+            names[id(n)] = name
+            return n
+
+        def string(text):
+            s = Node(TypeRef("scalar", "char", 1, 1), len(text) + 1, BLOCK_VIRTUAL)
+            s.string = True
+            s.data = bytearray(text.encode() + b"\0")
+            return s
+
+        def point(owner, offset, kind, target):
+            ptr = Ptr(kind, target)
+            ptr.owner, ptr.offset = owner, offset
+            owner.relocs[offset] = ptr
+
+        def run(share_name):
+            label, list_name = string("@MENU_RESUME"), string("ui/ingame.txt")
+            paused = node("menuDef_t", label, name="pausedmenu")
+            point(paused, 16, "follow", label)
+            ingame = node("MenuList", list_name, paused, node("menuDef_t", name="options_new_pc"))
+            point(ingame, 0, "follow", list_name)
+            vote = node("menuDef_t", name="ugxm_vote_host")
+            point(vote, 16, "ref", list_name if share_name else label)
+            lists = {"ui/ingame.txt": ingame, "ui/scriptmenus/ugxm_vote_host.menu": node("MenuList", vote)}
+            assets_node = Node(TypeRef("scalar", "uint", 4, 4), 0, BLOCK_VIRTUAL)
+            assets = []
+            for name, target in lists.items():
+                point(assets_node, 8 * len(assets) + 4, "follow", target)
+                assets_node.children.append(target)
+                assets.append(ZoneAsset("menulist", assets_node.relocs[8 * len(assets) + 4], name))
+            assets_node.data = bytearray(8 * len(assets))
+            assets_node.count = 2 * len(assets)
+            zone = Zone(x360().name, [], assets, [], 0, 0, None, assets_node)
+            zone.extra_root = node("root", assets_node)
+            with mock.patch("t4ff.zone.asset_name", lambda p, n: names.get(id(n))), \
+                 mock.patch("t4ff.scripts._rawfiles", lambda p, z: [("maps/zombie.gsc", b'precacheMenu("ugxm_vote_host");')]), \
+                 mock.patch("t4ff.scripts.rawfile_text", lambda raw: raw):
+                dropped = drop_frontend_menus(x360(), zone, lambda m: m == "pausedmenu", log=lambda msg: None,
+                                              is_stock_list=lambda name: name == "ui/ingame.txt")
+            return dropped, [a.name for a in zone.assets], bytes(list_name.data)
+
+        self.assertEqual(run(False), ([], ["ui/ingame_mod.txt", "ui/scriptmenus/ugxm_vote_host.menu"], b"ui/ingame_mod.txt\0"))
+        self.assertEqual(run(True), ([], ["ui/ingame.txt", "ui/scriptmenus/ugxm_vote_host.menu"], b"ui/ingame.txt\0"))
+
+    def test_pause_menu_bound_to_the_map(self):
+        """A mod's pause menu that opens menus the game's in-game list has not (UGX's Challenges) stays
+        the map's own: its PC options menu becomes the console's, and the menus it opens join a menu
+        list the scripts precache (pointing to the zone's copies). Without such a list, or when it
+        opens nothing more than the console's, it is left to the renaming."""
+        import struct
+        from unittest import mock
+
+        import t4ff.scripts  # noqa: F401
+        from t4ff.layout import TypeRef
+        from t4ff.merge import bind_pause_menu
+        from t4ff.platforms import x360
+        from t4ff.zone import BLOCK_VIRTUAL, Node, Ptr, Zone, ZoneAsset
+
+        def string(text):
+            s = Node(TypeRef("scalar", "char", 1, 1), len(text) + 1, BLOCK_VIRTUAL)
+            s.string = True
+            s.data = bytearray(text.encode() + b"\0")
+            return s
+
+        def follow(owner, offset, target):
+            ptr = Ptr("follow", target)
+            ptr.owner, ptr.offset = owner, offset
+            owner.relocs[offset] = ptr
+            return ptr
+
+        def menu(name, *texts):
+            m = Node(TypeRef("record", "menuDef_t"), 1, BLOCK_VIRTUAL)
+            m.children = [string(name)] + [string(t) for t in texts]
+            follow(m, 0, m.children[0])
+            return m
+
+        def menu_list(*menus):
+            array = Node(TypeRef("scalar", "uint", 4, 4), len(menus), BLOCK_VIRTUAL)
+            array.data = bytearray(4 * len(menus))
+            array.segments = [(array.type, array.count, len(array.data), False)]
+            slots = [follow(array, 4 * i, m) for i, m in enumerate(menus)]
+            array.children = list(menus)
+            lst = Node(TypeRef("record", "MenuList"), 1, BLOCK_VIRTUAL)
+            lst.data = bytearray(struct.pack(">iiI", 0, len(menus), 0))
+            follow(lst, 8, array)
+            lst.children = [array]
+            return lst, array, slots
+
+        def run(precached, pause_texts):
+            pause = menu("pausedmenu", *pause_texts)
+            challenges = menu("menu_challenges", '"open" "popup_tier" ;', "Challenges (Press ESC to close)")
+            tier = menu("popup_tier")
+            ingame, _, slots = menu_list(pause, challenges, tier, menu("options_new_pc"))
+            vote, vote_array, _ = menu_list(menu("ugxm_vote_host"))
+            assets = [ZoneAsset("menulist", Ptr("follow", ingame), "ui/ingame.txt"),
+                      ZoneAsset("menulist", Ptr("follow", vote), "ui/scriptmenus/ugxm_vote_host.menu")]
+            zone = Zone(x360().name, [], assets, [], 0, 0, None, None)
+            script = b'precacheMenu("ugxm_vote_host");' if precached else b""
+            with mock.patch("t4ff.scripts._rawfiles", lambda p, z: [("maps/ugxm_init.gsc", script)]), \
+                 mock.patch("t4ff.scripts.rawfile_text", lambda raw: raw):
+                kept, extras = bind_pause_menu(x360(), zone, ["pausedmenu", "ingameoptions", "popup_restart_warning"], log=lambda msg: None)
+            return kept, extras, pause, challenges, tier, vote, vote_array, slots
+
+        ugx = ['"close" "pausedmenu" ; "close" "self" ; "open" "options_new_pc" ; ', '"close" "pausedmenu" ; "open" "menu_challenges" ; ',
+               '"close" "pausedmenu" ; "open" "popup_restart_warning" ; ']
+        kept, extras, pause, challenges, tier, vote, vote_array, slots = run(True, ugx)
+        self.assertEqual(extras, ["menu_challenges", "popup_tier"])
+        self.assertEqual(kept, {id(pause), id(challenges), id(tier)})
+        self.assertEqual(bytes(pause.children[1].data).rstrip(b"\0"), b'"close" "pausedmenu" ; "close" "self" ; "open" "ingameoptions" ; ')
+        self.assertIn(b"Press B", bytes(challenges.children[2].data))
+        self.assertEqual(struct.unpack_from(">i", vote.data, 4)[0], 3)
+        self.assertEqual([(r.kind, r.slot) for _, r in sorted(vote_array.relocs.items())][1:], [("alias", slots[1]), ("alias", slots[2])])
+
+        kept, extras, *_ = run(False, ugx)  # no precached list to hold them: the console's stays
+        self.assertEqual((kept, extras), (set(), []))
+        kept, extras, *_ = run(True, ugx[:1] + ugx[2:])  # nothing more than the console's
+        self.assertEqual((kept, extras), (set(), []))
+
+    def test_game_menus_renamed(self):
+        """The mod's menus of the console's names are renamed <name>_mod (the console opens menus by
+        name, and UGX's PC pausedmenu took the place of its own); the scripts' menus, references and
+        menus whose name string something else uses keep theirs. A string only the renamed menus use
+        (an expression of the menu itself) is renamed with them."""
+        from t4ff.layout import TypeRef
+        from t4ff.merge import rename_game_menus
+        from t4ff.platforms import x360
+        from t4ff.zone import BLOCK_VIRTUAL, Node, Ptr, Zone, ZoneAsset
+
+        def point(owner, offset, kind, target):
+            ptr = Ptr(kind, target)
+            ptr.owner, ptr.offset = owner, offset
+            owner.relocs[offset] = ptr
+
+        def menu(name, *children):
+            s = Node(TypeRef("scalar", "char", 1, 1), len(name) + 1, BLOCK_VIRTUAL)
+            s.string = True
+            s.data = bytearray(name.encode() + b"\0")
+            m = Node(TypeRef("record", "menuDef_t"), 1, BLOCK_VIRTUAL)
+            m.children = [s, *children]
+            point(m, 0, "follow", s)
+            return m, s
+
+        paused, paused_name = menu("pausedmenu")
+        expression = Node(TypeRef("record", "expressionEntry"), 1, BLOCK_VIRTUAL)
+        compass, compass_name = menu("compass", expression)
+        point(expression, 8, "ref", compass_name)  # its own expression names it
+        dpad, dpad_name = menu("dpad")
+        vote, vote_name = menu("ugxm_vote_host")
+        point(vote, 16, "ref", dpad_name)  # a kept menu uses the string too
+        briefing, briefing_name = menu("briefing")
+        reference, reference_name = menu(",overheadmap")
+        menus = [paused, compass, dpad, vote, briefing, reference]
+        menu_list = Node(TypeRef("record", "MenuList"), 1, BLOCK_VIRTUAL)
+        menu_list.children = menus
+        root = Node(TypeRef("record", "root"), 1, BLOCK_VIRTUAL)
+        root.children = [menu_list]
+        zone = Zone(x360().name, [], [ZoneAsset("menulist", Ptr("follow", menu_list), "ui/ingame.txt")], [], 0, 0, None, None)
+        zone.extra_root = root
+        stock = {"pausedmenu", "compass", "dpad", "briefing", "overheadmap", ",overheadmap"}
+        logs = []
+        renamed = rename_game_menus(zone, lambda name: name.lower() in stock, {"briefing"}, logs.append)
+
+        self.assertEqual(sorted(renamed), ["compass", "pausedmenu"])
+        self.assertEqual(bytes(paused_name.data), b"pausedmenu_mod\0")
+        self.assertEqual(bytes(compass_name.data), b"compass_mod\0")
+        self.assertEqual(bytes(dpad_name.data), b"dpad\0")
+        self.assertEqual(bytes(briefing_name.data), b"briefing\0")
+        self.assertEqual(bytes(reference_name.data), b",overheadmap\0")
+        self.assertEqual(bytes(vote_name.data), b"ugxm_vote_host\0")
+        self.assertTrue(any("dpad" in line and "warning" in line for line in logs))
 
     def test_script_menu_on_a_controller(self):
         """A PC script menu (a music box) answers the number keys and Escape: their actions also go
@@ -1333,22 +2087,127 @@ class MenuTests(unittest.TestCase):
             return out
 
         def target(item, key):
-            return moves(item)[key].split('"')[3]
+            return re.findall(r'"setfocus" "([^"]+)"', moves(item)[key])  # the last one shown keeps the focus
 
         up, down, left, right = 20, 21, 22, 23
         first = items[1]
-        self.assertEqual((target(first, up), target(first, down), target(first, left), target(first, right)),
-                         ("t4ff_focus_0", "t4ff_focus_3", "t4ff_focus_1", "t4ff_focus_2"))
-        self.assertEqual(target(items[4], up), "t4ff_focus_2")
-        self.assertEqual(target(items[0], down), "t4ff_focus_2")  # ACCEPT: to the button below it
+        self.assertEqual((target(first, up)[-1], target(first, down)[-1], target(first, left)[-1], target(first, right)[-1]),
+                         ("t4ff_focus_0", "t4ff_focus_3", "t4ff_focus_2", "t4ff_focus_2"))  # left wraps around the row
+        self.assertEqual(target(first, down), ["t4ff_focus_0", "t4ff_focus_4", "t4ff_focus_3"])  # the nearest last, around after
+        self.assertEqual(target(items[4], up)[-1], "t4ff_focus_2")
+        self.assertEqual(target(items[0], down)[-1], "t4ff_focus_2")  # ACCEPT: to the button below it
         self.assertEqual(sorted(moves(first)), [20, 21, 22, 23, 28, 29, 30, 31])  # the stick too
-        # the choices follow the focus, A confirms
-        self.assertEqual(text(first, focus_off), choice.format(1))
+        # the choices follow the focus, A confirms; the focused button's text takes a colour of its own
+        self.assertEqual(text(first, focus_off), choice.format(1) + '"setitemcolor" "t4ff_focus_1" "forecolor" 1 0.85 0.3 0 ; ')
+        self.assertEqual(text(first, find_field(irec, "leaveFocus").offset), '"setitemcolor" "t4ff_focus_1" "forecolor" 0 0 0 0 ; ')
         self.assertEqual(text(first, action_off), accept)
         self.assertEqual(text(items[0], action_off), accept)
-        self.assertIsNone(text(items[0], focus_off))
+        self.assertEqual(text(items[0], focus_off), '"setitemcolor" "t4ff_focus_0" "forecolor" 1 0.85 0.3 0 ; ')
+        # the menu opens on its top-most button
+        self.assertTrue(text(loadout, find_field(mrec, "onOpen").offset).endswith('"setfocus" "t4ff_focus_0" ; '))
         # a menu the scripts do not name
         self.assertIsNone(other_items[0].relocs.get(key_off))
+
+    def test_menu_stacked_buttons_on_a_controller(self):
+        """UGX's vote menu: several buttons in one place, one shown by a condition ("Gamemode: ..." per
+        mode), sharing their focus script (the PC linker shares strings), and "Exit to Main Menu" first
+        and at the bottom. The D-pad tries every button that way, nearest last; A on a stacked button
+        gives the focus to the one now shown there; the menu opens on its top button; the focus scripts
+        get strings of their own (the shared one is left to no one); a string something else refers to
+        is not replaced."""
+        import struct
+
+        from t4ff.commands import find_field
+        from t4ff.layout import TypeRef
+        from t4ff.menu import controller_navigation
+        from t4ff.platforms import x360
+        from t4ff.zone import BLOCK_VIRTUAL, Node, Ptr, Zone
+
+        p = x360()
+        mrec, irec, wrec, krec = p.record("menuDef_t"), p.record("itemDef_s"), p.record("windowDef_t"), p.record("ItemKeyHandler")
+        window = find_field(irec, "window").offset
+        name_off, rect_off = window + find_field(wrec, "name").offset, window + find_field(wrec, "rect").offset
+        action_off, focus_off, leave_off, key_off = (find_field(irec, f).offset for f in ("action", "onFocus", "leaveFocus", "onKey"))
+
+        def record(name):
+            node = Node(TypeRef("record", name, p.record(name).size), 1, BLOCK_VIRTUAL)
+            node.data = bytearray(p.record(name).size)
+            return node
+
+        def string(value):
+            node = Node(TypeRef("scalar", "char", 1, 1), len(value) + 1, BLOCK_VIRTUAL)
+            node.string = True
+            node.data = bytearray(value.encode("latin-1") + b"\0")
+            return node
+
+        def point(owner, off, target, kind="follow"):
+            owner.relocs[off] = Ptr(kind, target)
+            if kind == "follow":
+                owner.children.append(target)
+            struct.pack_into(">I", owner.data, off, 0xFFFFFFFF)
+
+        def text(node, off):
+            ptr = node.relocs.get(off)
+            return bytes(ptr.target().data).rstrip(b"\0").decode() if ptr is not None and ptr.kind != "null" else None
+
+        m = record("menuDef_t")
+        point(m, find_field(mrec, "window").offset + find_field(wrec, "name").offset, string("ugxm_vote_host"))
+        struct.pack_into(">4f", m.data, find_field(mrec, "focusColor").offset, 1, 1, 1, 1)
+        specs = [(-7, 450, '"exec" "disconnect" ; '), (99, 170, '"scriptMenuResponse" "gg" ; '), (99, 170, '"scriptMenuResponse" "cl" ; '),
+                 (99, 320, '"scriptMenuResponse" "start" ; ')]
+        shared_focus = string('"setLocalVarInt" "ui_highlight" 1 ; ')
+        elsewhere = record("itemDef_s")  # an item of another menu refers to the start button's focus script
+        items = Node(TypeRef("pointer", "itemDef_s", 4, 4), len(specs), BLOCK_VIRTUAL)
+        items.data = bytearray(4 * len(specs))
+        for i, (x, y, action) in enumerate(specs):
+            item = record("itemDef_s")
+            struct.pack_into(">i", item.data, find_field(irec, "type").offset, 1)
+            struct.pack_into(">4f", item.data, rect_off, x, y, 240, 20)
+            struct.pack_into(">4f", item.data, window + find_field(wrec, "foreColor").offset, 1, 0, 0, 1)
+            point(item, action_off, string(action))
+            if i in (1, 2):
+                point(item, focus_off, shared_focus, "follow" if i == 1 else "ref")
+            if i == 3:
+                point(item, focus_off, string('"setLocalVarInt" "ui_highlight" 6 ; '))
+                point(elsewhere, focus_off, item.relocs[focus_off].node, "ref")
+            point(items, 4 * i, item)
+        point(m, find_field(mrec, "items").offset, items)
+        struct.pack_into(">i", m.data, find_field(mrec, "itemCount").offset, len(specs))
+        buttons = [items.relocs[4 * i].target() for i in range(len(specs))]
+        root = Node(TypeRef("record", "MenuList"), 1, BLOCK_VIRTUAL)
+        root.children = [m, elsewhere]
+        zone = Zone(p.name, [], [], [], 0, 0, None, None)
+        zone.extra_root = root
+        self.assertEqual(controller_navigation(p, zone, log=lambda msg: None), {"ugxm_vote_host": 4})
+
+        def moves(item, key):
+            ptr = item.relocs.get(key_off)
+            while ptr is not None and ptr.kind != "null":
+                h = ptr.target()
+                if struct.unpack_from(">i", h.data, 0)[0] == key:
+                    return re.findall(r'"setfocus" "([^"]+)"', text(h, find_field(krec, "action").offset))
+                ptr = h.relocs.get(find_field(krec, "next").offset)
+
+        down = 21
+        self.assertEqual(moves(buttons[1], down), ["t4ff_focus_3"])  # start game; exit is off the screen, no target
+        self.assertEqual(moves(buttons[3], 20), ["t4ff_focus_2", "t4ff_focus_1"])  # up: both gamemode buttons
+        self.assertEqual(moves(buttons[3], down), ["t4ff_focus_2", "t4ff_focus_1"])  # the bottom one wraps around to the top
+        # A on a gamemode button: the focus goes to the one shown there after it
+        self.assertEqual(text(buttons[1], action_off), '"scriptMenuResponse" "gg" ; "setfocus" "t4ff_focus_2" ; ')
+        self.assertEqual(text(buttons[0], action_off), '"exec" "disconnect" ; ')
+        # the menu opens on its top-most buttons, not on "Exit to Main Menu"
+        opening = re.findall(r'"setfocus" "([^"]+)"', text(m, find_field(mrec, "onOpen").offset))
+        self.assertEqual(opening[-2:], ["t4ff_focus_2", "t4ff_focus_1"])
+        self.assertNotIn("t4ff_focus_0", opening)
+        # the shared focus script: each button a copy with its colour, red again as the focus leaves
+        self.assertEqual(text(buttons[2], focus_off), '"setLocalVarInt" "ui_highlight" 1 ; "setitemcolor" "t4ff_focus_2" "forecolor" 1 1 1 1 ; ')
+        self.assertEqual(text(buttons[2], leave_off), '"setitemcolor" "t4ff_focus_2" "forecolor" 1 0 0 1 ; ')
+        self.assertIsNot(buttons[1].relocs[focus_off].node, buttons[2].relocs[focus_off].node)
+        self.assertEqual(buttons[2].relocs[focus_off].kind, "follow")
+        # the start button's focus script is another menu's too: left as it is, and so is its leaving
+        self.assertEqual(text(buttons[3], focus_off), '"setLocalVarInt" "ui_highlight" 6 ; ')
+        self.assertIsNone(text(buttons[3], leave_off))
+        self.assertIs(elsewhere.relocs[focus_off].node, buttons[3].relocs[focus_off].node)
 
     def test_mod_options_for_the_custom_maps_menu(self):
         """PhilMod's main menu chooses its difficulty (a multiple choice item bound to philmod_gamemode,
@@ -1412,13 +2271,14 @@ class MenuTests(unittest.TestCase):
             return m
 
         difficulty = [("Easy", 0), ("Medium", 1), ("Default", 2), ("Insane", 3), ("Overkill", 4)]
-        main = menu([item(12, 138, dvar="philmod_gamemode", choices=difficulty), item(12, 170, dvar="unread_option", choices=[("A", 0), ("B", 1)])])
+        main = menu([item(12, 138, dvar="philmod_gamemode", choices=difficulty), item(12, 170, dvar="unread_option", choices=[("A", 0), ("B", 1)]),
+                     item(12, 200, dvar="cg_fov", choices=[("65", 65), ("80", 80)])])  # the player's setting (UGX), not the map's
         lobby = menu([item(0, 300, text="Difficulty:"), item(12, 300, dvar="philmod_gamemode", choices=difficulty), item(0, 340, text="Other:")])
         root = Node(TypeRef("record", "MenuList"), 1, BLOCK_VIRTUAL)
         root.children = [main, lobby]
         zone = Zone(p.name, [], [], [], 0, 0, None, None)
         zone.extra_root = root
-        options = menu_options(p, [zone], {"philmod_gamemode"}, {"philmod_gamemode": {"2"}})
+        options = menu_options(p, [zone], {"philmod_gamemode", "cg_fov"}, {"philmod_gamemode": {"2"}})
         self.assertEqual(options, [{"dvar": "philmod_gamemode", "label": "Difficulty", "default": "2",
                                     "choices": [("0", "Easy"), ("1", "Medium"), ("2", "Default"), ("3", "Insane"), ("4", "Overkill")]}])
         with tempfile.TemporaryDirectory() as out:
@@ -1719,6 +2579,13 @@ class IwiTests(unittest.TestCase):
         decoded = dxt.decode(flat.levels[0], w, h, "DXN").astype(int)
         self.assertLessEqual(np.abs(decoded[:, :, 0] - x.astype(int)).max(), 12)
         self.assertLessEqual(np.abs(decoded[:, :, 1] - y.astype(int)).max(), 12)
+        # luminance and alpha (wavelet IWIs of Black Ops weapons): y in the luminance, x in alpha
+        la = np.stack([y, x], axis=2).tobytes()
+        flat = images.normal_map_to_dxn(images.ImageData("t5_weapon_n", "A8L8", w, h, [la]))
+        decoded = dxt.decode(flat.levels[0], w, h, "DXN").astype(int)
+        self.assertEqual(flat.format, "DXN")
+        self.assertLessEqual(np.abs(decoded[:, :, 0] - x.astype(int)).max(), 12)
+        self.assertLessEqual(np.abs(decoded[:, :, 1] - y.astype(int)).max(), 12)
 
         texture = images.build_console_texture(image, normal_map=True)
         self.assertEqual(texture.format.name, "DXN")
@@ -1727,6 +2594,51 @@ class IwiTests(unittest.TestCase):
         # the texture budget can scale down a DXN texture without mip levels
         single = images.reduce_image(images.ImageData("n", "DXN", w, h, dxn.levels[:1]), 1)
         self.assertEqual((single.width, single.height, len(single.levels[0])), (32, 16, images.level_size("DXN", 32, 16)))
+
+    def test_wavelet_iwis(self):
+        """Wavelet IWIs (formats 6 to 10, the PC game still reads them): the smallest levels are raw
+        bytes, each larger level a parity bit and three Huffman coded differences per 2x2 block and
+        channel, least significant bit first; the colour channels add the first channel's."""
+        import struct
+
+        from t4ff import wavelet
+
+        def stream(raw, bits):
+            out, value = bytearray(raw), 0
+            for i, bit in enumerate(bits):
+                value |= bit << (i % 8)
+                if i % 8 == 7:
+                    out.append(value)
+                    value = 0
+            if len(bits) % 8:
+                out.append(value)
+            return bytes(out)
+
+        def code(table, value):
+            entry = next((c, n) for c, n, v in table if v == value)
+            return [(entry[0] >> i) & 1 for i in range(entry[1])]
+
+        def iwi(fmt, payload):
+            return b"IWi\x06" + bytes([fmt, 0]) + struct.pack("<3H", 2, 2, 1) + bytes(16) + payload
+
+        # luminance: a 1x1 level of 0x40, then no corrections, parity 0, no differences
+        bits = [0, 0] + code(wavelet._ALPHA, 0) * 3
+        image = images.parse_iwi("gray", iwi(0x09, stream(b"\x40", bits)))
+        self.assertEqual((image.format, image.levels), ("L8", [b"\x40" * 4, b"\x40"]))
+        # RGB: blue, green, red; a first difference of 2 for blue (added to the others' too) moves the
+        # top texels up by one and the bottom ones down, blue's parity 1 adds one to its top left texel
+        bits = [0, 1] + code(wavelet._BLUE, 2) + code(wavelet._BLUE, 0) * 2
+        bits += ([0] + code(wavelet._RED_GREEN, 0) * 3) * 2
+        image = images.parse_iwi("rgb", iwi(0x07, stream(b"\x10\x20\x30", bits)))
+        self.assertEqual(image.format, "X8R8G8B8")
+        texels = np.frombuffer(image.levels[0], np.uint8).reshape(4, 4).tolist()
+        self.assertEqual(texels, [[0x12, 0x21, 0x31, 255], [0x11, 0x21, 0x31, 255], [0x0F, 0x1F, 0x2F, 255], [0x0F, 0x1F, 0x2F, 255]])
+        # an escape code carries the value in the next 9 bits, less 255
+        bits = [0, 0] + code(wavelet._ALPHA, wavelet.ESCAPE) + [(257 >> i) & 1 for i in range(9)] + code(wavelet._ALPHA, 0) * 2
+        image = images.parse_iwi("mask", iwi(0x09, stream(b"\x40", bits)))
+        self.assertEqual(image.levels[0], bytes([0x41, 0x41, 0x3F, 0x3F]))
+        with self.assertRaises(images.ImageError):  # the data ends before the texture does
+            images.parse_iwi("short", iwi(0x09, b"\x40"))
 
 
 class XenosTests(unittest.TestCase):
@@ -2522,7 +3434,8 @@ not_an_animation_anywhere
         """PhilMod's maps keep every script in an .iwd: the level script and client script, which the
         engine loads by name and no script names, come from the map's files, and so does all they
         use; a script the game's zones have too comes from the map's files when they have it (as on
-        PC), and is reported for keep_mod_scripts."""
+        PC), and is reported for keep_mod_scripts. So do the anim trees the scripts compile against
+        (Kino Rezurrection's vehicles.atr, only in its .iwd, has its helicopter's rotor animation)."""
         from t4ff.layout import TypeRef
         from t4ff.platforms import x360
         from t4ff.scripts import _rawfiles, make_rawfile, missing_scripts_zone, zone_of_assets
@@ -2537,11 +3450,12 @@ not_an_animation_anywhere
         template.relocs[8] = Ptr("follow", buffer)
         template.children = [buffer]
         files = {
-            "maps/mymap.gsc": b"main()\n{\n\tmaps\\_load::main();\n\tmaps\\_phil_mod::init();\n\tmaps\\_other::go();\n}\n",
+            "maps/mymap.gsc": b"#using_animtree( \"vehicles\" );\nmain()\n{\n\tmaps\\_load::main();\n\tmaps\\_phil_mod::init();\n\tmaps\\_other::go();\n}\n",
             "clientscripts/mymap.csc": b"main()\n{\n}\n",
             "maps/_load.gsc": b"main()\n{\n\tmaps\\_phil_extra::go();\n}\n",
             "maps/_phil_mod.gsc": b"init()\n{\n}\n",
-            "maps/_phil_extra.gsc": b"go()\n{\n}\n",
+            "maps/_phil_extra.gsc": b"#using_animtree( \"dog\" );\ngo()\n{\n}\n",
+            "animtrees/vehicles.atr": b"little_bird_rotor_anim\n",
         }
 
         class MapFiles:
@@ -2550,7 +3464,7 @@ not_an_animation_anywhere
 
         class Library:  # the game's zones have maps/_load.gsc and maps/_other.gsc
             def in_game_zones(self, asset_type, name):
-                return name in ("maps/_load.gsc", "maps/_other.gsc")
+                return name in ("maps/_load.gsc", "maps/_other.gsc", "animtrees/vehicles.atr", "animtrees/dog.atr")
 
             def find(self, asset_type, name):
                 return None
@@ -2560,8 +3474,8 @@ not_an_animation_anywhere
         extra = missing_scripts_zone(p, zone, [MapFiles()], Library(), log=logs.append,
                                      roots=("maps/mymap.gsc", "clientscripts/mymap.csc"), from_map=from_map)
         added = sorted(name for name, _ in _rawfiles(p, extra))
-        self.assertEqual(added, ["clientscripts/mymap.csc", "maps/_load.gsc", "maps/_phil_extra.gsc", "maps/_phil_mod.gsc", "maps/mymap.gsc"])
-        self.assertEqual(from_map, {"maps/_load.gsc"})
+        self.assertEqual(added, ["animtrees/vehicles.atr", "clientscripts/mymap.csc", "maps/_load.gsc", "maps/_phil_extra.gsc", "maps/_phil_mod.gsc", "maps/mymap.gsc"])
+        self.assertEqual(from_map, {"maps/_load.gsc", "animtrees/vehicles.atr"})  # dog.atr stays the game's
         self.assertTrue(any("maps/mymap.gsc (the game loads it by name" in line for line in logs), logs)
         # without the roots nothing names them, as before
         self.assertIsNone(missing_scripts_zone(p, zone, [MapFiles()], Library(), log=lambda msg: None))

@@ -54,9 +54,12 @@ def cmd_roundtrip(args):
 def find_usermap(path: str):
     """Locate the fastfiles of a PC usermap from its folder or one of its fastfiles.
 
-    Returns (map name, {role: path}, [iwd files]) where role is 'map', 'mod', 'patch' or 'load'.
-    ``mod.ff`` is taken from the same folder, or from ``mods/<map>`` when the map is in
-    ``usermaps/<map>`` (where the game keeps them).
+    Returns (map name, {role: path}, [iwd files]) where role is 'map', 'mod', 'patch', 'load' or
+    'localized' (a list). ``mod.ff`` is taken from the same folder, or from ``mods/<map>`` when the map
+    is in ``usermaps/<map>`` (where the game keeps them). A mod's ``localized_*.ff`` takes the place of
+    the game's language zone of that name, which the PC loads with every map: UGX Mod ships its guns in
+    ``localized_common.ff`` (Kino Der Toten: 69 weapons, their models, animations and sounds, none in
+    the map's other fastfiles; gungame gave nothing on the console).
     """
     if not os.path.exists(path):
         raise SystemExit(f"{path}: not found")
@@ -73,7 +76,7 @@ def find_usermap(path: str):
 
     ffs = {f.lower(): os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(".ff")}
     if name is None:
-        base = [f for f in ffs if not f.endswith(("_load.ff", "_patch.ff")) and f != "mod.ff"]
+        base = [f for f in ffs if not f.endswith(("_load.ff", "_patch.ff")) and f != "mod.ff" and not f.startswith("localized_")]
         if len(base) != 1:
             raise SystemExit(f"{folder}: expected exactly one map fastfile, found {sorted(base)}")
         name = os.path.splitext(os.path.basename(ffs[base[0]]))[0]
@@ -84,6 +87,7 @@ def find_usermap(path: str):
         if fname in ffs:
             files[role] = ffs[fname]
     iwds = sorted(os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(".iwd"))
+    localized = [ffs[f] for f in sorted(ffs) if f.startswith("localized_")]
 
     parent = os.path.dirname(os.path.abspath(folder))
     if "mod" not in files and os.path.basename(parent).lower() == "usermaps":
@@ -91,6 +95,9 @@ def find_usermap(path: str):
         if os.path.isfile(os.path.join(mod_dir, "mod.ff")):
             files["mod"] = os.path.join(mod_dir, "mod.ff")
             iwds += sorted(os.path.join(mod_dir, f) for f in os.listdir(mod_dir) if f.lower().endswith(".iwd"))
+            localized += sorted(os.path.join(mod_dir, f) for f in os.listdir(mod_dir) if f.lower().startswith("localized_") and f.lower().endswith(".ff"))
+    if localized:
+        files["localized"] = localized
     return name, files, iwds
 
 
@@ -171,6 +178,8 @@ def cmd_convert(args):
     print(f"usermap {name}:")
     for role in ("map", "patch", "mod", "load"):
         print(f"  {role + ':':6} {files.get(role, 'not found')}")
+    for path in files.get("localized", []):
+        print(f"  localized: {path} (the mod's language zone, merged too)")
     for iwd in iwds:
         print(f"  iwd:   {iwd}")
     # CoD Xe reads _codxe\t4 when it exists (its newer layout, CoD Xenon's 0.2.0 maps), else _codxe
@@ -202,16 +211,27 @@ def cmd_convert(args):
                 f"{stats['input_bytes'] / 1048576:.1f} MiB -> {stats['output_bytes'] / 1048576:.1f} MiB"
             )
 
-    from .memory import MIB, TEXTURE_CAP_MIB, block_sizes, next_texture_budget, texture_bytes
+    from .memory import (FREE_CONSOLE_MIB, FREE_MIB, MARGIN_MIB, MIB, MIN_TEXTURE_BUDGET_MIB, block_sizes, memory_bytes, next_texture_budget,
+                         texture_bytes)
 
     auto_budget = args.texture_budget == "auto"
+    args.upgrade_budget_bytes = int(args.upgrade_budget * MIB) if args.stream_textures else None
     target = int(args.memory_target * MIB)
+    # a console's memory leaves no extra stream pool: boxes half the disc's (stream.CONSOLE_STREAM_GROWTH)
+    from .stream import CONSOLE_STREAM_GROWTH
+
+    args.stream_growth_scale = args.stream_growth if args.stream_growth else (CONSOLE_STREAM_GROWTH if args.memory_target <= FREE_CONSOLE_MIB else 1.0)
+    if args.memory_target > FREE_CONSOLE_MIB:
+        print(f"warning: the {args.memory_target:g} MiB memory target is over the {FREE_CONSOLE_MIB:.1f} MiB a console has free for a map: "
+              f"the map will load in Xenia only (its patch enlarging the game's memory pool on)")
     options = ConvertOptions(
         allow_unverified=args.allow_unverified,
         max_texture_size=args.max_texture_size,
-        texture_budget=TEXTURE_CAP_MIB * MIB if auto_budget else int(float(args.texture_budget) * MIB),
+        # streamed textures leave most of their memory to the others: start from full quality
+        texture_budget=(4096 * MIB if args.stream_textures else target) if auto_budget else int(float(args.texture_budget) * MIB),
         keep_mips=not args.no_mips,
         compress_textures=not args.no_compress,
+        eighth_levels=not args.keep_quarter,
         iwd_paths=iwds,
         stock_paths=args.iwd,
         xma_encoder=None if args.no_sounds else encoder,
@@ -225,37 +245,80 @@ def cmd_convert(args):
 
     # One fastfile, as in CoD Xenon's converted maps: the console has no mod.ff, and <map>_patch.ff is
     # merged too. Scripts of later zones win (patch over map, mod over both). One texture budget.
-    paths = [files["map"]]
+    # The mod's language zones come first, as the PC loads them before the map: the map's and the
+    # mod's scripts win over theirs, and their own assets (UGX's guns) are added.
+    paths = list(files.get("localized", [])) if not args.no_mod else []
+    paths.append(files["map"])
     if "patch" in files and not args.no_patch:
         paths.append(files["patch"])
     if "mod" in files and not args.no_mod:
         paths.append(files["mod"])
     map_files = IwdLibrary(list(dict.fromkeys([os.path.dirname(os.path.abspath(files["map"]))] + [os.path.dirname(os.path.abspath(p)) for p in iwds])))
 
-    # The automatic texture budget: the textures get what the memory target leaves, measured on the
-    # converted map (converted again with less when it is over; sounds are encoded once).
+    # The automatic texture budget: the textures get the main memory the target leaves,
+    # measured on the converted map (converted again with less when it is over; sounds are encoded
+    # once). See memory.py.
     import dataclasses
 
-    for attempt in range(4):
+    measured = None  # (texture budget, memory) of the last conversion the budget changed
+    attempts = 5
+    for attempt in range(attempts):
+        last = attempt == attempts - 1
+        args.stream_report = {}
         main_zone, planned = _convert_map(args, paths, options, map_files, out_dir)
         progress.step("Measuring the memory")
         out = Writer(x360()).write(main_zone)
-        total = sum(block_sizes(out))
+        used = memory_bytes(block_sizes(out))
+        # over the target: what the PC versions of stock textures added gives way first, then the
+        # textures' mip tails (a little shimmer far away, before any blur up close), in one go when
+        # the upgrades are not enough
+        upgrade = args.stream_report.get("upgrade_bytes", 0)
+        tail = auto_budget and options.mip_tail and not args.keep_mip_tail and used - target > upgrade
+        if used > target and (upgrade or tail) and not last:
+            changes = []
+            if upgrade:
+                args.upgrade_budget_bytes = max(0, upgrade - (used - target))
+                changes.append(f"{args.upgrade_budget_bytes / MIB:.1f} MiB for the PC versions of stock textures")
+            if tail:
+                options = dataclasses.replace(options, mip_tail=False)
+                changes.append("textures without their mip levels of 16 texels or less (the packed mip tail)")
+            print(f"memory: {used / MIB:.1f} MiB of main memory, over the {target / MIB:.0f} MiB target: converting again "
+                  f"with {' and '.join(changes)}")
+            continue
         if not auto_budget:
             break
         textures = texture_bytes(main_zone)
-        budget = next_texture_budget(total, target, planned, options.texture_budget) if attempt < 3 else None
+        steps = args.stream_report.get("steps")
+        if used > target and steps and not options.stream_steps and not last:
+            # the budget counts what the textures keep in the fastfile from now on, a streamed one
+            # only its levels below the streamed ones: those that keep the most lose a level first
+            cut = min(used - target + MARGIN_MIB * MIB, max(textures - MIN_TEXTURE_BUDGET_MIB * MIB, 0))
+            print(f"memory: {used / MIB:.1f} MiB of main memory, over the {target / MIB:.0f} MiB target: converting again "
+                  f"with {cut / MIB:.1f} MiB less of textures in the fastfile ({len(steps)} streamed)")
+            options = dataclasses.replace(options, stream_steps=steps, texture_cut=cut)
+            measured = None
+            continue
+        # what a byte less of planned textures saves: measured between two budgets, else estimated
+        # from the share of the planned textures the fastfile keeps (streamed ones keep a part)
+        effective = min(options.texture_budget, planned)
+        if measured is not None and measured[0] > effective and measured[1] > used:
+            efficiency = (measured[1] - used) / (measured[0] - effective)
+        else:
+            efficiency = min(1.0, textures / planned) if planned else 1.0
+        measured = (effective, used)
+        budget = next_texture_budget(used, target, planned, options.texture_budget, efficiency) if not last else None
         if budget is None:
-            if total > target:
+            if used > target:
                 print(
-                    f"warning: the map needs {total / MIB:.1f} MiB, over the {target / MIB:.0f} MiB target "
-                    f"({(total - textures) / MIB:.1f} MiB without its textures); CoD Xenon's largest map needs 219.5 MiB"
+                    f"warning: the map needs {used / MIB:.1f} MiB of main memory, over the {target / MIB:.0f} MiB target "
+                    f"({(used - textures) / MIB:.1f} MiB without its textures); the game has about {FREE_CONSOLE_MIB:.1f} MiB free for a map's zone on a console, "
+                    f"{FREE_MIB} in Xenia"
                 )
             else:
-                print(f"memory: {total / MIB:.1f} MiB of the {target / MIB:.0f} MiB target, {textures / MIB:.1f} MiB of it textures")
+                print(f"memory: {used / MIB:.1f} MiB of main memory of the {target / MIB:.0f} MiB target, {textures / MIB:.1f} MiB of it textures")
             break
-        print(f"memory: {total / MIB:.1f} MiB, over the {target / MIB:.0f} MiB target: converting again with {budget / MIB:.1f} MiB of textures")
-        options = dataclasses.replace(options, texture_budget=budget)
+        print(f"memory: {used / MIB:.1f} MiB of main memory, over the {target / MIB:.0f} MiB target: converting again with {budget / MIB:.1f} MiB of textures")
+        options = dataclasses.replace(options, texture_budget=budget, texture_cut=0)
     write_zone(main_zone, os.path.join(out_dir, f"{name}.ff"), args.jobs, out)
     from .library import T4FF_MARKER
 
@@ -305,6 +368,12 @@ def cmd_convert(args):
 
         if write_preview(out_dir, name):
             print("map list picture: preview.bin, from the loading screen")
+    # and for CoD Xe's own custom maps list (release r351): map.json and preview.dds (see menu.py)
+    from .menu import write_map_info
+
+    info = write_map_info(out_dir, name)
+    if info:
+        print(f"CoD Xe's custom maps list: {' and '.join(info)} (from description.txt and the loading screen)")
     return 0
 
 
@@ -333,7 +402,8 @@ def _convert_map(args, paths, options, map_files, out_dir):
     for path, conv in zip(paths, convs):
         for script, _ in _rawfiles(pc(), conv.zone):
             key = normalize(script)
-            if not script.startswith(",") and (os.path.basename(path).lower() == "mod.ff" or map_files.read(key) is not None):
+            mod_zone = os.path.basename(path).lower() == "mod.ff" or os.path.basename(path).lower().startswith("localized_")
+            if not script.startswith(",") and (mod_zone or map_files.read(key) is not None):
                 mod_scripts.add(key)
     # streamed sounds of the game's own the console's disc does not have (Der Riese's...): from the
     # PC game's files, before the aliases are converted (they point to the files found next to the map)
@@ -365,23 +435,30 @@ def _convert_map(args, paths, options, map_files, out_dir):
     from .scripts import menu_dvar_values
 
     menu_values = menu_dvar_values(main_zone)
+    pause_menus = []  # menus the map's own pause menu opens
     if convs[0].console_library is not None:
-        from .merge import drop_frontend_menus
+        from .merge import bind_pause_menu, drop_frontend_menus, menu_names
 
-        drop_frontend_menus(x360(), main_zone, convs[0].console_library.is_stock_menu)
+        library = convs[0].console_library
+        ingame = library.find_in_game_zones("MenuList", "ui/ingame.txt")
+        kept, pause_menus = bind_pause_menu(x360(), main_zone, menu_names(ingame[1]) if ingame else [])
+        drop_frontend_menus(x360(), main_zone, library.is_stock_menu, is_stock_list=lambda name: library.in_game_zones("MenuList", name), keep_menus=kept)
+    from .merge import drop_unused_videos
+
+    drop_unused_videos(x360(), main_zone)
     # PC script menus (a music box) and hints name keyboard keys: the controller's buttons instead;
     # their items that do nothing stay out of the controller's way, and the D-pad moves between
     # buttons as they are laid out
     from .menu import controller_navigation, decorate_inert_items, gamepad_script_menus
     from .scripts import (
-        fix_modder_help, menu_dvar_defaults, precache_before_waits, spawn_script_origins, speed_up_zombies_only, use_key_hints,
-        valid_cursor_hints, zombie_idles_for_zombies,
+        fix_modder_help, local_client_effects, menu_dvar_defaults, precache_before_waits, spawn_script_origins, speed_up_zombies_only,
+        use_key_hints, valid_cursor_hints, zombie_idles_for_zombies,
     )  # fmt: skip
 
     gamepad_script_menus(x360(), main_zone)
     from .scripts import script_strings
 
-    script_menus = script_strings(x360(), main_zone)  # the menus the scripts open are named in them
+    script_menus = script_strings(x360(), main_zone) | set(pause_menus)  # the menus the scripts open are named in them
     decorate_inert_items(x360(), main_zone, script_menus=script_menus)
     controller_navigation(x360(), main_zone, script_menus=script_menus)
     use_key_hints(x360(), main_zone)
@@ -389,6 +466,7 @@ def _convert_map(args, paths, options, map_files, out_dir):
     fix_modder_help(x360(), main_zone)
     spawn_script_origins(x360(), main_zone)
     valid_cursor_hints(x360(), main_zone)
+    local_client_effects(x360(), main_zone)
     precache_before_waits(x360(), main_zone, f"maps/{options.map_name}.gsc")
     menu_dvar_defaults(x360(), main_zone, menu_values, f"maps/{options.map_name}.gsc")
     speed_up_zombies_only(x360(), main_zone)
@@ -400,6 +478,14 @@ def _convert_map(args, paths, options, map_files, out_dir):
         return name in renamed.values() or (library is not None and library.find_in_game_zones("RawFile", name) is not None)
 
     splitscreen_fog(x360(), main_zone, f"maps/{options.map_name}.gsc", is_game_script)
+    # the console draws no world for a player on an MG42 turret of a zombie map: a held gun instead
+    from .scripts import mounted_guns
+
+    mounted_guns(x360(), main_zone, f"maps/{options.map_name}.gsc")
+    # a timed power-up's endless ammo left on by a game that ended meanwhile (see scripts.py)
+    from .scripts import reset_sustain_ammo
+
+    reset_sustain_ammo(x360(), main_zone, f"maps/{options.map_name}.gsc")
     # technique sets copied from CoD Xenon's maps read the dynamic shadow texture before it is set
     from .techsets import fix_argument_sections
 
@@ -441,23 +527,113 @@ def _convert_map(args, paths, options, map_files, out_dir):
         if menus:
             options_script(x360(), main_zone, f"maps/{options.map_name}.gsc", map_options, menus)
     write_usermap_scripts(usermap_scripts(x360(), main_zone, mod_scripts, convs[0].console_library, renamed), out_dir)
+    if args.stream_textures:
+        from .stream import stream_textures
+
+        # the console fastfiles' own highmip folders (the disc's, next to its zones)
+        zone_dirs = {os.path.abspath(z if os.path.isdir(z) else os.path.dirname(z)) for z in args.console_zone or []}
+        library = convs[0].console_library
+        stream_textures(x360(), main_zone, out_dir, highmip_dirs=sorted(os.path.join(d, "highmip") for d in zone_dirs),
+                        is_game_image=(lambda name: library.in_game_zones("GfxImage", name)) if library is not None else None,
+                        stock_texture=_stock_texture(convs, options),
+                        deep=True if args.deep_stream == "all" else {n.strip().lower() for n in args.deep_stream.split(",") if n.strip()} if args.deep_stream else None,
+                        upgrade_budget=args.upgrade_budget_bytes, report=args.stream_report, mip_tail=options.mip_tail,
+                        eighth=getattr(convs[0], "eighth_images", None) or None, growth=args.stream_growth_scale)
     return main_zone, getattr(convs[0], "planned_texture_bytes", 0)
 
 
+def _stock_texture(convs, options):
+    """The PC game's version of a stock texture (--iwd), tiled for the console, for the streaming
+    pass to replace a smaller console copy with; None for the map's own textures."""
+    from . import images as img
+    from .assets import _pc_normal_map, stock_image_source
+
+    own = {name for conv in convs for name, source in conv.__dict__.get("_image_sources", {}).items() if source is not None}
+
+    def texture(name, semantic):
+        if name in own or getattr(convs[0], "stock_library", None) is None:
+            return None
+        source = stock_image_source(convs[0], name)
+        if source is None or source.faces != 1:
+            return None
+        try:
+            return img.build_console_texture(source, 0, True, 0, options.compress_textures, _pc_normal_map(source, semantic), mip_tail=options.mip_tail)
+        except img.ImageError:
+            return None
+
+    return texture
+
+
 def cmd_menu(args):
-    """Make the Nazi Zombies map list of CoD Xenon's patch_ui.ff dynamic (see menu.py)."""
+    """Get the game's menu zone ready for the maps of its usermaps folder: CoD Xe's own custom maps
+    list when its patch_ui.ff has it, or one given with --menu-zone has it (CoD Xenon's 0.3.0), else
+    t4ff's list made from CoD Xenon's 0.2.0 patch_ui.ff (see menu.py)."""
     import shutil
 
-    from .menu import MenuError, description_text, localized_strings, make_dynamic, not_cod_xenon_menu
+    from .menu import MAP_JSON, PREVIEW_DDS, has_own_usermaps_list, menu_zone_candidates, write_map_info
 
     root = args.folder
     zone_dir = os.path.join(root, "zone") if os.path.isdir(os.path.join(root, "zone")) else root
     target = os.path.join(zone_dir, "patch_ui.ff")
+    usermaps = os.path.join(root, "usermaps")
+
+    def own_list(path):
+        try:
+            return has_own_usermaps_list(x360(), Reader(x360(), read_fastfile(path)[2]).load())
+        except Exception:
+            return False
+
+    own = os.path.exists(target) and own_list(target)
+    if not own:
+        # a menu zone with CoD Xe's own list takes the place of the game's (the one before is kept)
+        for candidate in menu_zone_candidates(args.menu_zone or []):
+            if os.path.abspath(candidate) == os.path.abspath(target) or not own_list(candidate):
+                continue
+            backup = target + ".bak"
+            if os.path.exists(target) and not os.path.exists(backup):
+                shutil.copyfile(target, backup)
+            shutil.copyfile(candidate, target)
+            print(f"{target}: the menu zone of {candidate}" + (f" (the one before is {backup})" if os.path.exists(backup) else ""))
+            own = True
+            break
+    if own:
+        print(f"{target}: \"Custom Maps\" is CoD Xe's own list (the menu codxe_usermaps), which shows the maps of the usermaps folder "
+              "from their map.json and preview.dds (CoD Xe r351 or later)")
+    else:
+        status = _t4ff_menu(args, zone_dir, target, usermaps)
+        if status:
+            return status
+
+    # map.json and preview.dds, which CoD Xe's own list reads, where a map has none (see menu.py)
+    infos = []
+    for name in sorted(os.listdir(usermaps)) if os.path.isdir(usermaps) else []:
+        folder = os.path.join(usermaps, name)
+        if not os.path.isdir(folder):
+            continue
+        written = write_map_info(folder, name, metadata=not os.path.exists(os.path.join(folder, MAP_JSON)),
+                                 picture=not os.path.exists(os.path.join(folder, PREVIEW_DDS)))
+        if written:
+            infos.append(f"{name} ({', '.join(written)})")
+    if infos:
+        print(f"CoD Xe's custom maps list: {', '.join(infos)}")
+    # the streamed sounds of the maps (CoD Xenon's, older conversions) in the game's layout
+    if os.path.isdir(usermaps) and not args.no_streams:
+        upgrade_map_streams(usermaps)
+    return 0
+
+
+def _t4ff_menu(args, zone_dir: str, target: str, usermaps: str) -> int:
+    """t4ff's own custom maps list, made from CoD Xenon's 0.2.0 patch_ui.ff (see menu.py), with the
+    names, descriptions and pictures of the maps. Returns 0, or 1 when it cannot be made."""
+    import shutil
+
+    from .menu import MenuError, description_text, localized_strings, make_dynamic, not_cod_xenon_menu
+
     original = target + ".orig"
     # CoD Xenon's menu is kept as patch_ui.ff.orig and every run starts again from it
     source = original if os.path.exists(original) else target
     if not os.path.exists(source):
-        print(f"error: {target} not found (give CoD Xenon's _codxe\\t4 folder)")
+        print(f"error: {target} not found (give CoD Xenon's _codxe\\t4 folder, or a menu zone with CoD Xe's own list with --menu-zone)")
         return 1
     endian, _, data = read_fastfile(source)
     zone = Reader(x360(), data).load()
@@ -467,7 +643,7 @@ def cmd_menu(args):
         print(
             f"Put CoD Xenon's patch_ui.ff (_codxe\\t4\\zone\\patch_ui.ff of their 0.2.0 zip) in {zone_dir}"
             + (f" and delete {original}" if source == original else "")
-            + ", then run this again."
+            + ", or give their 0.3.0 one with --menu-zone, then run this again."
         )
         return 1
     if source == target:
@@ -482,7 +658,6 @@ def cmd_menu(args):
     print(f'{target}: "Custom Maps" in the Nazi Zombies menu lists the maps of the usermaps folder, {args.rows} at a time (LB / RB: a page)')
 
     # names, descriptions and pictures of CoD Xenon's maps, whose rows the list replaces
-    usermaps = os.path.join(root, "usermaps")
     patch = os.path.join(zone_dir, "patch.ff")
     strings = localized_strings(x360(), Reader(x360(), read_fastfile(patch)[2]).load()) if os.path.exists(patch) else {}
     written = 0
@@ -516,11 +691,7 @@ def cmd_menu(args):
             pictures.append(name)
     if pictures:
         print(f"map list pictures (preview.bin) from the loading screens of {', '.join(pictures)}")
-    # the streamed sounds of the maps (CoD Xenon's, older conversions) in the game's layout
-    if os.path.isdir(usermaps) and not args.no_streams:
-        upgrade_map_streams(usermaps)
     return 0
-
 
 def upgrade_map_streams(folder: str) -> int:
     """Rewrite the streamed sounds (.xma) under ``folder`` in the game's layout, reporting it."""
@@ -584,8 +755,14 @@ def main(argv=None):
     p.add_argument("-o", "--output", required=True, help="output folder (a _codxe folder is created inside)")
     p.add_argument("--iwd", action="append", default=[], help="extra .iwd files or folders to take images/sounds from (e.g. the PC game's main folder)")
     p.add_argument("--max-texture-size", type=int, default=0, help="largest texture dimension, bigger textures are downscaled (default: no limit)")
-    p.add_argument("--texture-budget", type=_texture_budget, default="auto", help="texture memory budget in MiB, 0 for no limit, or auto (default): what the memory target leaves, at most 96 MiB")
-    p.add_argument("--memory-target", type=float, default=MEMORY_TARGET_MIB, help=f"memory the map may use in MiB, for the automatic texture budget (default {MEMORY_TARGET_MIB}; CoD Xenon's maps use 148 to 220)")
+    p.add_argument("--texture-budget", type=_texture_budget, default="auto", help="texture memory budget in MiB, 0 for no limit, or auto (default): what the memory target leaves")
+    p.add_argument("--stream-textures", action="store_true", help="the textures of models and world surfaces keep their top mip level in the map's images.pak, loaded when what uses them is close (needs a CoD Xe build serving the map's images.pak)")
+    p.add_argument("--upgrade-budget", type=float, default=96.0, help="with --stream-textures: MiB the PC versions of stock textures the console has smaller may add to the fastfile (streamed); lowered when the map is over its memory target (default 96)")
+    p.add_argument("--deep-stream", default="", help="with --stream-textures: images (comma separated names, or all) that stream two mip levels at once where they can, the fastfile keeping a quarter of their size (needs a CoD Xe build applying them)")
+    p.add_argument("--memory-target", type=float, default=MEMORY_TARGET_MIB, help=f"main memory the map's zone may use in MiB (all its blocks: textures, models, animations, the world...), for the automatic texture budget (default {MEMORY_TARGET_MIB}: a console has about 220.7 MiB free for it when a map loads; Xenia, whose patch for the game enlarges its memory pool, 286.7)")
+    p.add_argument("--stream-growth", type=float, default=0, help="with --stream-textures: how far around a surface its streamed textures load their top level, of the disc linker's distance (1931.2 / texels per unit); default: 0.5 for a console's memory target (the 64 MB buffer alone), 1 above it")
+    p.add_argument("--keep-quarter", action="store_true", help="deep streamed textures keep a quarter of their size in the fastfile when the map is over its memory target (by default those the budget needs keep an eighth, three levels streamed, before any texture loses its top level)")
+    p.add_argument("--keep-mip-tail", action="store_true", help="keep every texture's mip levels of 16 texels or less when the map is over its memory target (by default they go before any texture loses its top level)")
     p.add_argument("--xma-encoder", help="path to xma2encode.exe (Xbox 360 XDK); also read from XMA2ENCODE or XEDK")
     p.add_argument("--xma-quality", type=int, default=60, help="xma2encode quality 1-100 (default 60)")
     p.add_argument("--stream-rate", type=int, default=0, help="resample streamed sounds above this rate (e.g. 32000)")
@@ -613,6 +790,8 @@ def main(argv=None):
     p.add_argument("folder", help="the _codxe\\t4 folder the game reads (with zone\\patch_ui.ff and usermaps)")
     p.add_argument("--rows", type=int, default=13, help="rows the list shows at a time (default 13, as CoD Xenon's)")
     p.add_argument("--no-streams", action="store_true", help="do not check the streamed sounds (.xma) of the maps in usermaps (see the streams command)")
+    p.add_argument("--menu-zone", action="append", default=[], metavar="PATH",
+                   help="a patch_ui.ff with CoD Xe's own custom maps list (CoD Xenon's 0.3.0, or its folder) to use when the game's has none")
     p.set_defaults(func=cmd_menu)
 
     p = sub.add_parser("streams", help="rewrite the streamed sounds (.xma) of converted maps in the game's layout: those of older conversions and of CoD Xenon's maps stop after a split second")

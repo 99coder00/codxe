@@ -14,9 +14,11 @@ keeps them small enough for the console's memory:
   probes of the map, skies) keep their six faces: the probes of PC Aztec
   convert to exactly the textures of CoD Xenon's Aztec, and like those stay
   uncompressed up to 64 texels. Each map keeps as much texture
-  quality as fits in memory: the texture budget is what a memory target based on
-  CoD Xenon's working maps leaves, and only when a map is over it do its largest
-  textures lose top mip levels. Stock textures use the console's own versions.
+  quality as fits in memory: the texture budget is what the game's main
+  memory leaves (measured: about 220.7 MiB free on a console when a map loads,
+  for every block of its zone: textures, models, animations, the world...; 286.7
+  in Xenia, whose patch for the game enlarges its memory pool), and only when a
+  map is over it do its largest textures lose top mip levels. Stock textures use the console's own versions.
 - **Sounds** are encoded to XMA: loaded sounds into the fastfile (XMA1, as the
   console's in-memory sounds are), streamed sounds to `sounds/*.xma` files.
   Both can be downsampled or downmixed to save memory.
@@ -29,7 +31,11 @@ keeps them small enough for the console's memory:
   animations, the animations of its anim trees such as the dogs', shellshock
   files) are added from the Xbox 360 fastfiles given.
 - **One fastfile per map**, as in CoD Xenon's converted maps: `mod.ff` (the
-  console has no mod zone) and `<map>_patch.ff` are merged into `<map>.ff`.
+  console has no mod zone) and `<map>_patch.ff` are merged into `<map>.ff`, and
+  so is a mod's own language zone (`localized_*.ff`, which the PC loads with
+  every map in place of the game's): UGX Mod ships its guns in
+  `localized_common.ff` (Kino Der Toten: 69 weapons with their models,
+  animations and sounds), and without it gungame gave the player nothing.
   Scripts of later zones win (`_patch` over the map, `mod.ff` over both), and
   assets several zones define (including textures nested in materials) are
   loaded once.
@@ -114,8 +120,14 @@ Useful options:
 | --- | --- |
 | `--console-zone PATH` | Xbox 360 fastfile (or folder of them) to copy console only assets from: technique sets, and stock images, sounds, models... the PC map expects from the game. Repeatable; the first one that has an asset wins. Maps t4ff converted (a `t4ff.txt` in their folder) are left out: an earlier conversion would hand its old copies back. See [Console fastfiles](#console-fastfiles). |
 | `--iwd PATH` | The PC game's own files (e.g. its `main` folder): stock textures a map uses and no console fastfile has are converted from them. Stock textures the console fastfiles have keep the console's version (Treyarch sized them for the console), which leaves the memory to the map's own textures. The game's streamed sounds the map uses are encoded from them too, into the map's `sounds` folder: the console's disc has none of the downloadable maps' (Der Riese's voices, the easter egg songs of a music box). |
-| `--texture-budget MIB` | Texture memory for the map and its mod together, `0` for no limit. Default `auto`: what `--memory-target` leaves, at most 96 MiB. Largest textures lose their top mip level first; the world's lightmaps keep theirs. |
-| `--memory-target MIB` | Memory the map may use once loaded, for the automatic texture budget (default 200: CoD Xenon's 13 maps use 148 to 220). The map is converted, measured and, when over, converted again with less texture memory. |
+| `--texture-budget MIB` | Texture memory for the map and its mod together, `0` for no limit. Default `auto`: what `--memory-target` leaves. The texture whose next level saves the most memory loses its top level first: once a conversion has streamed, a streamed texture counts what it keeps in the fastfile (a sixteenth when deep), so the textures kept whole (effects, small ones) give way before the streamed ones, and a streamed one that would stop streaming keeps its level; 2D (menu, HUD) textures go last, the world's lightmaps never. |
+| `--memory-target MIB` | Main memory the map's zone may use, for the automatic texture budget (default 212, for a console). The game allocates every block of a map's zone (its textures, and the virtual block of its models, animations, world and scripts too) from its main memory pool; the blocks are allocated in order and the first that does not fit stops the game: "Need <n> more bytes of 'main' physical ram", n counting the blocks up to that one. Xenia applies a patch to the game ("Memory allocator expansion") that makes the pool 480 MB instead of 414, so a map has about 286.7 MiB there (Kino Der Toten's 278.5 MiB loaded; Kino Rezurrection's 293.6 MiB was 5.2 MiB short at its large block) and about 220.7 on a console: `--memory-target 278` makes a map for Xenia only. The map is converted, measured and, when over, converted again: first without the PC versions of stock textures (`--upgrade-budget`), then without the textures' mip tails (`--keep-mip-tail`), then with less texture memory: deep streamed textures keep an eighth of their size in the fastfile first (`--keep-quarter`), then textures lose top levels. Over the console's figure the converter warns that the map loads in Xenia only (the GUI stops at 220). |
+| `--keep-quarter` | Deep streamed textures keep a quarter of their size in the fastfile even when the map is over its memory target. By default the texture budget first has them keep an eighth (three levels streamed: the half size texture within 300 units of the texture's box, the whole texture inside it, the eighth farther away), before any texture loses its top level: that keeps every level up close, where a dropped level would blur. Needs a CoD Xe build that knows `images.pak` version 3 (older ones refuse such a pack, leaving the eighths). Kino Rezurrection: about 19 MiB. |
+| `--keep-mip-tail` | Keep every texture's mip levels of 16 texels or less a side when the map is over its memory target. The GPU packs them into a tile of their own per texture (a 512x512 DXT5's 16 KiB, as much as its 128x128 level); by default they go before any texture loses its top level, so the smallest level left (32 texels a side) shows for what is farther: a little shimmer far away rather than a blur up close. Kino Rezurrection: 17.3 MiB. |
+| `--stream-textures` | Texture streaming, as the disc's own levels do it: textures only models and world surfaces use keep their top mip level in the map's `images.pak` (one file in its folder: entries 4 KiB aligned, an index at the end), and the fastfile a texture of half their size; the game loads the top level into its 64 MB streaming buffer (reserved at boot whether a map streams or not) when what uses it is close. t4ff writes the boxes that decide it as the disc's linker does (each triangle's box grown by 1931.2 / its texels per unit): each model surface's, each world surface's, and the world's tree of surfaces and static models, through which alone static models and the world stream. Stock textures the console has smaller (the campaign zones' copies, often 4 to 8 times smaller a side) are the PC game's (`--iwd`): streamed when they can (two levels with `--deep-stream`), else whole in the fastfile, within `--upgrade-budget`. Kino Der Toten: all 1066 textures at full quality, 364 streamed (127 of them PC stock textures), 156.4 MiB of textures, large and physical blocks. Needs t4ff's CoD Xe build (it serves the pack: without it the game finds no file, turns streaming off for the image and keeps its smaller copy). Textures saved without mip levels (the IWI's no-mipmaps flag) get a box filtered mip chain, their top level as it was, so they stream too (Kino Rezurrection: 41, 18.1 MiB whole in the fastfile, 2.7 MiB streamed). Console images that streamed on the disc keep doing it with their `.hi` copied from the console fastfiles' `highmip` folders, or stop. Images named like one of the game's own zones' do not stream (the game asks for files by name). See `t4ff/stream.py`. |
+| `--stream-growth` | With `--stream-textures`: how far around a surface its streamed textures load their top level, as a share of the disc linker's distance (1931.2 / texels per unit). Default: 0.5 for a console's memory target, 1 above it. A console build has no extra stream pool (its main memory is full), so the game's 64 MB buffer alone holds the top levels the view is inside the boxes of: with the disc's boxes Kino Rezurrection's large textures wanted 53-61 MB of it at once and textures right in front of the view never loaded. The game renders 1024x600 (an 80 degree view): a top level shows alone up to about 600 / its texels per unit, so half the disc's distance still covers it. Needs the CoD Xe build that serves images showing their fastfile copy first. |
+| `--upgrade-budget` | With `--stream-textures`: MiB the PC versions of stock textures may add to the fastfile (default 96); the converter lowers it first when the map is over its memory target. Kino: 463 PC originals for 9.4 MiB, every texture with a PC source at its PC size. |
+| `--deep-stream` | With `--stream-textures`: images (comma separated names, or `all`) that stream two mip levels at once where they can: the fastfile keeps a texture of a quarter of their size and the pack the whole texture, which CoD Xe applies (t4ff's build, `streaming.cpp`). A texture over the streamer's 4 MB block streams one level. Kino with `all`: 356 of 364 streamed textures, 119.8 MiB of textures, large and physical blocks (36.5 MiB less), checked in Xenia with color-marked levels. |
 | `--loaded-sound-memory MIB` | Memory of the loaded sounds (default 32; CoD Xenon's maps have up to 35). Beyond it the longest become streamed sounds, which keep their quality; looping ones stay loaded. 0: no limit. |
 | `--max-texture-size N` | Cap texture dimensions. |
 | `--no-mips` | Drop all mip levels (about 25% less memory, but textures shimmer at a distance). |
@@ -248,7 +260,33 @@ console's menus are left out: PC mods ship restyled main menus and lobbies
 memory in the map's zone and would replace the console's menus of the same
 names. A menu list goes when most of its menus are the console's and the map's
 scripts open or precache none of them; menus the scripts use (a music box menu
-in `ui/scriptmenus`) stay, and so does a list another kept one points into.
+in `ui/scriptmenus`) stay, and so does a list another kept one points into. So
+does a list of the name of one of the game's own (`ui/ingame.txt`, `ui/hud.txt`
+of the console's `common.ff`), which takes the place of the game's: UGX Mod's
+`ui/ingame.txt` is the PC's, and its pause menu's Options and Challenges open
+menus the console has not in game ("Could not find menu 'options_new_pc'"), so
+they only closed it; the console's own pause menu is used instead. When such a
+list has to stay because something kept points into it (the PC linker stores
+a string once, so UGX's vote menus and even weapons point into its
+`ui/ingame.txt` and `ui/hud.txt`), it stays under a name of its own
+(`ui/ingame_mod.txt`): the game loads its lists by name and gets the console's.
+That alone is not enough: the console also opens menus by name, and a menu the
+map's zone loads takes the place of the game's of the same name whatever list
+holds it (UGX's PC `pausedmenu` still showed, with Options and Challenges that
+only closed it). So every menu of the mod with the name of one of the
+console's is renamed `<name>_mod` (Kino 102, Mini-Labor 76, most of them the PC
+HUD and pause menus): the console's own pause menu, options and HUD are used.
+Menus the scripts open by name keep theirs, as do menus whose name string
+something else uses too (a warning says so).
+
+That same override lets a map keep its own pause menu. The console's pause menu
+can open only the game's in-game menus (`ui/ingame.txt`) and the script menus
+the map precaches. When the mod's `pausedmenu` opens menus beyond those that
+the zone has (UGX's Challenges: `menu_challenges`, then `popup_tier`), it stays
+the map's own: its PC options menu becomes the console's `ingameoptions`, and
+those menus join a menu list the scripts precache (UGX's vote menu's), so the
+game loads them with its in-game menus. A menu context holds at most 120 menus,
+so only the menus needed join, not the mod's whole list.
 
 PC script menus are played with the keyboard: Tom_bmx's music box menu picks a
 song with the keys 1 to 6 and closes with Escape, which a controller has not.
@@ -277,9 +315,27 @@ answer the scripts, with one other button confirming (ACCEPT), follow the focus:
 their action runs when the focus arrives, and A on one confirms it. A sends one
 answer only: a script waiting for them in a loop gets one per frame.
 
+Menus also show one of several buttons in one place by a condition: UGX's vote
+(Kino Der Toten) has a "Gamemode: ..." button per mode, the chosen one shown,
+and the D-pad did nothing there, the nearest button that way being one not
+shown ("setFocus: error focusing widget ... could not accept focus"). So a
+direction tries every button that way, the nearest last, and the last one shown
+keeps the focus; with none shown that way it wraps around (down from the bottom
+button to the top one). Buttons off the screen are no targets: the console draws
+menus within its safe area, and UGX's "Exit to Main Menu" (y 450 from its top)
+is below the screen there, where the focus went from "Start Game". A button's
+action, which may show another in its place, gives the focus to the one shown
+there. A menu opens on its top-most button shown
+rather than on its first (UGX's first is "Exit to Main Menu", off the screen: A
+on the vote left the game), and the focused button's text takes the menu's
+focus colour (`setitemcolor`; a gold when that is the button's own), back to its
+own as the focus leaves: PC menus mark the button under the mouse, which a
+controller has not.
+
 Mods choose their options in their own front end menus (PhilMod's difficulty,
 `philmod_gamemode`), which the console does not show. The multiple choice items
-of the mod's menus bound to dvars the map's scripts read go to the map's
+of the mod's menus bound to dvars the map's scripts read (not the game's own
+settings: UGX's options menu sets the field of view, `cg_fov`) go to the map's
 `options.txt` (the choices, the value the menus set as the default, the label of
 the item's row): CoD Xe's Custom Maps menu shows them for the focused map
 ("Difficulty: Default (X)"), X and Y change them, and the map's row sets them
@@ -341,11 +397,30 @@ two client scripts all run from there. Dead Sand's crash
 ("Overflowed stackpoints!") came from the same: the console ran `patch.ff`'s
 `maps/_zombiemode_blockers.gsc` instead of the mod's.
 
+Anim trees (`animtrees/*.atr`) are read by the same loader, and the same goes
+for them: The Matrix's `animtrees/generic_human.atr` has some 250 animations
+the game's has not (Black Ops zombies' board tears, a boss, the wave gun's
+deaths), and the console compiled its scripts against the game's, stopping with
+"Server script compile error: animation
+'ai_zombie_crawl_microwave_death_walking_c' not defined in anim tree
+'generic_human'". The mod's tree goes to the `scripts` folder with the scripts,
+and the conversion warns that the map needs a CoD Xe build that loads it. Its
+loose copy also replaces its fastfiles' as the scripts' do: The Matrix's tree in
+its `.iwd` has the wave gun's animations, the one in its `_patch.ff` not.
+
 More differences the converted scripts work around (Dead Sand's):
 
 - The console's `SetCursorHint` crashes the game on a hint type it has not (it
   lists the valid ones past the end of their table): Dead Sand's Nebelwerfer
   sets `"HINT_NONE"`, which becomes `"HINT_NOICON"`.
+- Client script effects name their local client first. UGX Mod's Thundergun
+  (`clientscripts/ugx_thundergun.csc`) plays its steam with `playfx( i, ... )`
+  in a loop over its three vents, for local clients 3, 2 and 1. The PC has one
+  local client and ignores them; the console has four (split screen), and an
+  effect for one that is not playing froze the game on the first shot (Kino Der
+  Toten; CoD Xenon's conversion freezes too). In a function given its local
+  client, such a call whose local client is a loop counter (a loop not over the
+  players) uses the function's local client.
 - The console refuses precaches once the level script has waited, and a model
   not precached cannot be set. Zombie maps call the zombie mode's `main()`,
   which waits for the players, then their own setup: its literal precaches are
@@ -370,6 +445,26 @@ More differences the converted scripts work around (Dead Sand's):
   which stops drawing the world where the fog is thick: at least 4000 units away,
   as Treyarch's, and two of the fog's halfway distances past its start for
   thinner fogs. Scripts that set a splitscreen fog of their own keep it.
+- On the console a player on an MG42 turret (`mg42_bipod_stand`, `_crouch`,
+  `_prone`) of a zombie map sees no world: the client draws the turret's view
+  far from the gun (the console's `viewpos` gives coordinates of 1e24 on Dead
+  Sand, the world's origin on CoD Xenon's Airport), while the server has the
+  player's eye at the gun. Stock Nacht with one placed does the same; the
+  campaign's MG42s and The Simpsons' .30 cals do not, and neither the gun's
+  model, overheating, the player's weapons nor the AI change it. On zombie maps
+  a player getting on one gets off it at once and holds the gun instead
+  (`t4ff_mounted_guns` in the level script): in its place, the eye where the
+  console puts it (`tag_player`), within its arcs and stance, with the portable
+  MG42 the map has (`mg42`, else `mg42_bipod`) and endless ammo, until the use
+  button again, going down or leaving; the turret hides meanwhile and AI still
+  use it.
+- Timed power-ups such as PhilMod's Unlimited Ammo turn `player_sustainammo`
+  (endless ammo and grenades) on, and off when their time is up. A game that
+  ends or restarts meanwhile never turns it off, and the dvar keeps its value
+  into the next game; console testers of Mini-Labor reported endless ammo. The
+  level script of a map whose scripts turn it on turns it off as it starts; a
+  cheat that is on (`sf_use_ignoreammo`, which CoD Xe's mod menu sets with
+  "Engine Infinite Ammo") still turns it on after that.
 
 Some errors in the console log come from the PC map itself and are harmless:
 PC Aztec's zombie type names a `walther` sidearm zombies never draw, and
@@ -407,6 +502,30 @@ maps it is `preview.bin`, their loading screen at 512x288, which `convert`
 writes next to `<map>_load.ff` and `menu` writes for the maps already installed
 with one. CoD Xe copies it into a picture slot the menu zone has for it, so
 maps converted before need `menu` run once more, for the slot.
+
+CoD Xe has a custom maps list of its own since release r351 (the menu
+`codxe_usermaps` of a menu zone, launching a map solo or in a co-op lobby),
+which reads `map.json` (`{"version": 1, "name": ..., "description": ...}`) and
+shows `preview.dds`, a 512x256 DXT1 picture it copies into the menu's image
+`codxe_usermap_preview` (another size is refused). `convert` writes both, from
+`description.txt` (where a map's name is still changed) and the loading screen,
+and `menu` writes them for the maps of `usermaps` that have none. Maps made for
+that list carry only `map.json`; the list above reads it when a map has no
+`description.txt`.
+
+The menu zone of that list is CoD Xenon's 0.3.0 `patch_ui.ff`: it replaces the
+game's whole menu list (`ui/menus.txt`), which is how it adds a menu of its own.
+`menu` uses it when the game's `zone\patch_ui.ff` is that one, or installs it
+from a folder or file given with `--menu-zone` (the window gives its Xbox 360
+fastfiles, so add CoD Xenon's 0.3.0 folder there), keeping the one before as
+`patch_ui.ff.bak`; it then patches nothing and only gives the maps their
+`map.json`, `preview.dds` and streams. Without such a menu zone it makes the list
+above from CoD Xenon's 0.2.0 `patch_ui.ff`, as before. CoD Xe's own list has no
+options: the maps that have some ask them in game (see Console fastfiles).
+
+```sh
+python -m t4ff menu "<game>/_codxe/t4" --menu-zone "<codxe-t4-fastfiles-v0.3.0>"
+```
 
 `menu` also rewrites the streamed sounds (`.xma`) of the maps in `usermaps`
 that do not have the layout of the game's streams (CoD Xenon's maps, maps

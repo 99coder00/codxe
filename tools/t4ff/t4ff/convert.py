@@ -434,6 +434,8 @@ class ConvertOptions:
     # total texture memory budget in bytes, 0 for no limit
     texture_budget: int = 0
     keep_mips: bool = True
+    # False: textures without their packed mip tail (images.keeps_level), to fit the memory target
+    mip_tail: bool = True
     compress_textures: bool = True
     # the map's own .iwd files / folders (images/<name>.iwi of its textures)
     iwd_paths: List[str] = field(default_factory=list)
@@ -456,6 +458,16 @@ class ConvertOptions:
     jobs: int = 0
     # technique sets only referenced by name (zones unloaded while the game runs)
     reference_techsets: bool = False
+    # the images an earlier conversion of the map streamed (lower case name -> levels streamed, 2
+    # deep): the texture budget then counts what each keeps in the fastfile (assets.plan_textures_shared)
+    stream_steps: Dict[str, int] = field(default_factory=dict, repr=False, compare=False)
+    # bytes the textures lose from what the planner counts for them with no level dropped, instead of
+    # a texture budget (its count differs from the written zone's by a few MiB: a cut does not)
+    texture_cut: int = 0
+    # deep streamed textures may keep an eighth of their size in the fastfile when the texture budget
+    # needs it, before any texture loses its top level (stream.PAK_EIGHTH; needs a CoD Xe build that
+    # knows it)
+    eighth_levels: bool = True
     # encoded loaded sounds (or the error encoding them), shared by the zones converted together
     sound_cache: Dict[Tuple[str, int], object] = field(default_factory=dict, repr=False, compare=False)
 
@@ -768,8 +780,9 @@ class ZoneConverter:
             return  # the pointer slot is not addressable
         self.cloner.register_asset(ASSET_RECORDS[asset_type], name, loader)
 
-    def from_library(self, asset_type: str, name: str, src_node: Optional[Node] = None) -> Optional[Node]:
-        """A copy of the console asset ``name`` from the console library, if it has one."""
+    def from_library(self, asset_type: str, name: str, src_node: Optional[Node] = None, unsafe_ok: bool = False) -> Optional[Node]:
+        """A copy of the console asset ``name`` from the console library, if it has one (a technique set
+        with shaders the game cannot draw with only when ``unsafe_ok``, see library.techset_safe)."""
         if self.console_library is None or asset_type not in ASSET_RECORDS:
             return None
         if self.console_library.in_game_zones(ASSET_RECORDS[asset_type], name):
@@ -777,6 +790,8 @@ class ZoneConverter:
         found = self.console_library.find(ASSET_RECORDS[asset_type], name)
         if found is None:
             return None
+        if asset_type == "techset" and not unsafe_ok and not self.console_library.techset_safe(found[1]):
+            return None  # CoD Xenon's own shaders the game cannot draw with (see library.techset_safe)
         from .library import LibraryError
 
         try:

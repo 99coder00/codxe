@@ -183,12 +183,16 @@ def _encode_alpha5(alpha: np.ndarray) -> np.ndarray:
 
 
 def encode(rgba: np.ndarray, fmt: str) -> bytes:
-    """Encode an (h, w, 4) RGBA uint8 array to DXT1/DXT5 or DXN (red and green) (linear PC layout)."""
+    """Encode an (h, w, 4) RGBA uint8 array to DXT1/DXT3/DXT5 or DXN (red and green) (linear PC layout)."""
     blocks = _blocks(rgba).astype(np.float64)
     rgb = blocks[:, :, :3]
     alpha = blocks[:, :, 3]
     if fmt == "DXT1":
         out = _encode_color(rgb, alpha < 128)
+    elif fmt == "DXT3":
+        # 4 bits of alpha a texel, two a byte, the first texel in the low bits
+        nibbles = np.clip(np.round(alpha / 17), 0, 15).astype(np.uint8)
+        out = np.concatenate([nibbles[:, 0::2] | (nibbles[:, 1::2] << 4), _encode_color(rgb)], axis=1)
     elif fmt == "DXT5":
         out = np.concatenate([_encode_alpha5(alpha.astype(np.int64)), _encode_color(rgb)], axis=1)
     elif fmt == "DXN":

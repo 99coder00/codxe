@@ -16,6 +16,11 @@ those maps:
   the PC game's own zones have the dogs' (``german_shepherd_run``, its window jumps, ...), so a PC
   map's zones name none of them, and neither do the console's; CoD Xenon's ``zm_tranzit`` has them.
   Without them the dogs of the dog rounds cannot run, jump through windows nor feel pain.
+  Only those a script plays (``%german_shepherd_run``: the map's scripts, the game's own ones it
+  runs): a mod's ``generic_human.atr`` is the campaign's tree with its zombies added, and the
+  campaign's animations the console's campaign zones have (Kino Der Toten: 1375, patrols, drones,
+  banzai charges) took about 65 MiB that zombies never play. The game reports the others ("Could not load
+  xanim"), as CoD Xenon's conversions have it.
 
 They are taken from the map's files or the console fastfiles given, when they have them and the
 game's own zones (``common.ff`` among the console fastfiles) do not.
@@ -26,15 +31,17 @@ from __future__ import annotations
 import re
 from typing import List, Optional, Set, Tuple
 
-from .scripts import SCRIPT_EXTENSIONS, RawfileFinder, _rawfiles, rawfile_text, zone_of_assets
+from .scripts import PLAYER_ANIM_SCRIPT, SCRIPT_EXTENSIONS, RawfileFinder, _rawfiles, rawfile_text, zone_of_assets
 from .zone import Node, Platform, Zone, asset_name
 
-PLAYER_ANIM_SCRIPT = "mp/playeranim.script"
+# the sounds the game plays by name for steps, landings and gear (see named_assets_zone)
+FOOTSTEP_ALIAS = re.compile(r"^(?:q?step_(?:walk|run|sprint|prone|scrape)\w*|land_\w+|gear_\w+)$", re.I)
 
 _LITERAL = re.compile(r'"(\w+)"')
 _ANIM_LINE = re.compile(r"^\s*(?:both|legs|torso|turret)\s+(\w+)", re.M)
 _COMMENTS = re.compile(r"/\*.*?\*/|//[^\n]*", re.S)
 _USING_ANIMTREE = re.compile(r'#using_animtree\s*\(\s*"(\w+)"\s*\)')
+_ANIM_REFERENCE = re.compile(r"%\s*(\w+)")
 _ATR_TOKEN = re.compile(r"[{}]|[\w.]+(?:\s*:\s*[\w ]+)?")
 
 
@@ -78,6 +85,14 @@ def anim_trees_used(scripts: List[Tuple[str, bytes]]) -> List[str]:
     for _, text in scripts:
         names.update(m.group(1).lower() for m in _USING_ANIMTREE.finditer(_COMMENTS.sub("", text.decode("latin-1"))))
     return [f"animtrees/{n}.atr" for n in sorted(names)]
+
+
+def played_animations(scripts: List[Tuple[str, bytes]]) -> Set[str]:
+    """The animations the scripts play (``%name``), lowercase."""
+    names = set()
+    for _, text in scripts:
+        names.update(m.group(1).lower() for m in _ANIM_REFERENCE.finditer(_COMMENTS.sub("", text.decode("latin-1"))))
+    return names
 
 
 def shellshock_candidates(scripts: List[Tuple[str, bytes]]) -> List[str]:
@@ -138,10 +153,16 @@ def named_assets_zone(p: Platform, zone: Zone, sources: List, console_library=No
                 found = console_library.find_in_game_zones("RawFile", tree)
                 if found is not None:
                     trees[tree] = rawfile_text(found[1])
-        taken, missing = {}, []
+        # only those a script plays: the map's, and the game's own it runs (its animscripts)
+        played = played_animations(scripts + [(n, rawfile_text(node)) for n, node in console_library.game_rawfiles()
+                                              if n.endswith(SCRIPT_EXTENSIONS)])
+        taken, missing, unplayed = {}, [], 0
         for tree, text in sorted(trees.items()):
             for anim in anim_tree_animations(text):
                 if anim in taken or not wanted("XAnimParts", anim):
+                    continue
+                if anim not in played:
+                    unplayed += 1
                     continue
                 found = console_library.find("XAnimParts", anim)
                 if found is None:
@@ -159,7 +180,31 @@ def named_assets_zone(p: Platform, zone: Zone, sources: List, console_library=No
             anims = [a for a, t in taken.items() if t == tree]
             log(f"animations: added {len(anims)} of {tree} (the game loads them by name, none of the map's zones nor the game's have them: {', '.join(anims[:4])}{', ...' if len(anims) > 4 else ''})")
         if missing:
-            log(f"animations: {len(missing)} the map's anim trees name are in none of the console fastfiles given (e.g. {', '.join(missing[:4])}): the game reports them (\"Could not load xanim\") and plays none")
+            log(f"animations: {len(missing)} the map's scripts play are in none of the console fastfiles given (e.g. {', '.join(missing[:4])}): the game reports them (\"Could not load xanim\") and plays none")
+        if unplayed:
+            log(f"animations: {unplayed} the map's anim trees name and no script plays are left out (the game reports them, \"Could not load xanim\")")
+
+    # the footsteps: the game plays the sounds of a player's or an AI's steps, landings and gear by
+    # name (step_run_concrete, land_dirt, gear_rattle_run...). The PC game's own zones have them; the
+    # console's have them in each level's zone (Nacht der Untoten's: 422, 1.25 MiB), not common.ff.
+    # Without them the steps are silent ("Missing sound alias 'step_run_dirt'").
+    if console_library is not None:
+        from .library import LibraryError
+
+        steps = []
+        for alias in console_library.names("snd_alias_list_t"):
+            if not FOOTSTEP_ALIAS.match(alias) or not wanted("snd_alias_list_t", alias):
+                continue
+            found = console_library.find("snd_alias_list_t", alias)
+            try:
+                node = finder.cloner.copy_asset(*found)
+            except LibraryError:
+                continue
+            added.append(("sound", alias, node))
+            defined.add(("snd_alias_list_t", alias))
+            steps.append(alias)
+        if steps:
+            log(f"footsteps: added {len(steps)} sounds the game plays by name for steps, landings and gear, in none of the map's zones nor the game's ({', '.join(steps[:4])}, ...)")
 
     # the player animation script: the map's own, else the game's (common.ff among the console
     # fastfiles; not another map's, which may have changed it)
