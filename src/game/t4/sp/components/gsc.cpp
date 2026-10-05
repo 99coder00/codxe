@@ -40,6 +40,17 @@ void GScr_SpawnCollision()
     Scr_AddEntity(ent, SCRIPTINSTANCE_SERVER);
 }
 
+// ExecuteCommand(<command>): runs a console command as the first local client typed it (tests drive the
+// game from a script: "+attack", "-attack"...).
+void GScr_ExecuteCommand()
+{
+    if (Scr_GetNumParam(SCRIPTINSTANCE_SERVER) != 1)
+        Scr_Error("Usage: ExecuteCommand(<command>)", SCRIPTINSTANCE_SERVER);
+
+    Cbuf_AddText(0, Scr_GetString(0, SCRIPTINSTANCE_SERVER));
+    Cbuf_AddText(0, "\n");
+}
+
 void PlayerCmd_JumpButtonPressed(scr_entref_t entref)
 {
     if (entref.classnum != 0)
@@ -186,6 +197,7 @@ static const gsc::Entry<BuiltinMethod> methods[] = {
 
 static const gsc::Entry<BuiltinFunction> functions[] = {
     {"spawncollision", GScr_SpawnCollision, BUILTIN_ANY},
+    {"executecommand", GScr_ExecuteCommand, BUILTIN_ANY},
 };
 } // namespace
 

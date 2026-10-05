@@ -10,6 +10,11 @@ namespace
 const char *const CODXE_ZONE_DIRECTORY = "zone";
 const char *const USERMAPS_DIRECTORY = "usermaps";
 const char *const SOUND_REQUEST_PREFIX = "D:\\sounds\\";
+const char *const HIGHMIP_REQUEST_PREFIX = "D:\\highmip";
+const char *const IMAGES_PAK_FILE = "images.pak";
+const unsigned int IMAGES_PAK_VERSION = 2;
+const unsigned int IMAGES_PAK_VERSION_EIGHTH = 3; // with IMAGES_PAK_EIGHTH entries
+const unsigned int IMAGES_PAK_MAX_INDEX = 16 * 1024 * 1024;
 
 char activeUsermap[64] = "";
 
@@ -227,18 +232,181 @@ std::string ResolveLooseSoundPath(const char *filename)
     return Config::ResolveDataPathForGameFile(soundPath.c_str());
 }
 
+// The image streamer reads a streamed image's top mip level from "D:\highmip[\h0]\<image>.hi" when
+// a model using it is drawn close by (Title Update 7's path; the disc executable's has no subfolder). A
+// custom map's own (t4ff writes them next to its fastfile) are in its folder's highmip folder, which
+// keeps the game's files untouched; images the map has none of stay the disc's. Only the game's request
+// is matched, never the path it is redirected to (the existence check opens files too).
+std::string ResolveHighmipPath(const char *filename)
+{
+    const size_t prefixLength = std::strlen(HIGHMIP_REQUEST_PREFIX);
+    if (!filename || !activeUsermap[0] || _strnicmp(filename, HIGHMIP_REQUEST_PREFIX, prefixLength) != 0 ||
+        !EndsWithIgnoreCase(filename, ".hi"))
+    {
+        return std::string();
+    }
+
+    const char *imageFile = std::strrchr(filename, '\\') + 1;
+    if (!IsSafeRelativePath(imageFile))
+        return std::string();
+
+    const std::string usermapDirectory = filesystem::JoinPath(USERMAPS_DIRECTORY, activeUsermap);
+    const std::string highmipDirectory = filesystem::JoinPath(usermapDirectory.c_str(), "highmip");
+    const std::string highmipPath = filesystem::JoinPath(highmipDirectory.c_str(), imageFile);
+    const std::string resolved = Config::ResolveDataPathForGameFile(highmipPath.c_str());
+    if (!resolved.empty())
+        DbgPrint("[codxe][T4 SP][FastFiles] highmip: %s\n", resolved.c_str());
+    return resolved;
+}
+
+// A custom map's highmip files in one pack, usermaps\<map>\images.pak (t4ff's PakWriter, big endian):
+// a 32 byte header (magic "T4FFPAK1", version, entry count, index offset, index size), the entries'
+// data at 4 KiB aligned offsets (the game reads them unbuffered), then the index: per entry (24
+// bytes) the name's offset from the index's start, its length, flags, the data's offset and size,
+// the offset of its level 1 in the data and of its level 2 from there (deep entries: the whole
+// texture, see Streaming); then the names (lower case image names, without ".hi"). Its index is
+// read when the map first needs it.
+typedef ImagesPakImage ImagesPakEntry;
+
+CRITICAL_SECTION imagesPakLock;
+
+char imagesPakUsermap[64] = "";
+std::string imagesPakGamePath; // the pack as the game opens it, empty when the map has none
+std::map<std::string, ImagesPakEntry> imagesPakEntries;
+
+unsigned int ReadBigEndian32(const unsigned char *bytes)
+{
+    return (static_cast<unsigned int>(bytes[0]) << 24) | (static_cast<unsigned int>(bytes[1]) << 16) |
+           (static_cast<unsigned int>(bytes[2]) << 8) | bytes[3];
+}
+
+unsigned int ReadBigEndian16(const unsigned char *bytes)
+{
+    return (static_cast<unsigned int>(bytes[0]) << 8) | bytes[1];
+}
+
+void LoadImagesPak()
+{
+    if (std::strcmp(imagesPakUsermap, activeUsermap) == 0)
+        return;
+
+    strncpy(imagesPakUsermap, activeUsermap, sizeof(imagesPakUsermap) - 1);
+    imagesPakUsermap[sizeof(imagesPakUsermap) - 1] = '\0';
+    imagesPakGamePath.clear();
+    imagesPakEntries.clear();
+
+    const std::string usermapDirectory = filesystem::JoinPath(USERMAPS_DIRECTORY, activeUsermap);
+    const std::string relativePath = filesystem::JoinPath(usermapDirectory.c_str(), IMAGES_PAK_FILE);
+    const std::string path = Config::ResolveDataPath(relativePath.c_str());
+    if (path.empty())
+        return;
+
+    HANDLE file =
+        CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE)
+        return;
+
+    unsigned char header[32];
+    DWORD bytesRead = 0;
+    std::vector<unsigned char> index;
+    if (ReadFile(file, header, sizeof(header), &bytesRead, nullptr) && bytesRead == sizeof(header) &&
+        std::memcmp(header, "T4FFPAK1", 8) == 0 &&
+        (ReadBigEndian32(header + 8) == IMAGES_PAK_VERSION || ReadBigEndian32(header + 8) == IMAGES_PAK_VERSION_EIGHTH))
+    {
+        const unsigned int count = ReadBigEndian32(header + 12);
+        const unsigned int indexOffset = ReadBigEndian32(header + 16);
+        const unsigned int indexSize = ReadBigEndian32(header + 20);
+        if (indexSize >= count * 24 && indexSize <= IMAGES_PAK_MAX_INDEX &&
+            SetFilePointer(file, static_cast<LONG>(indexOffset), nullptr, FILE_BEGIN) != INVALID_SET_FILE_POINTER)
+        {
+            index.resize(indexSize);
+            if (!ReadFile(file, &index[0], indexSize, &bytesRead, nullptr) || bytesRead != indexSize)
+                index.clear();
+        }
+        for (unsigned int i = 0; !index.empty() && i < count; ++i)
+        {
+            const unsigned char *entry = &index[i * 24];
+            const unsigned int nameOffset = ReadBigEndian32(entry);
+            const unsigned int nameLength = ReadBigEndian16(entry + 4);
+            if (nameOffset + nameLength > indexSize)
+                continue;
+            ImagesPakEntry value = {ReadBigEndian32(entry + 8), ReadBigEndian32(entry + 12), ReadBigEndian16(entry + 6),
+                                    ReadBigEndian32(entry + 16), ReadBigEndian32(entry + 20)};
+            imagesPakEntries[std::string(reinterpret_cast<const char *>(&index[nameOffset]), nameLength)] = value;
+        }
+    }
+    CloseHandle(file);
+
+    if (!imagesPakEntries.empty())
+        imagesPakGamePath = Config::ResolveDataPathForGameFile(relativePath.c_str());
+    DbgPrint("[codxe][T4 SP][FastFiles] images.pak: %u entries in %s\n", static_cast<unsigned int>(imagesPakEntries.size()),
+             path.c_str());
+}
+
+// The pack's entry of an image (copied: the index changes with the map), if the map has one.
+bool FindImagesPakEntry(std::string name, ImagesPakEntry *entry)
+{
+    if (!activeUsermap[0])
+        return false;
+
+    std::transform(name.begin(), name.end(), name.begin(), ::tolower);
+    EnterCriticalSection(&imagesPakLock);
+    LoadImagesPak();
+    const std::map<std::string, ImagesPakEntry>::const_iterator found = imagesPakEntries.find(name);
+    const bool exists = found != imagesPakEntries.end();
+    if (exists)
+        *entry = found->second;
+    LeaveCriticalSection(&imagesPakLock);
+    return exists;
+}
+
+// The pack's entry for a highmip request ("D:\highmip[\h0]\<image>.hi"), if the map has one.
+bool FindImagesPakRequest(const char *filename, ImagesPakEntry *entry)
+{
+    const size_t prefixLength = std::strlen(HIGHMIP_REQUEST_PREFIX);
+    if (!filename || !activeUsermap[0] || _strnicmp(filename, HIGHMIP_REQUEST_PREFIX, prefixLength) != 0 ||
+        !EndsWithIgnoreCase(filename, ".hi"))
+    {
+        return false;
+    }
+
+    std::string name = std::strrchr(filename, '\\') + 1;
+    name.erase(name.length() - 3);
+    return FindImagesPakEntry(name, entry);
+}
+
+// Title Update 7's Sys_CreateFile is the CRT's CreateFileA: every file the game opens passes here.
 int Sys_CreateFile_Hook(const char *filename, int desiredAccess, int shareMode, int securityAttributes,
                         int creationDisposition, int flagsAndAttributes)
 {
+    // a highmip file in the map's pack: the pack, at the entry (the streamer reads from there)
+    ImagesPakEntry pakEntry;
+    if (FindImagesPakRequest(filename, &pakEntry))
+    {
+        EnterCriticalSection(&imagesPakLock);
+        const std::string pakPath = imagesPakGamePath;
+        LeaveCriticalSection(&imagesPakLock);
+        const int handle = Sys_CreateFile_Detour.GetOriginal<Sys_CreateFile_t>()(
+            pakPath.c_str(), desiredAccess, shareMode | FILE_SHARE_READ, securityAttributes, creationDisposition,
+            flagsAndAttributes);
+        if (handle != -1 && SetFilePointer(reinterpret_cast<HANDLE>(handle), static_cast<LONG>(pakEntry.offset), nullptr,
+                                           FILE_BEGIN) != INVALID_SET_FILE_POINTER)
+        {
+            DbgPrint("[codxe][T4 SP][FastFiles] highmip: %s from images.pak (%u bytes at %u)\n",
+                     std::strrchr(filename, '\\') + 1, pakEntry.size, pakEntry.offset);
+            return handle;
+        }
+        if (handle != -1)
+            CloseHandle(reinterpret_cast<HANDLE>(handle));
+    }
+
     std::string redirectedPath = ResolveFastfilePath(filename);
+    if (redirectedPath.empty())
+        redirectedPath = ResolveLooseSoundPath(filename);
+    if (redirectedPath.empty())
+        redirectedPath = ResolveHighmipPath(filename);
     if (!redirectedPath.empty())
         filename = redirectedPath.c_str();
-    else
-    {
-        redirectedPath = ResolveLooseSoundPath(filename);
-        if (!redirectedPath.empty())
-            filename = redirectedPath.c_str();
-    }
 
     return Sys_CreateFile_Detour.GetOriginal<Sys_CreateFile_t>()(filename, desiredAccess, shareMode, securityAttributes,
                                                                  creationDisposition, flagsAndAttributes);
@@ -313,10 +481,76 @@ void RestoreExpandedXAssetPools()
 }
 } // namespace
 
+// With a file named "dump_executable" in the data folder, the running executable's image (Title
+// Update 7 under Xenia, whose code differs from the disc's) is written next to it for analysis.
+void DumpExecutableImage()
+{
+    const std::string marker = Config::ResolveDataPath("dump_executable");
+    if (marker.empty())
+        return;
+
+    const unsigned char *base = reinterpret_cast<const unsigned char *>(0x82000000);
+    if (base[0] != 'M' || base[1] != 'Z')
+    {
+        DbgPrint("[codxe][T4 SP] dump_executable: no image header at 82000000\n");
+        return;
+    }
+    const auto le32 = [base](unsigned int offset) {
+        return static_cast<unsigned int>(base[offset]) | (static_cast<unsigned int>(base[offset + 1]) << 8) |
+               (static_cast<unsigned int>(base[offset + 2]) << 16) | (static_cast<unsigned int>(base[offset + 3]) << 24);
+    };
+    const unsigned int ntHeaders = le32(0x3C);
+    if (ntHeaders > 0x1000 || base[ntHeaders] != 'P' || base[ntHeaders + 1] != 'E')
+    {
+        DbgPrint("[codxe][T4 SP] dump_executable: no PE header\n");
+        return;
+    }
+    const unsigned int sizeOfImage = le32(ntHeaders + 24 + 56);
+    const std::string path = marker + ".bin";
+    FILE *file = fopen(path.c_str(), "wb");
+    if (!file)
+    {
+        DbgPrint("[codxe][T4 SP] dump_executable: cannot create %s\n", path.c_str());
+        return;
+    }
+    // in chunks through a buffer of our own: one write of the whole image fails
+    static char chunk[0x10000];
+    unsigned int written = 0;
+    for (unsigned int offset = 0; offset < sizeOfImage; offset += sizeof(chunk))
+    {
+        const unsigned int size = min(static_cast<unsigned int>(sizeof(chunk)), sizeOfImage - offset);
+        memcpy(chunk, base + offset, size);
+        if (fwrite(chunk, 1, size, file) != size)
+            break;
+        written += size;
+    }
+    fclose(file);
+    DbgPrint("[codxe][T4 SP] dump_executable: wrote %u of %u bytes to %s\n", written, sizeOfImage, path.c_str());
+}
+
+bool GetImagesPakImage(const char *imageName, ImagesPakImage *image)
+{
+    return imageName && FindImagesPakEntry(imageName, image);
+}
+
+std::string GetImagesPakPath()
+{
+    EnterCriticalSection(&imagesPakLock);
+    const std::string path = imagesPakGamePath;
+    LeaveCriticalSection(&imagesPakLock);
+    return path;
+}
+
 FastFiles::FastFiles()
 {
+    DumpExecutableImage();
+
     // The DLL remains resident across title launches, so explicitly reset title-lifetime state.
     activeUsermap[0] = '\0';
+    InitializeCriticalSection(&imagesPakLock);
+    imagesPakUsermap[0] = '\0';
+    imagesPakGamePath.clear();
+    imagesPakEntries.clear();
     expandedXAssetPoolCount = 0;
 
     DB_ReallocXAssetPool(ASSET_TYPE_MENULIST, 192); // Stock: 128
@@ -334,6 +568,7 @@ FastFiles::~FastFiles()
 {
     DB_LoadXAssets_Detour.Remove();
     Sys_CreateFile_Detour.Remove();
+    DeleteCriticalSection(&imagesPakLock);
 
     RestoreExpandedXAssetPools();
 
