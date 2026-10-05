@@ -1,6 +1,6 @@
 # t4ff and CoD Xe T4: handoff notes
 
-State of the work as of 2026-10-04 (the sections below date from 2026-09-28 on unless marked), for
+State of the work as of 2026-10-05 (the sections below date from 2026-09-28 on unless marked), for
 whoever (person or Claude session) picks it up next. The [README](README.md) explains what t4ff does and
 how to use it; this file is about where the work stands, the rules it follows, what is open, what
 was already tried, and how things were checked.
@@ -11,14 +11,55 @@ To continue in a new Claude Code session (for example one running on the tester'
 can run t4ff on the real files and read the Xenia and Watson logs directly), give it this:
 
 > Read `tools/t4ff/HANDOFF.md` on branch `claude/charming-ptolemy-rahr6b` of this repository, starting
-> with its "State on 2026-10-04" section, and continue from there. Follow its working rules.
+> with its "State on 2026-10-05" and "State on 2026-10-04" sections, and continue from there. Follow
+> its working rules.
 
 Everything below is in the repository. Nothing from the earlier cloud sessions (their scratch
 files, sample downloads, analysis scripts) carried over: the samples come from the files listed
 under [Environment](#environment), and the checks are described under
 [Investigation toolbox](#investigation-toolbox).
 
-## State on 2026-10-04 (read this first)
+## State on 2026-10-05: the native port (read this first)
+
+**The user's request:** t4ff "cant stay in python due to efficiency issues". It is being rewritten in
+C++ as a Windows program, `tools/t4ff/native` ([README](native/README.md)), in eight steps. The user
+chose Dear ImGui for the GUI and the GPL-3.0 for the program (OpenAssetTools' layouts and commands
+are compiled into it), and approved downloading zlib 1.3.1, Dear ImGui 1.91.9 and minimp3 (vendored
+in `native/third_party`).
+
+**The Python t4ff stays the reference.** Each native step is checked by comparing its output with the
+Python output byte for byte on real fastfiles (`native/tools/py_reference.py` gives the Python side).
+Keep fixing and improving the Python t4ff where the work needs it until the native one has caught
+up (step 7). A change to the Python must be carried over to the native code by the step that ports it.
+
+**Step 1 (foundation) is done:** fastfiles, structure layouts (generated into `native/data` by
+`native/tools/gen_schema.py`), zone code commands, and the zone reader and writer.
+- Every readable fastfile at hand gives the Python writer's bytes: 40 PC and CoD Xenon zones, plus
+  88 from the disc folder with its CoD Xenon maps.
+- Node dumps are identical to the Python's on four zones, up to 458,187 lines.
+- Kino Rezurrection's console `d.ff` recompresses to the identical fastfile.
+- On one thread, zones read 7-9 times faster than the Python. Every processor reads its own zone:
+  the 49 console zones of a conversion's library (4.3 GiB) load in 3.1 s.
+
+**Next, step 2: textures.** IWI reading, wavelet decoding, DXT, Xenos tiling and mip chains
+(`images.py`, `wavelet.py`, `dxt.py`, `xenos.py`), multi-threaded, checked against the Python
+output on Kino Rezurrection's textures. Then:
+- step 3: the conversion core (`convert.py`, `assets.py`, `techsets.py`, `library.py`, `merge.py`,
+  `xanim.py`);
+- step 4: sounds (`audio.py`, `soundbudget.py`), running xma2encode in parallel;
+- step 5: scripts, menus and loading screens;
+- step 6: streaming and the memory planner (`stream.py`, `memory.py`), which converts once and
+  plans again instead of converting again;
+- step 7: command line parity;
+- step 8: the GUI, with a simple mode and an advanced one.
+
+Things noted for later steps:
+- Memory: nodes copy their bytes out of the zone, so the library's 49 zones take 9.6 GiB at the
+  peak. The library could keep only what it indexes, or let nodes point into the zone's buffer.
+- Speed: a faster inflate (libdeflate, zlib-ng) would help the largest single cost of reading one
+  file.
+
+## State on 2026-10-04
 
 **The user's goal now: strictly console compatible.** Every map is converted for a console's memory
 (the default `--memory-target 212`); Xenia-only builds (Xenia's patch enlarges the game's memory
@@ -846,6 +887,7 @@ Format facts learned in this work that are not in the README:
 | `codxe-build: src/game/t4/sp/components/fastfiles.cpp` | CoD Xe: usermap fastfiles, loose sounds, `images.pak` and `highmip` serving, `dump_executable` |
 | `Downloads\ida_dbs`, `Downloads\bo1_tools` | IDA databases (WaW disc, WaW TU7, Black Ops 1); the Black Ops 1 fastfile decrypter |
 | `tools/t4ff/t4ff/zone.py` | zone reader and writer, `Node`, `Ptr` |
+| `tools/t4ff/native/` | the C++ port (GPL-3.0): `src/core` (zone reader and writer...), `src/cli`, `data`, README |
 | `tools/t4ff/t4ff/convert.py` | the converter, pointer fixing, shared data adoption |
 | `tools/t4ff/t4ff/assets.py` | per asset rules (images, materials, sounds, weapons...) |
 | `tools/t4ff/t4ff/images.py`, `xenos.py`, `dxt.py` | textures: formats, tiling, cube maps, DXN |
