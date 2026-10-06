@@ -40,6 +40,7 @@ add_library(t4ffcore STATIC
   src/core/wavelet.cpp
   src/core/zip.cpp
   src/core/image.cpp
+  src/core/zone_cache.cpp
 )
 target_include_directories(t4ffcore PUBLIC src)
 target_link_libraries(t4ffcore PUBLIC zlibstatic)

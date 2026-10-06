@@ -100,24 +100,26 @@ void write_file(const std::filesystem::path &path, const std::vector<uint8_t> &d
         throw FastFileError(path.string() + ": write failed");
 }
 
-FastFile parse_fastfile(const std::vector<uint8_t> &file, const std::string &what)
+bool fastfile_big_endian(const uint8_t *header, size_t size, const std::string &what)
 {
-    if (file.size() < 12 || std::memcmp(file.data(), MAGIC_UNSIGNED, 8) != 0)
+    if (size < 12 || std::memcmp(header, MAGIC_UNSIGNED, 8) != 0)
         throw FastFileError(what + ": unsupported fastfile magic (only unsigned IWffu100 fastfiles are supported)");
-    const uint8_t *v = file.data() + 8;
+    const uint8_t *v = header + 8;
     uint32_t le = uint32_t(v[0]) | uint32_t(v[1]) << 8 | uint32_t(v[2]) << 16 | uint32_t(v[3]) << 24;
     uint32_t be = uint32_t(v[3]) | uint32_t(v[2]) << 8 | uint32_t(v[1]) << 16 | uint32_t(v[0]) << 24;
-    FastFile ff;
     if (le == VERSION_T4)
-        ff.big_endian = false;
-    else if (be == VERSION_T4)
-        ff.big_endian = true;
-    else
-    {
-        char buf[16];
-        snprintf(buf, sizeof buf, "%#x", le);
-        throw FastFileError(what + ": not a World at War fastfile (version " + buf + ")");
-    }
+        return false;
+    if (be == VERSION_T4)
+        return true;
+    char buf[16];
+    snprintf(buf, sizeof buf, "%#x", le);
+    throw FastFileError(what + ": not a World at War fastfile (version " + buf + ")");
+}
+
+FastFile parse_fastfile(const std::vector<uint8_t> &file, const std::string &what)
+{
+    FastFile ff;
+    ff.big_endian = fastfile_big_endian(file.data(), file.size(), what);
 
     z_stream z{};
     int rc = inflateInit(&z);

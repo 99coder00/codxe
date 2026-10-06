@@ -1,11 +1,13 @@
 // t4ff-cli: the command line of the native t4ff.
 //
 //   t4ff-cli info <fastfile> [--list]
-//   t4ff-cli roundtrip [--compress] [--jobs N] <fastfile or folder>...
+//   t4ff-cli roundtrip [--compress] [--jobs N] [--zone-cache | --zone-cache-dir DIR] <fastfile or folder>...
 //   t4ff-cli dump <fastfile> <out.txt>
 //   t4ff-cli rewrite <fastfile> <out.zone>
-//   t4ff-cli bench [--jobs N] [--keep] <fastfile or folder>...
+//   t4ff-cli bench [--jobs N] [--keep] [--zone-cache | --zone-cache-dir DIR] <fastfile or folder>...
 //   t4ff-cli textures [--jobs N] <out.txt> <iwd or folder>...
+//   t4ff-cli texbench [--jobs N] <iwd or folder>...
+//   t4ff-cli cache [--clear] [--zone-cache-dir DIR]
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -24,6 +26,7 @@
 #include "core/platforms.h"
 #include "core/threads.h"
 #include "core/zone.h"
+#include "core/zone_cache.h"
 #include "zlib.h"
 
 namespace fs = std::filesystem;
@@ -44,11 +47,16 @@ std::string utf8(const fs::path &p)
     return std::string(s.begin(), s.end());
 }
 
-double peak_mib()
+// Memory: committed (private) bytes now and at the peak, and the peak working set (which counts
+// mapped cache pages the system can drop at any time).
+std::string memory_text()
 {
-    PROCESS_MEMORY_COUNTERS pmc{};
-    GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof pmc);
-    return pmc.PeakWorkingSetSize / 1048576.0;
+    PROCESS_MEMORY_COUNTERS_EX pmc{};
+    GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS *>(&pmc), sizeof pmc);
+    char buf[160];
+    snprintf(buf, sizeof buf, "private %.0f MiB now, %.0f MiB at the peak; peak working set %.0f MiB", pmc.PrivateUsage / 1048576.0,
+             pmc.PeakPagefileUsage / 1048576.0, pmc.PeakWorkingSetSize / 1048576.0);
+    return buf;
 }
 
 // Fastfiles of the arguments: files as given, folders searched recursively in name order.
@@ -84,8 +92,8 @@ int cmd_info(const std::vector<fs::path> &files, bool list)
     {
         FastFile ff = read_fastfile(path);
         const Platform &p = for_endian(ff.big_endian);
-        auto zone = read_zone(p, ff.zone);
-        printf("%s: %s, zone %zu bytes, %zu script strings, %zu assets\n", utf8(path).c_str(), p.name.c_str(), ff.zone.size(),
+        auto zone = read_zone(p, std::move(ff.zone));
+        printf("%s: %s, zone %zu bytes, %zu script strings, %zu assets\n", utf8(path).c_str(), p.name.c_str(), zone->source->size(),
                zone->script_strings.size(), zone->assets.size());
         for (int b = 0; b < BLOCK_COUNT; ++b)
             printf("  %-30s %12u\n", block_name(b), zone->block_sizes[b]);
@@ -113,13 +121,14 @@ struct FileResult
 {
     std::string path;
     std::string status;
+    std::string cache;
     bool ok = false;
     size_t zone_size = 0;
     size_t nodes = 0;
     double t_inflate = 0, t_read = 0, t_write = 0, t_compress = 0;
 };
 
-int cmd_roundtrip(const std::vector<fs::path> &files, int jobs, bool check_compress, bool bench, bool keep)
+int cmd_roundtrip(const std::vector<fs::path> &files, int jobs, bool check_compress, bool bench, bool keep, const fs::path &cache_dir)
 {
     auto t0 = Clock::now();
     pc();
@@ -142,14 +151,29 @@ int cmd_roundtrip(const std::vector<fs::path> &files, int jobs, bool check_compr
         try
         {
             auto t = Clock::now();
-            std::vector<uint8_t> file = read_file(files[i]);
-            FastFile ff = parse_fastfile(file, r.path);
+            std::vector<uint8_t> file; // the fastfile, to compare with when compressing again
+            OpenedZone opened;
+            if (check_compress)
+            {
+                file = read_file(files[i]);
+                FastFile ff = parse_fastfile(file, r.path);
+                opened.big_endian = ff.big_endian;
+                opened.bytes = zone_bytes(std::move(ff.zone));
+            }
+            else
+                opened = open_zone(files[i], cache_dir);
             r.t_inflate = seconds_since(t);
-            r.zone_size = ff.zone.size();
-            const Platform &p = for_endian(ff.big_endian);
+            if (opened.cached)
+                r.cache = opened.cache_hit ? ", cached" : ", cache made";
+            else if (!opened.cache_error.empty())
+                r.cache = ", cache failed: " + opened.cache_error;
+            const uint8_t *original = opened.bytes->data();
+            const size_t original_size = opened.bytes->size();
+            r.zone_size = original_size;
+            const Platform &p = for_endian(opened.big_endian);
 
             t = Clock::now();
-            auto zone = read_zone(p, ff.zone);
+            auto zone = read_zone(p, opened.bytes);
             r.t_read = seconds_since(t);
             r.nodes = zone->node_store.size();
 
@@ -158,7 +182,7 @@ int cmd_roundtrip(const std::vector<fs::path> &files, int jobs, bool check_compr
                 t = Clock::now();
                 std::vector<uint8_t> written = write_zone(p, *zone);
                 r.t_write = seconds_since(t);
-                r.ok = written == ff.zone;
+                r.ok = written.size() == original_size && std::memcmp(written.data(), original, original_size) == 0;
                 if (!r.ok)
                 {
                     // which header fields (size, external size, block sizes) differ, and whether the
@@ -167,16 +191,16 @@ int cmd_roundtrip(const std::vector<fs::path> &files, int jobs, bool check_compr
                                                    "virtual", "large", "physical"};
                     std::string fields;
                     for (int f = 0; f < 9; ++f)
-                        if (written.size() >= 36 && ff.zone.size() >= 36 && p.u32(written.data() + 4 * f) != p.u32(ff.zone.data() + 4 * f))
+                        if (written.size() >= 36 && original_size >= 36 && p.u32(written.data() + 4 * f) != p.u32(original + 4 * f))
                             fields += std::string(fields.empty() ? "" : " ") + FIELDS[f] + " " + std::to_string(p.u32(written.data() + 4 * f)) +
-                                      "/" + std::to_string(p.u32(ff.zone.data() + 4 * f));
+                                      "/" + std::to_string(p.u32(original + 4 * f));
                     size_t at = 36;
-                    while (at < std::min(written.size(), ff.zone.size()) && written[at] == ff.zone[at])
+                    while (at < std::min(written.size(), original_size) && written[at] == original[at])
                         ++at;
-                    bool body = written.size() == ff.zone.size() && at == written.size();
+                    bool body = written.size() == original_size && at == written.size();
                     r.status = "DIFFERENT (header: " + (fields.empty() ? std::string("same") : fields) + "; body: " +
                                (body ? std::string("same") : "differs at " + std::to_string(at) + ", " + std::to_string(written.size()) + " vs " +
-                                                                 std::to_string(ff.zone.size()) + " bytes") +
+                                                                 std::to_string(original_size) + " bytes") +
                                ")";
                 }
                 else
@@ -185,7 +209,7 @@ int cmd_roundtrip(const std::vector<fs::path> &files, int jobs, bool check_compr
                 {
                     t = Clock::now();
                     // chunked as the Python t4ff does on any machine with more than one processor
-                    std::vector<uint8_t> again = fastfile_bytes(ff.big_endian, written, 9, 2);
+                    std::vector<uint8_t> again = fastfile_bytes(opened.big_endian, written, 9, 2);
                     r.t_compress = seconds_since(t);
                     r.status += again == file ? ", fastfile identical" : ", fastfile recompressed differently";
                 }
@@ -204,8 +228,9 @@ int cmd_roundtrip(const std::vector<fs::path> &files, int jobs, bool check_compr
         }
         size_t n = ++done;
         std::lock_guard lock(print_lock);
-        printf("[%zu/%zu] %s: %s (inflate %.2f s, read %.2f s, write %.2f s%s)\n", n, files.size(), r.path.c_str(), r.status.c_str(),
-               r.t_inflate, r.t_read, r.t_write, check_compress ? (", compress " + std::to_string(r.t_compress) + " s").c_str() : "");
+        printf("[%zu/%zu] %s: %s (inflate %.2f s, read %.2f s, write %.2f s%s%s)\n", n, files.size(), r.path.c_str(), r.status.c_str(),
+               r.t_inflate, r.t_read, r.t_write, check_compress ? (", compress " + std::to_string(r.t_compress) + " s").c_str() : "",
+               r.cache.c_str());
         fflush(stdout);
     });
     double total = seconds_since(start);
@@ -223,8 +248,8 @@ int cmd_roundtrip(const std::vector<fs::path> &files, int jobs, bool check_compr
     }
     printf("\n%zu/%zu fastfiles %s; %.1f MiB of zones, %zu nodes\n", ok, files.size(), bench && keep ? "read" : "identical",
            bytes / 1048576.0, nodes);
-    printf("wall %.2f s on %d threads (summed: inflate %.2f s, read %.2f s, write %.2f s); peak memory %.0f MiB\n", total, file_jobs,
-           inflate, read, write, peak_mib());
+    printf("wall %.2f s on %d threads (summed: inflate %.2f s, read %.2f s, write %.2f s)\nmemory: %s\n", total, file_jobs, inflate,
+           read, write, memory_text().c_str());
     return ok == files.size() ? 0 : 1;
 }
 
@@ -252,7 +277,7 @@ int cmd_dump(const fs::path &path, const fs::path &out_path)
 {
     FastFile ff = read_fastfile(path);
     const Platform &p = for_endian(ff.big_endian);
-    auto zone = read_zone(p, ff.zone);
+    auto zone = read_zone(p, std::move(ff.zone));
 
     std::unordered_map<const Node *, size_t> ids;
     zone->walk([&](Node *n) { ids.emplace(n, ids.size()); });
@@ -260,7 +285,7 @@ int cmd_dump(const fs::path &path, const fs::path &out_path)
     auto addr = [](const std::optional<uint32_t> &a) { return a ? std::to_string(*a) : std::string("-"); };
 
     std::string out;
-    out.reserve(ff.zone.size() / 2);
+    out.reserve(zone->source->size() / 2);
     out += "zone " + zone->platform + " size=" + std::to_string(zone->size) + " external=" + std::to_string(zone->external_size) +
            " blocks=";
     for (size_t b = 0; b < zone->block_sizes.size(); ++b)
@@ -319,7 +344,7 @@ int cmd_rewrite(const fs::path &path, const fs::path &out_path)
 {
     FastFile ff = read_fastfile(path);
     const Platform &p = for_endian(ff.big_endian);
-    auto zone = read_zone(p, ff.zone);
+    auto zone = read_zone(p, std::move(ff.zone));
     write_file(out_path, write_zone(p, *zone));
     return 0;
 }
@@ -476,14 +501,46 @@ int cmd_texbench(const std::vector<fs::path> &paths, int jobs)
     return 0;
 }
 
+// cache: the zone cache's files and size, or (--clear) delete them
+int cmd_cache(const fs::path &dir, bool clear)
+{
+    size_t files = 0;
+    uintmax_t bytes = 0;
+    if (fs::is_directory(dir))
+    {
+        for (const auto &e : fs::directory_iterator(dir))
+        {
+            std::wstring ext = e.path().extension().wstring();
+            if (!e.is_regular_file() || (ext != L".zone" && ext != L".tmp"))
+                continue;
+            uintmax_t size = e.file_size();
+            if (clear)
+            {
+                std::error_code ec;
+                if (!fs::remove(e.path(), ec))
+                {
+                    printf("in use, kept: %s\n", utf8(e.path().filename()).c_str());
+                    continue;
+                }
+            }
+            ++files;
+            bytes += size;
+        }
+    }
+    printf("%s: %zu zones, %.1f MiB%s\n", utf8(dir).c_str(), files, bytes / 1048576.0, clear ? " deleted" : "");
+    return 0;
+}
+
 int usage()
 {
     fputs("usage:\n"
           "  t4ff-cli info <fastfile>... [--list]\n"
-          "  t4ff-cli roundtrip [--compress] [--jobs N] <fastfile or folder>...\n"
+          "  t4ff-cli roundtrip [--compress] [--jobs N] [--zone-cache | --zone-cache-dir DIR] <fastfile or folder>...\n"
           "  t4ff-cli dump <fastfile> <out.txt>\n"
-          "  t4ff-cli bench [--jobs N] [--keep] <fastfile or folder>...\n"
-          "  t4ff-cli textures [--jobs N] <out.txt> <iwd or folder>...\n",
+          "  t4ff-cli bench [--jobs N] [--keep] [--zone-cache | --zone-cache-dir DIR] <fastfile or folder>...\n"
+          "  t4ff-cli textures [--jobs N] <out.txt> <iwd or folder>...\n"
+          "  t4ff-cli texbench [--jobs N] <iwd or folder>...\n"
+          "  t4ff-cli cache [--clear] [--zone-cache-dir DIR]\n",
           stderr);
     return 2;
 }
@@ -495,8 +552,9 @@ int wmain(int argc, wchar_t **argv)
         return usage();
     std::wstring cmd = argv[1];
     std::vector<fs::path> paths;
-    bool list = false, check_compress = false, keep = false;
+    bool list = false, check_compress = false, keep = false, clear = false;
     int jobs = 0;
+    fs::path cache_dir;
     for (int i = 2; i < argc; ++i)
     {
         std::wstring a = argv[i];
@@ -504,10 +562,16 @@ int wmain(int argc, wchar_t **argv)
             list = true;
         else if (a == L"--compress")
             check_compress = true;
+        else if (a == L"--clear")
+            clear = true;
         else if (a == L"--keep")
             keep = true;
         else if (a == L"--jobs" && i + 1 < argc)
             jobs = _wtoi(argv[++i]);
+        else if (a == L"--zone-cache")
+            cache_dir = default_zone_cache_dir();
+        else if (a == L"--zone-cache-dir" && i + 1 < argc)
+            cache_dir = argv[++i];
         else
             paths.emplace_back(a);
     }
@@ -516,13 +580,15 @@ int wmain(int argc, wchar_t **argv)
         if (cmd == L"info" && !paths.empty())
             return cmd_info(paths, list);
         if (cmd == L"roundtrip" && !paths.empty())
-            return cmd_roundtrip(fastfiles(paths), jobs, check_compress, false, false);
+            return cmd_roundtrip(fastfiles(paths), jobs, check_compress, false, false, cache_dir);
         if (cmd == L"bench" && !paths.empty())
-            return cmd_roundtrip(fastfiles(paths), jobs, false, true, keep);
+            return cmd_roundtrip(fastfiles(paths), jobs, false, true, keep, cache_dir);
         if (cmd == L"dump" && paths.size() == 2)
             return cmd_dump(paths[0], paths[1]);
         if (cmd == L"rewrite" && paths.size() == 2)
             return cmd_rewrite(paths[0], paths[1]);
+        if (cmd == L"cache" && paths.empty())
+            return cmd_cache(cache_dir.empty() ? default_zone_cache_dir() : cache_dir, clear);
         if (cmd == L"texbench" && !paths.empty())
             return cmd_texbench(paths, jobs);
         if (cmd == L"textures" && paths.size() >= 2)

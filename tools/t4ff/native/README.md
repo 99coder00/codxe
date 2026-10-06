@@ -37,10 +37,41 @@ t4ff-cli rewrite <fastfile> <out.zone>                        the zone as writte
 t4ff-cli bench [--jobs N] [--keep] <file or folder>...        reading speed and memory
 t4ff-cli textures [--jobs N] <out.txt> <iwd or folder>...     texture battery, as CRCs
 t4ff-cli texbench [--jobs N] <iwd or folder>...               texture conversion speed
+t4ff-cli cache [--clear] [--zone-cache-dir DIR]               the zone cache's size, or delete it
 ```
+
+`roundtrip` and `bench` take `--zone-cache` (the default folder) or `--zone-cache-dir DIR`. With
+either, zones come from the zone cache (below).
 
 Folders are searched for `.ff` files (`textures` and `texbench`: for `.iwd` files and loose
 `images/*.iwi`). The work runs on every processor (or `--jobs N`).
+
+## Memory: node views and the zone cache
+
+A node's bytes are a view into the zone it was read from: a node is always one run of the stream,
+since the reader refuses anything else. A node copies its bytes only when a conversion changes them
+(`Bytes`, copy on write). The zone keeps its bytes alive (`Zone::source`), and a zone whose nodes
+view another's keeps that one too (`Zone::keep_alive`).
+
+The zone's bytes are in one of two places:
+- **Memory.** Address space is reserved and committed as the zone is inflated: no buffer grows by
+  copying, and nothing is committed past the end.
+- **The zone cache** (`%LOCALAPPDATA%\t4ff\zone_cache`). A fastfile is inflated once, streamed
+  straight to a file a few MiB at a time, then mapped. A cache file is named by the fastfile's path
+  and remade when the fastfile's size or date changes.
+
+The console library's zones use the cache. They are mostly texture and sound data that only an
+asset copy reads, so those pages are never read from disk, and the system can drop the pages that
+are. Repeat runs skip zlib altogether. `t4ff-cli cache` gives the cache's size and `--clear` empties
+it.
+
+Loading the 49 zones of a conversion's console library (4.3 GiB of zones, 2.3 million nodes):
+
+| | committed memory at the peak | wall time |
+| --- | --- | --- |
+| copies (step 1) | 9.5 GiB | 3.1 s |
+| views, zones in memory | 5.8 GiB | 1.7 s |
+| views, zone cache | 1.6 GiB (the nodes' bookkeeping) | 0.58 s (1.8 s while making the cache) |
 
 ## Checking it against the Python t4ff
 
@@ -120,7 +151,7 @@ Step 2, checked on 2026-10-05:
 | `layout.py` (libclang) | `tools/gen_schema.py` writes `data/layout_*.json`, read by `src/core/layout.*` |
 | `commands.py` | `src/core/commands.*` |
 | `zone.py` | `src/core/zone.*` |
-| `fastfile.py` | `src/core/fastfile.*` |
+| `fastfile.py` | `src/core/fastfile.*`, and `src/core/zone_cache.*` (zones in memory or mapped) |
 | `platforms.py` | `src/core/platforms.*` |
 | `images.py`, `stream.py`'s `with_mips` | `src/core/image.*` (and `zip.*`: `.iwd` archives) |
 | `wavelet.py` | `src/core/wavelet.*` (codeword tables in `wavelet_tables.inc`) |

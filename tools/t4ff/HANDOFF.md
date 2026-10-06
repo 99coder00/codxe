@@ -63,11 +63,18 @@ and encoding, Xenos tiling and mip chains, the console texture builder and `with
 - step 7: command line parity;
 - step 8: the GUI, with a simple mode and an advanced one.
 
+**Memory (fixed before step 3).** Nodes now view their zone's bytes instead of copying them, and
+zones can come from a zone cache: inflated once into `%LOCALAPPDATA%\t4ff\zone_cache`, then
+mapped (native README, "Memory").
+- Loading the console library's 49 zones dropped from 9.5 GiB committed at the peak to 1.6 GiB, and
+  from 3.1 s to 0.58 s.
+- Round-trips, node dumps and the texture battery were checked again and are unchanged.
+- The library in step 3 uses the cache, with a setting to turn it off.
+
 Things noted for later steps:
-- Memory: nodes copy their bytes out of the zone, so the library's 49 zones take 9.6 GiB at the
-  peak. The library could keep only what it indexes, or let nodes point into the zone's buffer.
-- Speed: a faster inflate (libdeflate, zlib-ng) would help the largest single cost of reading one
-  file.
+- What memory is left is node bookkeeping, about 700 bytes a node (Ptr objects, relocs, segment
+  vectors). It could be packed further if a bigger library needs it.
+- Speed: a faster inflate (libdeflate, zlib-ng) would help when a zone is not cached yet.
 
 ## State on 2026-10-04
 

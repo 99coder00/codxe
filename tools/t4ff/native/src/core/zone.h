@@ -52,6 +52,114 @@ struct ZoneError : std::runtime_error
     using std::runtime_error::runtime_error;
 };
 
+// The bytes of a decompressed zone: in memory, or a mapped file of the zone cache (zone_cache.h).
+class ZoneBytes
+{
+  public:
+    virtual ~ZoneBytes() = default;
+    const uint8_t *data() const
+    {
+        return data_;
+    }
+    size_t size() const
+    {
+        return size_;
+    }
+
+  protected:
+    const uint8_t *data_ = nullptr;
+    size_t size_ = 0;
+};
+
+std::shared_ptr<const ZoneBytes> zone_bytes(std::vector<uint8_t> bytes);
+
+// A node's bytes: a view into the zone it was read from (which the zone keeps alive), or bytes of its
+// own, which changing them makes them (a conversion's).
+class Bytes
+{
+  public:
+    Bytes() = default;
+    Bytes(const Bytes &o) : ptr_(o.ptr_), size_(o.size_), own_(o.own_ ? std::make_unique<std::vector<uint8_t>>(*o.own_) : nullptr)
+    {
+    }
+    Bytes(Bytes &&) noexcept = default;
+    Bytes &operator=(const Bytes &o)
+    {
+        if (this != &o)
+            *this = Bytes(o);
+        return *this;
+    }
+    Bytes &operator=(Bytes &&) noexcept = default;
+
+    const uint8_t *data() const
+    {
+        return own_ ? own_->data() : ptr_;
+    }
+    size_t size() const
+    {
+        return own_ ? own_->size() : size_;
+    }
+    bool empty() const
+    {
+        return size() == 0;
+    }
+    const uint8_t *begin() const
+    {
+        return data();
+    }
+    const uint8_t *end() const
+    {
+        return data() + size();
+    }
+    uint8_t operator[](size_t i) const
+    {
+        return data()[i];
+    }
+    bool is_view() const
+    {
+        return !own_;
+    }
+
+    // Appends n bytes read at p: the view grows when they follow it in the same buffer.
+    void append_view(const uint8_t *p, size_t n)
+    {
+        if (!own_ && (size_ == 0 || ptr_ + size_ == p))
+        {
+            if (size_ == 0)
+                ptr_ = p;
+            size_ += n;
+            return;
+        }
+        owned().insert(owned().end(), p, p + n);
+    }
+    // The bytes as a vector of the node's own (copied out of the zone the first time).
+    std::vector<uint8_t> &owned()
+    {
+        if (!own_)
+        {
+            own_ = std::make_unique<std::vector<uint8_t>>(ptr_, ptr_ + size_);
+            ptr_ = nullptr;
+            size_ = 0;
+        }
+        return *own_;
+    }
+    uint8_t *mutable_data()
+    {
+        return owned().data();
+    }
+    void assign(std::vector<uint8_t> bytes)
+    {
+        own_ = std::make_unique<std::vector<uint8_t>>(std::move(bytes));
+        ptr_ = nullptr;
+        size_ = 0;
+    }
+
+  private:
+    const uint8_t *ptr_ = nullptr;
+    size_t size_ = 0;
+    std::unique_ptr<std::vector<uint8_t>> own_;
+};
+
 struct Node;
 
 // A pointer stored inside a node's data.
@@ -65,23 +173,41 @@ struct Ptr
         Ref,    // offset into data loaded before: node + index / inner
         Alias,  // offset to a pointer slot loaded before: slot
     };
-    Kind kind = Kind::Null;
     Node *node = nullptr;
-    uint32_t index = 0;
-    uint32_t inner = 0;
     Ptr *slot = nullptr;
     Node *owner = nullptr;
+    uint32_t index = 0;
+    uint32_t inner = 0;
     uint32_t offset = 0;
+    Kind kind = Kind::Null;
     std::optional<uint32_t> addr;        // zone address of this pointer slot (normal blocks only)
     std::optional<uint32_t> insert_addr; // zone address of the reserved insert slot
 
     Node *target() const; // the node it ultimately refers to
 };
 
-// A node's pointers by offset, in the order they were set (as a Python dict).
+// A node's pointers by offset, in the order they were set (as a Python dict). Searched in place while
+// there are few; a hash index is made once there are many (most nodes have none or a handful).
 class Relocs
 {
   public:
+    Relocs() = default;
+    Relocs(const Relocs &o) : items(o.items)
+    {
+        if (o.index)
+            build_index();
+    }
+    Relocs(Relocs &&) noexcept = default;
+    Relocs &operator=(const Relocs &o)
+    {
+        items = o.items;
+        index.reset();
+        if (o.index)
+            build_index();
+        return *this;
+    }
+    Relocs &operator=(Relocs &&) noexcept = default;
+
     void set(uint32_t offset, Ptr *ptr);
     Ptr *get(uint32_t offset) const;
     bool empty() const
@@ -98,8 +224,10 @@ class Relocs
     }
 
   private:
+    static constexpr size_t INDEX_FROM = 16;
     std::vector<std::pair<uint32_t, Ptr *>> items;
-    std::unordered_map<uint32_t, size_t> index; // once there are many
+    std::unique_ptr<std::unordered_map<uint32_t, size_t>> index; // once there are many
+    void build_index();
 };
 
 struct Segment
@@ -123,28 +251,28 @@ enum class Origin : uint8_t
 struct Node
 {
     const TypeRef *type = nullptr; // element type
-    uint32_t count = 0;
-    std::vector<uint8_t> data;
-    int block = 0;
+    Bytes data;
     Relocs relocs;
     std::vector<Node *> children;
-    int push_before = -1; // block pushed before the allocation (-1: none)
-    int push_after = -1;  // block pushed after the data was read (asset members)
-    bool insert = false;  // an insert slot is reserved right after the allocation
-    bool string = false;
-    const char *asset = nullptr; // asset type name, for asset headers
-    uint32_t offset = 0;         // block offset of the allocation (source platform while reading)
-    uint32_t runtime_size = 0;   // size of allocations in non streamed runtime blocks
     std::vector<Segment> segments;
+    const char *asset = nullptr; // asset type name, for asset headers
+    uint32_t count = 0;
+    uint32_t offset = 0;       // block offset of the allocation (source platform while reading)
+    uint32_t runtime_size = 0; // size of allocations in non streamed runtime blocks
+    int8_t block = 0;
+    int8_t push_before = -1; // block pushed before the allocation (-1: none)
+    int8_t push_after = -1;  // block pushed after the data was read (asset members)
+    bool insert = false;     // an insert slot is reserved right after the allocation
+    bool string = false;
 
     // the Python node.extra entries the zone code uses
-    std::optional<uint32_t> align;
+    bool delayed = false;
     Origin origin = Origin::None;
+    std::optional<uint32_t> align;
+    std::optional<uint32_t> new_offset; // set by the writer
     const std::string *origin_record = nullptr;
     const std::string *origin_field = nullptr;
     Ptr *ptr = nullptr; // the pointer that made it (follow / insert)
-    bool delayed = false;
-    std::optional<uint32_t> new_offset; // set by the writer
 
     uint32_t elem_size() const
     {
@@ -175,6 +303,10 @@ struct Zone
     Node *script_node = nullptr;
     Node *assets_node = nullptr;
     Node *root = nullptr; // the asset list header (the Python extra_root)
+
+    // the bytes the nodes read from it view, and those of other zones its nodes view (copies)
+    std::shared_ptr<const ZoneBytes> source;
+    std::vector<std::shared_ptr<const ZoneBytes>> keep_alive;
 
     // owns every node and pointer of the zone
     std::deque<Node> node_store;
@@ -283,8 +415,13 @@ class Platform
 const char *const *pc_asset_types(size_t *count);
 const char *asset_record_name(const std::string &asset_type); // ASSET_RECORDS, nullptr when unsupported
 
-// Reads a zone (the decompressed fastfile) of a platform.
-std::unique_ptr<Zone> read_zone(const Platform &p, const std::vector<uint8_t> &data);
+// Reads a zone (the decompressed fastfile) of a platform. Its nodes view the bytes, which the zone
+// keeps.
+std::unique_ptr<Zone> read_zone(const Platform &p, std::shared_ptr<const ZoneBytes> bytes);
+inline std::unique_ptr<Zone> read_zone(const Platform &p, std::vector<uint8_t> bytes)
+{
+    return read_zone(p, zone_bytes(std::move(bytes)));
+}
 
 // Writes a zone for a platform: header, streamed blocks and delayed data.
 std::vector<uint8_t> write_zone(const Platform &p, Zone &zone);

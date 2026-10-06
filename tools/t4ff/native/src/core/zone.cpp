@@ -117,44 +117,44 @@ Node *Ptr::target() const
     return p ? p->node : nullptr;
 }
 
+void Relocs::build_index()
+{
+    index = std::make_unique<std::unordered_map<uint32_t, size_t>>();
+    index->reserve(items.size() * 2);
+    for (size_t i = 0; i < items.size(); ++i)
+        index->emplace(items[i].first, i);
+}
+
 void Relocs::set(uint32_t offset, Ptr *ptr)
 {
-    if (!index.empty())
+    if (index)
     {
-        auto it = index.find(offset);
-        if (it != index.end())
-        {
+        auto [it, added] = index->emplace(offset, items.size());
+        if (added)
+            items.emplace_back(offset, ptr);
+        else
             items[it->second].second = ptr;
+        return;
+    }
+    for (auto &item : items)
+    {
+        if (item.first == offset)
+        {
+            item.second = ptr;
             return;
         }
     }
-    else
-    {
-        for (auto &item : items)
-        {
-            if (item.first == offset)
-            {
-                item.second = ptr;
-                return;
-            }
-        }
-    }
     items.emplace_back(offset, ptr);
-    if (!index.empty())
-        index.emplace(offset, items.size() - 1);
-    else if (items.size() > 16)
-    {
-        for (size_t i = 0; i < items.size(); ++i)
-            index.emplace(items[i].first, i);
-    }
+    if (items.size() > INDEX_FROM)
+        build_index(); // from now on: get never changes anything, as zones are read on several threads
 }
 
 Ptr *Relocs::get(uint32_t offset) const
 {
-    if (!index.empty())
+    if (index)
     {
-        auto it = index.find(offset);
-        return it == index.end() ? nullptr : items[it->second].second;
+        auto it = index->find(offset);
+        return it == index->end() ? nullptr : items[it->second].second;
     }
     for (const auto &item : items)
         if (item.first == offset)
@@ -520,7 +520,7 @@ class Eval : public EvalContext
 class Reader
 {
   public:
-    Reader(const Platform &p, const std::vector<uint8_t> &data, Zone &zone) : p(p), data(data), zone(zone)
+    Reader(const Platform &p, const uint8_t *buf, size_t buf_size, Zone &zone) : p(p), buf(buf), buf_size(buf_size), zone(zone)
     {
     }
 
@@ -528,7 +528,8 @@ class Reader
 
   private:
     const Platform &p;
-    const std::vector<uint8_t> &data;
+    const uint8_t *buf; // the zone's bytes, which the nodes view
+    size_t buf_size;
     Zone &zone;
     size_t pos = 0;
     uint32_t offsets[BLOCK_COUNT] = {};
@@ -547,9 +548,9 @@ class Reader
     // -- raw stream
     const uint8_t *read(size_t size)
     {
-        if (pos + size > data.size())
+        if (pos + size > buf_size)
             throw ZoneError("read past end of zone (" + hex(static_cast<uint32_t>(pos)) + " + " + hex(static_cast<uint32_t>(size)) + ")");
-        const uint8_t *b = data.data() + pos;
+        const uint8_t *b = buf + pos;
         pos += size;
         return b;
     }
@@ -592,7 +593,7 @@ class Reader
         Node *node = zone.new_node();
         node->type = type;
         node->count = count;
-        node->block = b;
+        node->block = static_cast<int8_t>(b);
         node->offset = offsets[b];
         node->align = alignment;
         if (!parents.empty())
@@ -611,7 +612,7 @@ class Reader
     void load_into(Node *node, int64_t size, const TypeRef *seg_type = nullptr, int64_t seg_count = 1, bool partial = false)
     {
         int b = block();
-        if (size < 0 || (p.streamed(b) && pos + static_cast<size_t>(size) > data.size()))
+        if (size < 0 || (p.streamed(b) && pos + static_cast<size_t>(size) > buf_size))
             throw ZoneError("invalid allocation size " + std::to_string(size) + " for " + (seg_type ? seg_type->repr() : "None"));
         if (!seg_type)
         {
@@ -623,8 +624,9 @@ class Reader
             throw ZoneError("non contiguous load into " + node->repr());
         if (p.streamed(b))
         {
-            const uint8_t *src = read(static_cast<size_t>(size));
-            node->data.insert(node->data.end(), src, src + size);
+            // a node's bytes are one run of the stream (no other allocation can come between its
+            // parts, as checked above): the node views them
+            node->data.append_view(read(static_cast<size_t>(size)), static_cast<size_t>(size));
         }
         else
             node->runtime_size += static_cast<uint32_t>(size);
@@ -729,8 +731,8 @@ class Reader
         {
             Node *child = new_node(p.char_type, 1, 1);
             child->string = true;
-            const uint8_t *start = data.data() + pos;
-            const uint8_t *nul = static_cast<const uint8_t *>(std::memchr(start, 0, data.size() - pos));
+            const uint8_t *start = buf + pos;
+            const uint8_t *nul = static_cast<const uint8_t *>(std::memchr(start, 0, buf_size - pos));
             if (!nul)
                 throw ZoneError("unterminated string");
             int64_t length = (nul - start) + 1;
@@ -789,7 +791,7 @@ void Reader::load()
     list_node->count = 4;
     list_node->block = -1;
     const uint8_t *head = read(16);
-    list_node->data.assign(head, head + 16);
+    list_node->data.append_view(head, 16);
     zone.root = list_node;
     uint32_t string_count = p.u32(head), strings_ptr = p.u32(head + 4), asset_count = p.u32(head + 8),
              assets_ptr = p.u32(head + 12);
@@ -865,16 +867,15 @@ void Reader::load()
         align(node->block, node->align.value_or(1));
         node->offset = offsets[node->block];
         size_t size = static_cast<size_t>(node->count) * node->type->size;
-        const uint8_t *src = read(size);
-        node->data.insert(node->data.end(), src, src + size);
+        node->data.append_view(read(size), size);
         node->segments.push_back({node->type, node->count, static_cast<uint32_t>(node->data.size()), false});
         offsets[node->block] += static_cast<uint32_t>(node->data.size());
         pop();
     }
 
     zone.platform = p.name;
-    if (pos != data.size())
-        throw ZoneError(std::to_string(data.size() - pos) + " unread bytes at end of zone");
+    if (pos != buf_size)
+        throw ZoneError(std::to_string(buf_size - pos) + " unread bytes at end of zone");
 }
 
 void Reader::load_asset_ptr(Node *node, uint32_t offset, const Record &rec)
@@ -935,7 +936,7 @@ void Reader::load_struct(Node *node, const Record &rec, bool stream_start, uint3
     {
         push(*pushed);
         if (node->push_after < 0 && base == 0)
-            node->push_after = *pushed;
+            node->push_after = static_cast<int8_t>(*pushed);
     }
 
     parents.push_back(node);
@@ -1155,7 +1156,7 @@ void Reader::load_pointer(const Record &rec, const Field &f, const MemberInfo *i
         Node *child = zone.new_node();
         child->type = pointee;
         child->count = static_cast<uint32_t>(count);
-        child->block = block_by_name(info->delayed->block);
+        child->block = static_cast<int8_t>(block_by_name(info->delayed->block));
         child->align = static_cast<uint32_t>(info->delayed->alignment);
         child->delayed = true;
         child->origin = Origin::Member;
@@ -1222,7 +1223,7 @@ void Reader::load_pointer(const Record &rec, const Field &f, const MemberInfo *i
     child->origin_record = &rec.name;
     child->origin_field = &f.name;
     if (pushed)
-        child->push_before = *member_block;
+        child->push_before = static_cast<int8_t>(*member_block);
     Ptr *ptr = follow(child, (in_temp && raw == INSERT) ? Ptr::Kind::Insert : Ptr::Kind::Follow);
     child->ptr = ptr;
     if (ptr->kind == Ptr::Kind::Insert)
@@ -1431,10 +1432,32 @@ std::vector<uint8_t> Writer::write(Zone &zone)
 }
 } // namespace
 
-std::unique_ptr<Zone> read_zone(const Platform &p, const std::vector<uint8_t> &data)
+namespace
+{
+class HeapZoneBytes : public ZoneBytes
+{
+  public:
+    explicit HeapZoneBytes(std::vector<uint8_t> bytes) : bytes_(std::move(bytes))
+    {
+        data_ = bytes_.data();
+        size_ = bytes_.size();
+    }
+
+  private:
+    std::vector<uint8_t> bytes_;
+};
+} // namespace
+
+std::shared_ptr<const ZoneBytes> zone_bytes(std::vector<uint8_t> bytes)
+{
+    return std::make_shared<HeapZoneBytes>(std::move(bytes));
+}
+
+std::unique_ptr<Zone> read_zone(const Platform &p, std::shared_ptr<const ZoneBytes> bytes)
 {
     auto zone = std::make_unique<Zone>();
-    Reader(p, data, *zone).load();
+    zone->source = std::move(bytes);
+    Reader(p, zone->source->data(), zone->source->size(), *zone).load();
     return zone;
 }
 
