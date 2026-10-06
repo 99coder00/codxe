@@ -29,45 +29,58 @@ python native/tools/gen_schema.py
 
 ## Using it
 
+`t4ff-cli` takes the Python t4ff's command line: what `python -m t4ff` takes, it takes too, parsed
+the same way (an option can be shortened to any unique prefix, `--option=value`, `-o value`):
+
 ```text
-t4ff-cli info <fastfile>... [--list]                         platform, block sizes, assets
-t4ff-cli roundtrip [--compress] [--jobs N] <file or folder>...  read and write back, compare
+t4ff-cli [--no-install] [--progress-lines] info <fastfile>... [--list]
+t4ff-cli roundtrip <fastfile>...
+t4ff-cli convert <pc fastfile or usermap folder> -o <output folder> [options]
+t4ff-cli menu <_codxe\t4 folder> [--rows N] [--no-streams] [--menu-zone P]...
+t4ff-cli streams <folder>...
+t4ff-cli setup [--xma2encode P] [--no-test]
+```
+
+`convert` takes the Python's options (`t4ff-cli convert -h` lists them): `--iwd`, `--console-zone`,
+`--texture-budget`, `--memory-target`, `--stream-textures`, `--deep-stream`, the sound options,
+`--no-mod`, `--no-patch`, `--no-t4-layout`, `--no-load-zone`, `--name`, `--loading-image` and the rest.
+It finds the map's files as the Python does (`find_usermap`: the map, its patch, `mod.ff` here or in
+`mods\<map>`, the mod's language zones, the `.iwd` files), and writes
+`<output>\_codxe\t4\usermaps\<map>`. Options of its own, for checks against the Python (no Python
+option starts with `--dev`):
+- `--dev-zone P` and `--dev-dump P`: the map's zone, uncompressed, and the dump of its node tree;
+- `--dev-timings`: the time of each phase;
+- `--dev-no-zone-cache`, `--dev-no-sound-cache`, `--dev-ffmpeg P`.
+
+`menu` turns CoD Xenon's 0.2.0 `patch_ui.ff` into t4ff's Custom Maps list, or takes a menu zone with CoD
+Xe's own list (`--menu-zone`), and gives the maps their names, descriptions, `map.json` and pictures.
+`setup` finds FFmpeg and xma2encode.exe, installs an encoder found in a `.zip` (the Downloads folder,
+or `--xma2encode`) into the `bin` folder next to `t4ff-cli.exe`, and test-encodes a tone. `convert`
+does that install itself unless `--no-install` is given. `gui` comes with step 8.
+
+The developer commands (`t4ff-cli dev` lists them):
+
+```text
+t4ff-cli roundtrip [--compress] [--jobs N] <file or folder>...  read and write back, compare (with its options or folders)
 t4ff-cli dump <fastfile> <out.txt>                            the node tree as text
 t4ff-cli rewrite <fastfile> <out.zone>                        the zone as written back
 t4ff-cli bench [--jobs N] [--keep] <file or folder>...        reading speed and memory
 t4ff-cli textures [--jobs N] <out.txt> <iwd or folder>...     texture battery, as CRCs
 t4ff-cli texbench [--jobs N] <iwd or folder>...               texture conversion speed
 t4ff-cli cache [--clear] [--zone-cache-dir DIR]               the zone and sound caches' sizes, or delete them
-t4ff-cli convert --out <zone> [--dump <txt>] [--ff <fastfile>] [options] <PC fastfile>...
-                                                              convert a map (steps 3 to 5)
 t4ff-cli regex <patterns.txt> <file>...                       regex engine check, as CRCs
+t4ff-cli convert --out <zone> [options] <PC fastfile>...      convert, every input given explicitly
 ```
 
-`convert` takes the options of the conversion core:
-- `--map-iwd P` for the map's own `.iwd` files and folders, `--iwd P` for the PC game's files (stock
-  textures and streamed sounds), and `--console-zone P` for the console library; each repeats;
-- `--map-files DIR`, the folders of the map's own files (its fastfiles' and `.iwd` files', as
-  `t4ff convert` reads them): its loose scripts, `.arena` file and loading screen picture; repeats;
-- `--map-name N`, `--max-texture-size N`;
-- `--texture-budget MiB` or `auto` (the default: what `--memory-target MiB`, 212, leaves);
-- `--stream-textures`, `--upgrade-budget MiB` (96), `--deep-stream NAMES` or `all`,
-  `--stream-growth X`, `--keep-quarter`, `--keep-mip-tail`;
-- `--no-mips`, `--no-compress`, `--allow-unverified`, `--reference-techsets`;
-- `--no-zone-cache` (library zones in memory);
-- `--out-dir D`, the map's output folder (`--sounds-dir D` stands for it when it is not given): it
-  gets `<map>.ff`, the streamed sounds, `options.txt`, the `scripts` folder, `t4ff.txt`,
-  `description.txt`, `<map>_load.ff`, `preview.bin`, `map.json` and `preview.dds`, as `t4ff convert`
-  writes them;
-- `--load-ff P` (the map's PC load zone), `--name N`, `--loading-image P`, `--no-load-zone`.
+The developer `convert` (chosen by `--out`) takes every input explicitly: `--map-iwd`, `--map-files`,
+`--load-ff`, `--map-name`, `--out-dir` (or `--sounds-dir`), the conversion's options under their Python
+names, `--reference-techsets`, and `--dump`, `--ff`, `--no-zone-cache`, `--no-sound-cache`, `--ffmpeg`.
 
-It takes the sound options too:
-- `--xma-encoder P` (default: where the Xbox developer kits put xma2encode.exe), `--xma-quality N`;
-- `--ffmpeg P` (default: on PATH, then imageio-ffmpeg's);
-- `--sound-rate N`, `--mono-sounds`, `--stream-rate N`, `--mono-streams`;
-- `--max-loaded-sounds N` (1500), `--loaded-sound-memory MiB` (32);
-- `--no-sounds`, `--no-sound-cache`, `--jobs N`.
+The program opts out of Windows 11's power throttling (EcoQoS), which otherwise runs a console
+program that is not in front on slower cores at lower clocks: compressing The Simpsons' fastfile took
+4.6 s that way, 1.2 s without.
 
-It runs the Python's `_convert_map` and the rest of its `convert` command, in their order:
+`convert` runs the Python's `_convert_map` and the rest of its `convert` command, in their order:
 1. converts the map's streamed sounds (with an encoder and an output folder);
 2. gives the PC zones' scripts the map's loose ones, and notes the mod's scripts;
 3. converts the stock streamed sounds the map's aliases use, from the PC game's files;
@@ -184,7 +197,7 @@ could change the Python output, but not the C++ output.
 | 4 | Sounds: decoders, XMA encoding in parallel, cache | done |
 | 5 | Scripts, menus, loading screens | done |
 | 6 | Streaming and the memory planner | done |
-| 7 | Command line parity with the Python t4ff | |
+| 7 | Command line parity with the Python t4ff | done |
 | 8 | The GUI (Dear ImGui): simple and advanced modes, queue, results | |
 
 Step 1, checked on 2026-10-05:
@@ -325,6 +338,19 @@ Sand; most convert twice): 6.9-17.9 s against 80.9-168.9 s. The checks cover:
 The boxes need numpy's float64 arithmetic: its `norm` adds the three squares in order, without
 fused multiplies, along an axis and for one vector alike. Model texture coordinates are float16.
 
+Step 7, checked on 2026-10-06. `compare_maps.py` now gives both programs the same command line
+(`convert <map> -o <root> ...`), the C++ adding `--dev-zone` and `--dev-dump`. The eight maps on the
+automatic budget give identical zones, dumps and folders: 6.2-22.3 s against 134-473 s (the Python
+runs throttled in the background, see "Using it").
+
+The other commands give the Python's files and output:
+- `menu` on CoD Xenon's 0.2.0 `patch_ui.ff` (the rewritten menu zone, its `.orig`, 13 descriptions,
+  `preview.txt`, `preview.bin`, 14 `map.json` and `preview.dds`), run again from the `.orig` with
+  `--rows 9`, and with CoD Xenon's 0.3.0 list given by `--menu-zone`;
+- `streams` on two of CoD Xenon's maps' sound folders (121 files rewritten);
+- `info --list` and `roundtrip` on a PC and a console zone, and `menu`'s error for a folder without a
+  menu zone.
+
 ## Layout
 
 | Python | C++ |
@@ -342,16 +368,17 @@ fused multiplies, along an axis and for one vector alike. Model texture coordina
 | `assets.py` | `src/convert/assets.*` |
 | `audio.py` | `src/audio/audio.*` (with `src/core/process.*`, `src/core/sha256.*`) |
 | `soundbudget.py` | `src/audio/soundbudget.*` |
-| `deps.py` | `find_xma2encode` and `ffmpeg_exe` only (`audio.cpp`); setup comes with step 7 |
+| `deps.py` | `src/app/deps.*` (`find_xma2encode` and `ffmpeg_exe` in `audio.cpp`): no Python packages to install |
 | `library.py` | `src/convert/library.*` (zones read on every processor, from the zone cache) |
 | `merge.py` | `src/convert/merge.*`; its menu and video passes in `src/convert/menus.*` |
 | `techsets.py`, `xanim.py` | `src/convert/techsets.*`, `src/convert/xanim.*` |
 | `scripts.py`, `named.py` | `src/convert/scripts.*` (the script text it adds: `script_templates.inc`, from `tools/gen_templates.py`) |
-| `menu.py` | `src/convert/menus.*` (the conversion's passes; the `menu` command's list comes with step 7), `map.json` and `preview.dds` in `loadscreen.*` |
+| `menu.py` | `src/convert/menus.*` (the conversion's passes), `usermaps_menu.*` (the `menu` command's list), `menu_editor.h` (MenuEditor, clone); `map.json` and `preview.dds` in `loadscreen.*` |
 | `loadscreen.py` | `src/convert/loadscreen.*` (the title card's font: `loadscreen_tables.inc`) |
-| `stream.py`, `memory.py` | `src/convert/stream.*` (`with_mips` in `src/core/image.*`); the memory loop in `src/cli/main.cpp` |
+| `stream.py`, `memory.py` | `src/convert/stream.*` (`with_mips` in `src/core/image.*`); the memory loop in `src/app/convert.*` |
 | Python's `re`, `str` | `src/core/pyre.*` (a regex engine with `re`'s semantics), `src/core/pystr.*` |
-| `__main__.py` | `src/cli/main.cpp` |
+| `__main__.py` | `src/cli/t4ff_cli.*` (its command line), `src/app/convert.*` (`cmd_convert` from the map's fastfiles on, `_convert_map`), `src/app/usermap.*` (`find_usermap`); `src/cli/main.cpp` (the developer commands) |
+| `progress.py` | `src/core/progress.*` (a sink for the window too) |
 
 `src/core/threads.*` runs work on every processor, with threads that have stacks as large as the main
 thread's (64 MiB): zones are walked recursively.

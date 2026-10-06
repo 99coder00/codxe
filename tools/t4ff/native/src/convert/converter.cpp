@@ -1,11 +1,13 @@
 #include "convert/converter.h"
 
+#include <atomic>
 #include <algorithm>
 #include <cstring>
 #include <sstream>
 
 #include "convert/assets.h"
 #include "convert/library.h"
+#include "core/progress.h"
 #include "core/resources.h"
 
 namespace t4ff
@@ -585,8 +587,14 @@ Node *ZoneConverter::convert_assets_node(Node *node)
         nw->relocs.set(off, ptr);
         ptrs.emplace_back(ptr, nw);
     }
-    for (Node *child : node->children)
-        nw->children.push_back(convert_child(child));
+    const std::string label = progress_label.empty() ? "Converting assets" : progress_label;
+    const int count = static_cast<int>(node->children.size());
+    for (int i = 0; i < count; ++i)
+    {
+        progress::step(label, i, count);
+        nw->children.push_back(convert_child(node->children[i]));
+    }
+    progress::step(label, count, count);
     return nw;
 }
 

@@ -1,5 +1,6 @@
 #include "convert/assets.h"
 
+#include <atomic>
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -12,6 +13,7 @@
 #include "convert/library.h"
 #include "convert/techsets.h"
 #include "convert/xanim.h"
+#include "core/progress.h"
 #include "core/threads.h"
 #include "core/xenos.h"
 
@@ -624,13 +626,16 @@ ImageRef console_image(ZoneConverter &conv, const std::string &name)
     return ref;
 }
 
-namespace
+Node *build_console_image(Zone &zone, const Platform &dst, const std::string &name, const ConsoleTexture &tex, uint32_t semantic, uint32_t category,
+                          int iwi_flags, Node **name_out)
 {
-Node *build_console_image(ZoneConverter &conv, const std::string &name, const ConsoleTexture &tex, uint32_t semantic, uint32_t category,
-                          int iwi_flags, const Node *src_node = nullptr)
-{
-    const Platform &dst = conv.dst;
-    Zone &zone = out_zone(conv);
+    auto new_node = [&](const TypeRef *type, uint32_t count, int block) {
+        Node *n = zone.new_node();
+        n->type = type;
+        n->count = count;
+        n->block = static_cast<int8_t>(block);
+        return n;
+    };
     Node *image = asset_header(zone, dst, "GfxImage");
     image->asset = "image";
     put_field(dst, "GfxImage", *image, "mapType", tex.faces == 6 ? MAPTYPE_CUBE : MAPTYPE_2D);
@@ -648,11 +653,11 @@ Node *build_console_image(ZoneConverter &conv, const std::string &name, const Co
     // name, texture (load def + header), pixels: in the console load order
     Node *name_string = string_node(zone, dst, name);
     follow(zone, image, field_of(dst, "GfxImage", "name").offset, name_string);
-    if (src_node)
-        map_name_string_to(conv, *src_node, "GfxImage", name_string);
+    if (name_out)
+        *name_out = name_string;
 
     const Record &ld_rec = dst.record("GfxImageLoadDef");
-    Node *load_def = conv.new_node(ld_rec.self, 1, BLOCK_TEMP);
+    Node *load_def = new_node(ld_rec.self, 1, BLOCK_TEMP);
     load_def->push_before = BLOCK_TEMP;
     load_def->align = ld_rec.align;
     load_def->origin = Origin::Member;
@@ -671,7 +676,7 @@ Node *build_console_image(ZoneConverter &conv, const std::string &name, const Co
     follow(zone, image, field_of(dst, "GfxImage", "texture").offset, load_def);
 
     const Record &hdr_rec = dst.record("D3DBaseTexture360");
-    Node *header = conv.new_node(hdr_rec.self, 1, BLOCK_VIRTUAL);
+    Node *header = new_node(hdr_rec.self, 1, BLOCK_VIRTUAL);
     header->push_before = BLOCK_VIRTUAL;
     header->align = hdr_rec.align;
     header->origin = Origin::Member;
@@ -681,7 +686,7 @@ Node *build_console_image(ZoneConverter &conv, const std::string &name, const Co
     header->segments.push_back({hdr_rec.self, 1, static_cast<uint32_t>(tex.header.size()), false});
     follow(zone, load_def, ld_rec.field("texture")->offset, header);
 
-    Node *pixels = conv.new_node(dst.uchar_type, static_cast<uint32_t>(tex.pixels.size()), BLOCK_LARGE_RUNTIME);
+    Node *pixels = new_node(dst.uchar_type, static_cast<uint32_t>(tex.pixels.size()), BLOCK_LARGE_RUNTIME);
     pixels->align = 4096;
     pixels->delayed = true;
     pixels->origin = Origin::Member;
@@ -690,6 +695,18 @@ Node *build_console_image(ZoneConverter &conv, const std::string &name, const Co
     pixels->segments.push_back({pixels->type, pixels->count, pixels->count, false});
     pixels->data.assign(tex.pixels);
     follow(zone, image, field_of(dst, "GfxImage", "pixels").offset, pixels);
+    return image;
+}
+
+namespace
+{
+Node *build_console_image(ZoneConverter &conv, const std::string &name, const ConsoleTexture &tex, uint32_t semantic, uint32_t category,
+                          int iwi_flags, const Node *src_node = nullptr)
+{
+    Node *name_string = nullptr;
+    Node *image = build_console_image(out_zone(conv), conv.dst, name, tex, semantic, category, iwi_flags, &name_string);
+    if (src_node)
+        map_name_string_to(conv, *src_node, "GfxImage", name_string);
     return image;
 }
 
@@ -1826,6 +1843,12 @@ void encode_loaded_sounds(ZoneConverter &conv)
             jobs.emplace_back(key, data);
     });
     std::vector<SoundCache::Entry> results(jobs.size());
+    std::string label = "Encoding loaded sounds";
+    if (conv.progress_label.rfind("Converting ", 0) == 0)
+        label += " of " + conv.progress_label.substr(11);
+    const int total = static_cast<int>(jobs.size());
+    progress::step(label, 0, total);
+    std::atomic<int> done{0};
     parallel_for(jobs.size(), conv.options.jobs, [&](size_t i) {
         try
         {
@@ -1837,6 +1860,7 @@ void encode_loaded_sounds(ZoneConverter &conv)
         {
             results[i].error = e.what();
         }
+        progress::step(label, ++done, total);
     });
     std::lock_guard guard(cache.lock);
     for (size_t i = 0; i < jobs.size(); ++i)

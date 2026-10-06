@@ -1,11 +1,13 @@
 #include "convert/library.h"
 
+#include <atomic>
 #include <algorithm>
 #include <cstdlib>
 #include <mutex>
 
 #include "convert/converter.h"
 #include "convert/merge.h"
+#include "core/progress.h"
 #include "core/threads.h"
 #include "core/zone_cache.h"
 
@@ -191,7 +193,19 @@ void ConsoleLibrary::load()
     // read on every processor, indexed in file order (the first that has an asset gives it)
     std::vector<std::unique_ptr<Zone>> read(files.size());
     std::vector<std::string> errors(files.size());
+    const int total = static_cast<int>(files.size());
+    std::atomic<int> opened{0};
+    progress::step("Reading Xbox 360 fastfiles", 0, total);
     parallel_for(files.size(), 0, [&](size_t i) {
+        struct Done // counted however the file ends
+        {
+            std::atomic<int> &n;
+            int total;
+            ~Done()
+            {
+                progress::step("Reading Xbox 360 fastfiles", ++n, total);
+            }
+        } done{opened, total};
         try
         {
             OpenedZone z = open_zone(files[i], cache_dir);

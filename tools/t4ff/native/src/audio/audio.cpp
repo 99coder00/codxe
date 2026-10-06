@@ -1,5 +1,6 @@
 #include "audio/audio.h"
 
+#include <atomic>
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -10,6 +11,7 @@
 
 #include <windows.h>
 
+#include "core/progress.h"
 #include "core/fastfile.h"
 #include "core/image.h"
 #include "core/process.h"
@@ -884,8 +886,11 @@ UpgradeStats upgrade_stream_files(const fs::path &folder, const std::function<vo
     std::sort(paths.begin(), paths.end());
     UpgradeStats stats;
     stats.files = static_cast<int>(paths.size());
+    const int total = static_cast<int>(paths.size());
+    int index = 0;
     for (const fs::path &path : paths)
     {
+        progress::step("Checking streamed sounds", index++, total);
         try
         {
             if (auto nw = upgrade_sdns(read_file(path)))
@@ -901,6 +906,8 @@ UpgradeStats upgrade_stream_files(const fs::path &folder, const std::function<vo
             ++stats.failed;
         }
     }
+    if (total)
+        progress::step("Checking streamed sounds", total, total);
     return stats;
 }
 
@@ -1209,7 +1216,19 @@ StreamStats convert_streamed_sounds(const IwdLibrary &library, const fs::path &o
         std::string error;
     };
     std::vector<Result> results(names.size());
+    const int total = static_cast<int>(names.size());
+    progress::step("Encoding streamed sounds", 0, total);
+    std::atomic<int> encoded{0};
     parallel_for(names.size(), jobs, [&](size_t i) {
+        struct Done // counted however the sound ends
+        {
+            std::atomic<int> &n;
+            int total;
+            ~Done()
+            {
+                progress::step("Encoding streamed sounds", ++n, total);
+            }
+        } done{encoded, total};
         const std::string &name = names[i];
         auto data = library.read(name);
         if (!data)

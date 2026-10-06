@@ -43,6 +43,9 @@ void plan_textures_shared(const std::vector<ZoneConverter *> &convs);
 void encode_loaded_sounds(ZoneConverter &conv);
 void apply_string_edits(ZoneConverter &conv, Node *root);
 Node *rebuild_console_image(ZoneConverter &conv, const std::string &name, Node *library_node);
+// a console GfxImage asset of a tiled texture, made in zone (name_out: its name string)
+Node *build_console_image(Zone &zone, const Platform &dst, const std::string &name, const ConsoleTexture &tex, uint32_t semantic, uint32_t category,
+                          int iwi_flags, Node **name_out = nullptr);
 
 // the PC pixel data of an image (shared: the caches keep them)
 using ImageRef = std::shared_ptr<const ImageData>;

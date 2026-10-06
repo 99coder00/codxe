@@ -111,9 +111,26 @@ memory loop (native README).
 - The streaming boxes depend on numpy's float64 order: `norm` adds the squares in order, without fused
   multiplies.
 
-**Next, step 7: command line parity** (`t4ff-cli` taking what `python -m t4ff` takes: a map folder
-and an output folder, `find_usermap`, the `menu`, `streams` and `setup` commands, `--progress-lines`).
-Then step 8: the GUI, with a simple mode and an advanced one.
+**Step 7 (command line parity) is done:** `t4ff-cli` takes `python -m t4ff`'s command line
+(`src/cli/t4ff_cli.*`, native README "Using it").
+- Covered: `info`, `roundtrip`, `convert <map> -o <output>` (with `find_usermap`), `menu`, `streams`,
+  `setup`, `--no-install` and `--progress-lines`. Parsing is argparse's: unique prefixes,
+  `--opt=value`, `--no-` pairs, and its error messages and exit codes.
+- `gui` waits for step 8. The developer commands stay; `convert --out` is the developer form.
+- The conversion moved out of `main.cpp` into `src/app/convert.*`, its messages through a log
+  callback and its progress through `src/core/progress.*` (the window's sink comes with step 8).
+- `menu.py`'s Custom Maps list (`make_dynamic`) is `src/convert/usermaps_menu.*`. The `menu` command
+  on CoD Xenon's 0.2.0 `patch_ui.ff`, a rerun from its `.orig`, and CoD Xenon's 0.3.0 list
+  (`--menu-zone`) give the Python's files and output.
+- `info`, `roundtrip`, `streams` and the `menu` error print exactly what the Python prints.
+- `compare_maps.py` now gives both sides the same `convert` command line (the C++ adds
+  `--dev-zone` / `--dev-dump`).
+- `setup` installs an encoder from a `.zip` into `bin` next to `t4ff-cli.exe`.
+- `t4ff-cli` opts out of Windows 11's power throttling (EcoQoS). A background console was getting
+  slower cores: the fastfile's compression took 4.6 s instead of 1.2 s.
+
+**Next, step 8: the GUI** (Dear ImGui), with a simple mode and an advanced one, running conversions
+in the program itself (`convert_usermap`, its log and progress sinks).
 
 **Memory (fixed before step 3).** Nodes now view their zone's bytes instead of copying them, and
 zones can come from a zone cache: inflated once into `%LOCALAPPDATA%\t4ff\zone_cache`, then

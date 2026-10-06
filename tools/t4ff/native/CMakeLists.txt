@@ -49,6 +49,12 @@ add_library(t4ffcore STATIC
   src/convert/menus.cpp
   src/convert/loadscreen.cpp
   src/convert/stream.cpp
+  src/core/dump.cpp
+  src/core/progress.cpp
+  src/app/convert.cpp
+  src/app/usermap.cpp
+  src/app/deps.cpp
+  src/convert/usermaps_menu.cpp
   src/convert/library.cpp
   src/convert/merge.cpp
   src/convert/techsets.cpp
@@ -66,7 +72,7 @@ if(MSVC)
 endif()
 
 # the command line tool
-add_executable(t4ff-cli src/cli/main.cpp src/core/resources.rc)
+add_executable(t4ff-cli src/cli/main.cpp src/cli/t4ff_cli.cpp src/core/resources.rc)
 target_link_libraries(t4ff-cli PRIVATE t4ffcore)
 set_target_properties(t4ff-cli PROPERTIES OUTPUT_NAME t4ff-cli)
 if(MSVC)

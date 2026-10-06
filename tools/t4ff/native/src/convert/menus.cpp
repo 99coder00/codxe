@@ -11,6 +11,7 @@
 #include "convert/assets.h"
 #include "convert/converter.h"
 #include "convert/library.h"
+#include "convert/menu_editor.h"
 #include "convert/merge.h"
 #include "core/pyre.h"
 #include "core/pystr.h"
@@ -20,7 +21,7 @@ namespace t4ff
 namespace fs = std::filesystem;
 using pyre::Regex;
 
-namespace
+namespace menu_edit
 {
 constexpr const char *PAUSE_MENU = "pausedmenu";
 constexpr const char *CONSOLE_OPTIONS_MENU = "ingameoptions";
@@ -100,8 +101,7 @@ bool loads(const Ptr *ptr)
     return ptr && (ptr->kind == Ptr::Kind::Follow || ptr->kind == Ptr::Kind::Insert);
 }
 
-Ptr *new_ptr(Zone &zone, Ptr::Kind kind, Node *owner, uint32_t offset, Node *node = nullptr, uint32_t index = 0, uint32_t inner = 0,
-             Ptr *slot = nullptr)
+Ptr *new_ptr(Zone &zone, Ptr::Kind kind, Node *owner, uint32_t offset, Node *node, uint32_t index, uint32_t inner, Ptr *slot)
 {
     Ptr *ptr = zone.new_ptr(kind);
     ptr->owner = owner;
@@ -226,7 +226,8 @@ void drop_assets(Zone &zone, const std::set<size_t> &drop)
     }
     set_asset_list(zone, keep);
 }
-} // namespace
+} // namespace menu_edit
+using namespace menu_edit;
 
 // -- merge.py's menu passes
 
@@ -669,7 +670,7 @@ std::vector<std::string> rename_game_menus(Zone &zone, const std::function<bool(
 
 // -- PC script menus on a controller
 
-namespace
+namespace menu_edit
 {
 constexpr int KEY_BUTTON_A = 1, KEY_BUTTON_B = 2, KEY_BUTTON_X = 3, KEY_BUTTON_Y = 4, KEY_LSHLDR = 5, KEY_RSHLDR = 6;
 constexpr int KEY_DPAD_UP = 20, KEY_DPAD_DOWN = 21, KEY_DPAD_LEFT = 22, KEY_DPAD_RIGHT = 23;
@@ -744,7 +745,7 @@ const Node *first_string(Node *root)
     });
     return found;
 }
-} // namespace
+} // namespace menu_edit
 
 std::vector<std::string> gamepad_script_menus(const Platform &p, Zone &zone, const Log &log)
 {
@@ -1504,16 +1505,11 @@ std::optional<fs::path> write_options(const std::vector<MapOption> &options, con
 
 // -- the options in game: copies of the game's difficulty list
 
-namespace
+namespace menu_edit
 {
 constexpr const char *OPTIONS_TEMPLATE = "popmenu_difficulty";
 constexpr const char *OPTIONS_RESTART_MENU = "t4ff_options_restart";
 constexpr double OPTIONS_ROW_STEP = 24.0;
-
-struct MenuError : std::runtime_error
-{
-    using std::runtime_error::runtime_error;
-};
 
 // a copy of node and of the nodes it loads; pointers to anything else keep pointing there
 Node *clone(Zone &zone, Node *node, std::unordered_map<const Node *, Node *> &memo)
@@ -1566,231 +1562,6 @@ Node *clone(Zone &zone, Node *node)
     std::unordered_map<const Node *, Node *> memo;
     return clone(zone, node, memo);
 }
-
-struct Token
-{
-    enum Kind
-    {
-        Op,
-        Int,
-        Float,
-        Str
-    } kind;
-    int32_t i = 0;
-    double f = 0;
-    std::string s;
-    bool operator==(const Token &o) const
-    {
-        return kind == o.kind && i == o.i && f == o.f && s == o.s;
-    }
-};
-
-// reads and edits the items of a console menuDef_t
-class MenuEditor
-{
-  public:
-    MenuEditor(const Platform &p, Zone &zone, Node *menu) : p(p), zone(zone), menu(menu)
-    {
-        window = offset_of(p, "itemDef_s", "window");
-        Ptr *ptr = menu->relocs.get(offset_of(p, "menuDef_t", "items"));
-        if (!ptr || ptr->kind != Ptr::Kind::Follow)
-            throw MenuError(std::string("menu ") + OPTIONS_TEMPLATE + " has no items");
-        array = ptr->node;
-        items = array->children;
-        string_template = first_string(menu);
-        menu->walk([&](Node *n) {
-            if (!entries_template && (n->origin == Origin::Member || n->origin == Origin::PtrArray) && n->origin_record &&
-                *n->origin_record == "statement_s" && n->origin_field && *n->origin_field == "entries")
-                entries_template = n;
-        });
-        if (!string_template || !entries_template || entries_template->children.empty())
-            throw MenuError("no string or expression to copy");
-        entry_template = entries_template->children[0];
-    }
-
-    uint32_t offset(const std::string &field) const
-    {
-        if (py::starts_with(field, "window."))
-            return window + offset_of(p, "windowDef_t", field.substr(7));
-        return offset_of(p, "itemDef_s", field);
-    }
-
-    std::optional<std::string> string(Node *item, const std::string &field) const
-    {
-        return text_of(item, offset(field));
-    }
-
-    void set_string(Node *item, const std::string &field, const std::optional<std::string> &text)
-    {
-        set_on(item, offset(field), text);
-        rebuild_children(item);
-    }
-
-    void set_menu_string(const std::string &field, const std::optional<std::string> &text)
-    {
-        uint32_t off = py::starts_with(field, "window.") ? offset_of(p, "menuDef_t", "window") + offset_of(p, "windowDef_t", field.substr(7))
-                                                         : offset_of(p, "menuDef_t", field);
-        set_on(menu, off, text);
-        rebuild_children(menu);
-    }
-
-    void move(Node *item, double dy, double dx = 0.0)
-    {
-        for (const char *field : {"window.rect", "window.rectClient"})
-        {
-            uint32_t off = offset(field);
-            put_bef32(item, off, static_cast<float>(bef32(item, off) + dx));
-            put_bef32(item, off + 4, static_cast<float>(bef32(item, off + 4) + dy));
-        }
-    }
-
-    std::vector<Token> expression(Node *item, const std::string &field) const
-    {
-        uint32_t off = offset(field);
-        int32_t count = static_cast<int32_t>(be32(item, off));
-        Ptr *ptr = item->relocs.get(off + 4);
-        Node *arr = ptr && ptr->kind == Ptr::Kind::Follow ? ptr->node : nullptr;
-        std::vector<Token> tokens;
-        for (int32_t i = 0; i < (arr ? count : 0); ++i)
-        {
-            Node *entry = arr->relocs.get(static_cast<uint32_t>(4 * i))->node;
-            int32_t kind = static_cast<int32_t>(be32(entry, 0)), a = static_cast<int32_t>(be32(entry, 4)), b = static_cast<int32_t>(be32(entry, 8));
-            Token t{Token::Op};
-            if (kind == 0)
-                t.i = a;
-            else if (a == 0)
-            {
-                t.kind = Token::Int;
-                t.i = b;
-            }
-            else if (a == 1)
-            {
-                t.kind = Token::Float;
-                t.f = bef32(entry, 8);
-            }
-            else
-            {
-                t.kind = Token::Str;
-                t.s = stripped_text(entry->relocs.get(8)->target());
-            }
-            tokens.push_back(t);
-        }
-        return tokens;
-    }
-
-    void set_expression(Node *item, const std::string &field, const std::vector<Token> &tokens)
-    {
-        uint32_t off = offset(field);
-        put_be32(item, off, static_cast<uint32_t>(tokens.size()));
-        if (tokens.empty())
-        {
-            item->relocs.set(off + 4, new_ptr(zone, Ptr::Kind::Null, item, off + 4));
-            put_be32(item, off + 4, 0);
-            rebuild_children(item);
-            return;
-        }
-        Node *arr = zone.new_node();
-        arr->type = entries_template->type;
-        arr->count = static_cast<uint32_t>(tokens.size());
-        arr->block = entries_template->block;
-        arr->data.assign(std::vector<uint8_t>(4 * tokens.size(), 0xFF));
-        arr->segments = {Segment{arr->type, arr->count, static_cast<uint32_t>(4 * tokens.size()), false}};
-        arr->align = entries_template->align;
-        arr->origin = entries_template->origin;
-        arr->origin_record = entries_template->origin_record;
-        arr->origin_field = entries_template->origin_field;
-        for (size_t i = 0; i < tokens.size(); ++i)
-        {
-            const Token &t = tokens[i];
-            Node *entry = zone.new_node();
-            entry->type = entry_template->type;
-            entry->count = 1;
-            entry->block = entry_template->block;
-            entry->segments = entry_template->segments;
-            copy_extra(entry, entry_template);
-            entry->data.assign(std::vector<uint8_t>(12));
-            if (t.kind == Token::Op)
-            {
-                put_be32(entry, 0, 0);
-                put_be32(entry, 4, static_cast<uint32_t>(t.i));
-            }
-            else if (t.kind == Token::Int)
-            {
-                put_be32(entry, 0, 1);
-                put_be32(entry, 8, static_cast<uint32_t>(t.i));
-            }
-            else if (t.kind == Token::Float)
-            {
-                put_be32(entry, 0, 1);
-                put_be32(entry, 4, 1);
-                put_bef32(entry, 8, static_cast<float>(t.f));
-            }
-            else
-            {
-                put_be32(entry, 0, 1);
-                put_be32(entry, 4, 2);
-                put_be32(entry, 8, FOLLOW);
-                Node *text = string_like(zone, t.s, string_template);
-                Ptr *tp = new_ptr(zone, Ptr::Kind::Follow, entry, 8, text);
-                entry->relocs.set(8, tp);
-                text->ptr = tp;
-            }
-            rebuild_children(entry);
-            Ptr *ep = new_ptr(zone, Ptr::Kind::Follow, arr, static_cast<uint32_t>(4 * i), entry);
-            arr->relocs.set(static_cast<uint32_t>(4 * i), ep);
-            entry->ptr = ep;
-        }
-        rebuild_children(arr);
-        Ptr *ap = new_ptr(zone, Ptr::Kind::Follow, item, off + 4, arr);
-        item->relocs.set(off + 4, ap);
-        arr->ptr = ap;
-        put_be32(item, off + 4, FOLLOW);
-        rebuild_children(item);
-    }
-
-    void set_items(const std::vector<Node *> &now)
-    {
-        array->count = static_cast<uint32_t>(now.size());
-        array->data.assign(std::vector<uint8_t>(4 * now.size(), 0xFF));
-        array->segments = {Segment{array->segments[0].type, array->count, static_cast<uint32_t>(4 * now.size()), false}};
-        array->relocs.clear();
-        for (size_t i = 0; i < now.size(); ++i)
-        {
-            Ptr *ip = new_ptr(zone, Ptr::Kind::Follow, array, static_cast<uint32_t>(4 * i), now[i]);
-            array->relocs.set(static_cast<uint32_t>(4 * i), ip);
-            now[i]->ptr = ip;
-        }
-        rebuild_children(array);
-        put_be32(menu, offset_of(p, "menuDef_t", "itemCount"), static_cast<uint32_t>(now.size()));
-        items = now;
-    }
-
-    const Platform &p;
-    Zone &zone;
-    Node *menu;
-    Node *array = nullptr;
-    std::vector<Node *> items;
-    const Node *string_template = nullptr;
-    Node *entries_template = nullptr;
-    Node *entry_template = nullptr;
-    uint32_t window = 0;
-
-  private:
-    void set_on(Node *owner, uint32_t off, const std::optional<std::string> &text)
-    {
-        if (!text)
-        {
-            owner->relocs.set(off, new_ptr(zone, Ptr::Kind::Null, owner, off));
-            put_be32(owner, off, 0);
-            return;
-        }
-        Node *node = string_like(zone, *text, string_template);
-        Ptr *ptr = new_ptr(zone, Ptr::Kind::Follow, owner, off, node);
-        owner->relocs.set(off, ptr);
-        node->ptr = ptr;
-        put_be32(owner, off, FOLLOW);
-    }
-};
 
 std::vector<Token> replace_int(std::vector<Token> tokens, int32_t old, int32_t now)
 {
@@ -1885,7 +1656,7 @@ void append_menu(const Platform &p, Zone &zone, Node *menu_list, Node *menu)
     rebuild_children(array);
     put_be32(menu_list, offset_of(p, "MenuList", "menuCount"), array->count);
 }
-} // namespace
+} // namespace menu_edit
 
 std::vector<std::string> add_options_menus(const Platform &p, Zone &zone, ConsoleLibrary *library, const std::vector<MapOption> &options,
                                            const Log &log)
