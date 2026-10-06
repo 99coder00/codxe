@@ -96,10 +96,24 @@ conversion passes, `loadscreen.py`, and `merge.py`'s menu and video passes (nati
   reads the PC menus through them. The port mirrors this: don't fix it on one side only.
 - `menu.py`'s `menu` command (the Custom Maps list) comes with step 7.
 
-**Next, step 6: streaming and the memory planner** (`stream.py`, `memory.py`), which converts once
-and plans again instead of converting again. Then:
-- step 7: command line parity (the `menu` and `setup` commands among it);
-- step 8: the GUI, with a simple mode and an advanced one.
+**Step 6 (streaming and the memory plan) is done:** `stream.py`, `memory.py` and `cmd_convert`'s
+memory loop (native README).
+- `t4ff-cli convert` takes `--texture-budget auto` (now its default), `--memory-target`,
+  `--stream-textures`, `--upgrade-budget`, `--deep-stream`, `--stream-growth`, `--keep-quarter` and
+  `--keep-mip-tail`. Like the Python, it converts again (up to five times) when the map is over its
+  target. It reruns the whole conversion each time, as the Python does: 7-9 s an attempt.
+- The oracle is now t4ff's own command line: `py_reference.py cli` runs `python -m t4ff` and saves
+  the zone it writes. `compare_maps.py` takes `--budget auto` and `--extra "OPTIONS"`.
+- Identical: the automatic budget on Kino Rezurrection (three conversions) and The Simpsons;
+  streaming on Kino Der Toten (deep, also with the disc's highmip folder), Kino Rezurrection (deep,
+  three conversions: upgrades and mip tail, then eighth sizes) and Mini-Labor; `images.pak`
+  included. 11-27 s against 81-396 s.
+- The streaming boxes depend on numpy's float64 order: `norm` adds the squares in order, without fused
+  multiplies.
+
+**Next, step 7: command line parity** (`t4ff-cli` taking what `python -m t4ff` takes: a map folder
+and an output folder, `find_usermap`, the `menu`, `streams` and `setup` commands, `--progress-lines`).
+Then step 8: the GUI, with a simple mode and an advanced one.
 
 **Memory (fixed before step 3).** Nodes now view their zone's bytes instead of copying them, and
 zones can come from a zone cache: inflated once into `%LOCALAPPDATA%\t4ff\zone_cache`, then

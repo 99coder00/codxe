@@ -48,6 +48,7 @@ add_library(t4ffcore STATIC
   src/convert/scripts.cpp
   src/convert/menus.cpp
   src/convert/loadscreen.cpp
+  src/convert/stream.cpp
   src/convert/library.cpp
   src/convert/merge.cpp
   src/convert/techsets.cpp

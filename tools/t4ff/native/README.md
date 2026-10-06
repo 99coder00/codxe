@@ -48,7 +48,10 @@ t4ff-cli regex <patterns.txt> <file>...                       regex engine check
   textures and streamed sounds), and `--console-zone P` for the console library; each repeats;
 - `--map-files DIR`, the folders of the map's own files (its fastfiles' and `.iwd` files', as
   `t4ff convert` reads them): its loose scripts, `.arena` file and loading screen picture; repeats;
-- `--map-name N`, `--texture-budget MiB`, `--max-texture-size N`;
+- `--map-name N`, `--max-texture-size N`;
+- `--texture-budget MiB` or `auto` (the default: what `--memory-target MiB`, 212, leaves);
+- `--stream-textures`, `--upgrade-budget MiB` (96), `--deep-stream NAMES` or `all`,
+  `--stream-growth X`, `--keep-quarter`, `--keep-mip-tail`;
 - `--no-mips`, `--no-compress`, `--allow-unverified`, `--reference-techsets`;
 - `--no-zone-cache` (library zones in memory);
 - `--out-dir D`, the map's output folder (`--sounds-dir D` stands for it when it is not given): it
@@ -75,9 +78,12 @@ It runs the Python's `_convert_map` and the rest of its `convert` command, in th
    console;
 7. fixes the technique sets' argument sections, removes the references nothing uses, keeps the
    loaded sounds within their limits and syncs the alias types;
-8. writes the map's options and scripts folder, its zone, and its other files (above).
-
-Only streaming and the memory plan (step 6) are left out.
+8. writes the map's options and scripts folder, and with `--stream-textures` streams the textures
+   into its `images.pak`;
+9. measures the memory the zone takes and, over the target, converts again (steps 2 to 8) with less:
+   the stock upgrades and the mip tails first, then the streamed textures' sizes, then a smaller
+   texture budget (up to five conversions, as the Python's `convert` command);
+10. writes its zone and its other files (above).
 
 xma2encode is a separate program, run on every processor. The same input gives the same output (four
 parallel encodes of one sound were identical), so encodings are kept in
@@ -177,7 +183,7 @@ could change the Python output, but not the C++ output.
 | 3 | Conversion core: assets, technique sets, console library, merge, xanims | done |
 | 4 | Sounds: decoders, XMA encoding in parallel, cache | done |
 | 5 | Scripts, menus, loading screens | done |
-| 6 | Streaming and the memory planner | |
+| 6 | Streaming and the memory planner | done |
 | 7 | Command line parity with the Python t4ff | |
 | 8 | The GUI (Dear ImGui): simple and advanced modes, queue, results | |
 
@@ -291,6 +297,34 @@ files and Kino Rezurrection's 1,725 are identical too: 33.6 s and 26.8 s against
 The regex engine gives Python's matches for all 67 patterns over the 227 raw files and string sets
 of four maps' patch and mod zones: 15,209 identical signatures.
 
+Step 6, checked on 2026-10-06. The Python side is now t4ff's own `convert` command
+(`py_reference.py cli` runs `python -m t4ff` with its arguments, saving the zone it writes and the
+dump of its node tree), so the memory loop and everything after the zone are its own code. The C++
+gets the same map through its explicit options. These runs use `compare_maps.py --budget auto` (the
+automatic budget and a 212 MiB target, `t4ff convert`'s defaults) and `--extra` for the streaming
+options:
+
+| Map | Options | Conversions | Python | C++ |
+| --- | --- | --- | --- | --- |
+| Kino Rezurrection | automatic budget | 3: mip tail, then 82.7 MiB of textures | 273.7 s | 22.3 s |
+| The Simpsons | automatic budget | 1 | 80.6 s | 7.3 s |
+| Kino Der Toten (UGX) | `--stream-textures --deep-stream all` | 1 (683 streamed, 665 deep) | 123.3 s | 11.3 s |
+| Kino Rezurrection | `--stream-textures --deep-stream all` | 3: upgrades and mip tail, then 26 MiB less of the 897 streamed | 395.7 s | 27.1 s |
+| Mini-Labor | `--stream-textures` | 3: upgrades and mip tail, then 41.3 MiB less of the 661 streamed | 197.4 s | 20.1 s |
+| Kino Der Toten, the disc in the library | `--stream-textures --deep-stream all` | 1 (21 console `.hi` files copied, 9 unstreamed) | 196.7 s | 14.9 s |
+
+All are identical: the zones, the dumps, `images.pak` and every other file. So are the other six maps
+on the automatic budget (Mini-Labor, NukeCraft, Super Mario 64, Kino Der Toten, Matrix and Dead
+Sand; most convert twice): 6.9-17.9 s against 80.9-168.9 s. The checks cover:
+- the pack (deep entries, eighth-size entries, the console's `.hi` files);
+- mips made for textures saved without them;
+- the PC versions of stock textures, streamed or whole;
+- the boxes of models and world surfaces, and the world's tree;
+- every branch of the memory loop.
+
+The boxes need numpy's float64 arithmetic: its `norm` adds the three squares in order, without
+fused multiplies, along an axis and for one vector alike. Model texture coordinates are float16.
+
 ## Layout
 
 | Python | C++ |
@@ -315,6 +349,7 @@ of four maps' patch and mod zones: 15,209 identical signatures.
 | `scripts.py`, `named.py` | `src/convert/scripts.*` (the script text it adds: `script_templates.inc`, from `tools/gen_templates.py`) |
 | `menu.py` | `src/convert/menus.*` (the conversion's passes; the `menu` command's list comes with step 7), `map.json` and `preview.dds` in `loadscreen.*` |
 | `loadscreen.py` | `src/convert/loadscreen.*` (the title card's font: `loadscreen_tables.inc`) |
+| `stream.py`, `memory.py` | `src/convert/stream.*` (`with_mips` in `src/core/image.*`); the memory loop in `src/cli/main.cpp` |
 | Python's `re`, `str` | `src/core/pyre.*` (a regex engine with `re`'s semantics), `src/core/pystr.*` |
 | `__main__.py` | `src/cli/main.cpp` |
 

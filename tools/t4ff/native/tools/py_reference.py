@@ -4,6 +4,7 @@
     python native/tools/py_reference.py rewrite <fastfile> <out.zone>  the zone written back, as t4ff-cli rewrite
     python native/tools/py_reference.py textures <out.txt> <iwd or folder>...  texture battery, as t4ff-cli textures
     python native/tools/py_reference.py convert --out <zone> [--dump <txt>] [options] <PC fastfile>...  as t4ff-cli convert
+    python native/tools/py_reference.py cli <zone> <dump.txt> <t4ff arguments>...  t4ff's own command line, its map zone saved
 
 Run from tools/t4ff. The outputs of both programs must be byte identical.
 """
@@ -301,8 +302,27 @@ def textures(out_path, *paths):
         f.write("".join(out).encode("latin-1"))
 
 
+def cli(zone_path, dump_path, *argv):
+    """t4ff's own command line (``python -m t4ff <argv>``), the map's zone as it writes it also saved
+    to ``zone_path`` and its node tree dumped to ``dump_path``: the oracle of t4ff-cli convert,
+    memory plan and streaming included."""
+    import t4ff.__main__ as t4ff_main
+
+    write_zone = t4ff_main.write_zone
+
+    def capture(zone, target, jobs=0, out=None):
+        if out is not None:  # the map's zone (its load zone is written without)
+            with open(zone_path, "wb") as f:
+                f.write(out)
+            dump_zone(zone, dump_path)
+        return write_zone(zone, target, jobs, out)
+
+    t4ff_main.write_zone = capture
+    return t4ff_main.main(list(argv))
+
+
 if __name__ == "__main__":
-    commands = {"dump": dump, "rewrite": rewrite, "textures": textures, "convert": convert}
+    commands = {"dump": dump, "rewrite": rewrite, "textures": textures, "convert": convert, "cli": cli}
     if len(sys.argv) < 3 or sys.argv[1] not in commands or (sys.argv[1] in ("dump", "rewrite") and len(sys.argv) != 4):
         sys.exit(__doc__)
-    commands[sys.argv[1]](*sys.argv[2:])
+    sys.exit(commands[sys.argv[1]](*sys.argv[2:]) or 0)
