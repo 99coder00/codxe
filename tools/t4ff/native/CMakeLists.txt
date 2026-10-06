@@ -48,6 +48,10 @@ add_library(t4ffcore STATIC
   src/convert/library.cpp
   src/convert/merge.cpp
   src/convert/techsets.cpp
+  src/core/process.cpp
+  src/core/sha256.cpp
+  src/audio/audio.cpp
+  src/audio/soundbudget.cpp
 )
 target_include_directories(t4ffcore PUBLIC src)
 target_link_libraries(t4ffcore PUBLIC zlibstatic)

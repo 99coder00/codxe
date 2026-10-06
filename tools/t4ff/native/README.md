@@ -37,21 +37,41 @@ t4ff-cli rewrite <fastfile> <out.zone>                        the zone as writte
 t4ff-cli bench [--jobs N] [--keep] <file or folder>...        reading speed and memory
 t4ff-cli textures [--jobs N] <out.txt> <iwd or folder>...     texture battery, as CRCs
 t4ff-cli texbench [--jobs N] <iwd or folder>...               texture conversion speed
-t4ff-cli cache [--clear] [--zone-cache-dir DIR]               the zone cache's size, or delete it
+t4ff-cli cache [--clear] [--zone-cache-dir DIR]               the zone and sound caches' sizes, or delete them
 t4ff-cli convert --out <zone> [--dump <txt>] [--ff <fastfile>] [options] <PC fastfile>...
-                                                              convert and merge (step 3's part)
+                                                              convert and merge (steps 3 and 4)
 ```
 
 `convert` takes the options of the conversion core:
 - `--map-iwd P` for the map's own `.iwd` files and folders, `--iwd P` for the PC game's files (stock
-  textures), and `--console-zone P` for the console library; each repeats;
+  textures and streamed sounds), and `--console-zone P` for the console library; each repeats;
 - `--map-name N`, `--texture-budget MiB`, `--max-texture-size N`;
 - `--no-mips`, `--no-compress`, `--allow-unverified`, `--reference-techsets`;
-- `--no-zone-cache` (library zones in memory) and `--sounds-dir D`.
+- `--no-zone-cache` (library zones in memory);
+- `--sounds-dir D`, the map's output folder: its `sounds` folder gets the streamed sounds.
 
-It converts each PC fastfile, merges them in order, and removes the technique set references nothing
-uses. It does not yet run what comes after that in the Python's `_convert_map`: sounds (step 4),
-scripts, menus and named assets (step 5), streaming and the memory plan (step 6).
+It takes the sound options too:
+- `--xma-encoder P` (default: where the Xbox developer kits put xma2encode.exe), `--xma-quality N`;
+- `--ffmpeg P` (default: on PATH, then imageio-ffmpeg's);
+- `--sound-rate N`, `--mono-sounds`, `--stream-rate N`, `--mono-streams`;
+- `--max-loaded-sounds N` (1500), `--loaded-sound-memory MiB` (32);
+- `--no-sounds`, `--no-sound-cache`, `--jobs N`.
+
+With an encoder and `--sounds-dir`, it runs these steps:
+1. converts the map's streamed sounds;
+2. converts the stock ones its aliases use from the PC game's files;
+3. encodes the loaded sounds, then converts each PC fastfile, merges them in order, and removes the
+   technique set references nothing uses;
+4. keeps the loaded sounds within their limits, syncs the alias types, and gives earlier streams the
+   game's layout.
+
+It does not yet run what comes between those steps in the Python's `_convert_map`: scripts, menus and
+named assets (step 5), streaming and the memory plan (step 6).
+
+xma2encode is a separate program, run on every processor. The same input gives the same output (four
+parallel encodes of one sound were identical), so encodings are kept in
+`%LOCALAPPDATA%\t4ff\sound_cache`, by the SHA-256 of the WAV the encoder gets, its quality and its file.
+A repeat conversion skips them.
 
 `roundtrip` and `bench` take `--zone-cache` (the default folder) or `--zone-cache-dir DIR`. With
 either, zones come from the zone cache (below).
@@ -127,7 +147,7 @@ could change the Python output, but not the C++ output.
 | 1 | Foundation: fastfiles, layouts, zone code commands, zone reader and writer | done |
 | 2 | Textures: IWI, wavelet, DXT, Xenos tiling | done |
 | 3 | Conversion core: assets, technique sets, console library, merge, xanims | done |
-| 4 | Sounds: decoders, XMA encoding in parallel, cache | |
+| 4 | Sounds: decoders, XMA encoding in parallel, cache | done |
 | 5 | Scripts, menus, loading screens | |
 | 6 | Streaming and the memory planner | |
 | 7 | Command line parity with the Python t4ff | |
@@ -180,6 +200,36 @@ Textures are built on every processor before the zones are converted (`prebuild_
 images read the same way (`prefetch_image_sources`): the same function of the same data, so the bytes
 are the same.
 
+Step 4, checked on 2026-10-06 with `compare_maps.py --sounds`: the same maps and options as step 3,
+with xma2encode. Each side writes its own sounds folder; the zones, the dumps and every `.xma` file
+must be identical.
+
+| Map | Sound files | Python | C++, cache empty | C++, cache full |
+| --- | --- | --- | --- | --- |
+| The Simpsons | 1,881 | 142.3 s | 27.1 s | |
+| Mini-Labor | 3,043 | 173.2 s | 39.5 s | |
+| NukeCraft | 1,748 | 153.4 s | 24.4 s | |
+| Super Mario 64 | 2,128 | 152.1 s | 24.9 s | |
+| Kino Der Toten (UGX) | 346 | 123.9 s | 16.3 s | |
+| Kino Rezurrection | 1,707 | 184.4 s | 34.8 s | 23.5 s |
+
+All six are identical, and so is Matrix (1,878 sound files). The checks cover:
+- loaded sounds: XMA1 repacking, seek tables and format blocks, resampled to the XMA1 rates;
+- streamed sounds: the map's and the stock ones, in 4 KiB XMA2 blocks;
+- the loaded sound limit: identical sounds shared, the longest streamed;
+- the alias types.
+
+The stock streams come from the PC game's files and are in no cache, so "cache empty" still reused
+those the earlier maps had encoded.
+
+Two details matter for the identical bytes:
+- **Resampling** is numpy's float64 expression term for term. numpy's float64 `sin` and `cos` are
+  the C runtime's (`ucrtbase.dll`) on processors without AVX-512, so the resampler calls those
+  (`audio.cpp`, `Trig`).
+- **Child processes** (xma2encode, FFmpeg) inherit their three standard handles only. Inherited
+  handles of files other threads had open made parallel encodes fail ("being used by another
+  process").
+
 ## Layout
 
 | Python | C++ |
@@ -194,7 +244,10 @@ are the same.
 | `dxt.py` | `src/core/dxt.*` |
 | `xenos.py` | `src/core/xenos.*`, formats in `texture_format.h` |
 | `convert.py` | `src/convert/converter.*` and `record_map.*` (RecordMap, ScalarMap, _ArrayMap) |
-| `assets.py` | `src/convert/assets.*` (loaded sound encoding: step 4) |
+| `assets.py` | `src/convert/assets.*` |
+| `audio.py` | `src/audio/audio.*` (with `src/core/process.*`, `src/core/sha256.*`) |
+| `soundbudget.py` | `src/audio/soundbudget.*` |
+| `deps.py` | `find_xma2encode` and `ffmpeg_exe` only (`audio.cpp`); setup comes with step 7 |
 | `library.py` | `src/convert/library.*` (zones read on every processor, from the zone cache) |
 | `merge.py` | `src/convert/merge.*` (its menu and video passes: step 5) |
 | `techsets.py`, `xanim.py` | `src/convert/techsets.*`, `src/convert/xanim.*` |

@@ -216,6 +216,8 @@ class Relocs
         items.clear();
         index.reset();
     }
+    // removes the pointer at offset (the others keep their order); returns it, or nullptr
+    Ptr *erase(uint32_t offset);
     bool empty() const
     {
         return items.empty();

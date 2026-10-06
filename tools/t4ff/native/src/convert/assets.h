@@ -9,6 +9,7 @@
 #include <utility>
 #include <vector>
 
+#include "audio/audio.h"
 #include "core/image.h"
 #include "core/zone.h"
 
@@ -71,6 +72,12 @@ DropPlan choose_drops(const std::vector<std::string> &names, const std::function
 
 // sounds
 std::string console_sound_name(const std::string &name);
+// the files of the streamed sounds of the aliases of the zones (dir\name, as they have them)
+std::vector<std::string> streamed_sound_files(const Platform &p, const std::vector<Zone *> &zones);
+// streamed sounds of the game's own the map's aliases use, from the PC game's files (stock), encoded
+// next to the map's own
+StreamStats ship_stock_streams(const Platform &p, const std::vector<Zone *> &zones, const IwdLibrary *stock, const std::filesystem::path &out_dir,
+                               XmaEncoder &encoder, int max_rate, bool mono, int jobs, const std::function<void(const std::string &)> &log);
 uint32_t stream_name_hash(const std::string &path);
 uint32_t map_stream_hash(const std::string &directory, const std::string &name);
 // 'sound/eggs/para_egg.wav' -> 'sounds/eggs/para_egg.xma' (audio.streamed_sound_target)

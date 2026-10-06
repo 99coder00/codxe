@@ -1512,12 +1512,64 @@ Node *gfxworld_hook(ZoneConverter &conv, const std::string &, Node *node, const 
     return nw;
 }
 
+Node *loaded_sound_data(Node &node)
+{
+    Node *data = find_child(node, [](const Node &c) { return origin_member(c, "snd_asset", "data"); });
+    return data && !data->data.empty() ? data : nullptr;
+}
+
+bool has_encoder(ZoneConverter &conv)
+{
+    return conv.options.xma_encoder && conv.options.xma_encoder->available();
+}
+
+Node *build_loaded_sound(ZoneConverter &conv, const std::string &name, const LoadedXma &xma)
+{
+    const Platform &dst = conv.dst;
+    Zone &zone = out_zone(conv);
+    const Record &rec = dst.record("LoadedSound"), &snd = dst.record("snd_asset");
+    Node *node = asset_header(zone, dst, "LoadedSound");
+    node->asset = "loaded_sound";
+    uint32_t base = rec.field("sound")->offset;
+    uint8_t *d = node->data.mutable_data();
+    write_uint(dst, d + base + snd.field("data_size")->offset, 4, xma.data.size());
+    for (size_t i = 0; i < xma.format.size(); ++i)
+        write_uint(dst, d + base + snd.field("format")->offset + 4 * i, 4, xma.format[i]);
+    follow(zone, node, rec.field("name")->offset, string_node(zone, dst, name));
+
+    Node *data = conv.new_node(dst.char_type, static_cast<uint32_t>(xma.data.size()), BLOCK_LARGE);
+    data->align = 2048;
+    data->origin = Origin::Member;
+    data->origin_record = intern("snd_asset");
+    data->origin_field = intern("data");
+    data->segments.push_back({dst.char_type, data->count, data->count, false});
+    data->data.assign(xma.data);
+    follow(zone, node, base + snd.field("data")->offset, data);
+
+    const Record &seek_rec = dst.record("XmaSeekTable360");
+    Node *seek = conv.new_node(seek_rec.self, 1, BLOCK_VIRTUAL);
+    std::vector<uint8_t> table(8 + 4 * xma.seek_table.size());
+    write_uint(dst, table.data(), 4, 1);
+    write_uint(dst, table.data() + 4, 4, xma.seek_table.size());
+    for (size_t i = 0; i < xma.seek_table.size(); ++i)
+        write_uint(dst, table.data() + 8 + 4 * i, 4, xma.seek_table[i]);
+    seek->align = 4;
+    seek->origin = Origin::Member;
+    seek->origin_record = intern("snd_asset");
+    seek->origin_field = intern("seekTable");
+    seek->segments.push_back({seek_rec.self, 1, 8, true});
+    seek->segments.push_back({dst.uint_type, static_cast<uint32_t>(xma.seek_table.size()), static_cast<uint32_t>(4 * xma.seek_table.size()), false});
+    seek->data.assign(std::move(table));
+    follow(zone, node, base + snd.field("seekTable")->offset, seek);
+    return node;
+}
+
 Node *loaded_sound_hook(ZoneConverter &conv, const std::string &asset_type, Node *node, const std::string &name)
 {
     std::string console_name = console_sound_name(name);
     if (starts_comma(name))
         return reference_or_copy(conv, asset_type, node, console_name);
-    if (!conv.options.xma_encoder)
+    if (!has_encoder(conv))
     {
         if (!conv.warned_no_encoder)
         {
@@ -1526,7 +1578,42 @@ Node *loaded_sound_hook(ZoneConverter &conv, const std::string &asset_type, Node
         }
         return reference_or_copy(conv, asset_type, node, console_name);
     }
-    throw ConvertError("encoding loaded sounds comes with step 4 of the native port");
+    Node *data = loaded_sound_data(*node);
+    if (!data)
+        return reference_or_copy(conv, asset_type, node, console_name);
+    SoundCache &cache = *conv.options.sound_cache;
+    auto key = std::make_pair(console_name, data->data.size());
+    SoundCache::Entry entry;
+    bool cached;
+    {
+        std::lock_guard guard(cache.lock);
+        auto it = cache.entries.find(key);
+        cached = it != cache.entries.end();
+        if (cached)
+            entry = it->second;
+    }
+    if (!cached)
+    {
+        try
+        {
+            entry.xma = std::make_shared<LoadedXma>(encode_loaded_sound(std::vector<uint8_t>(data->data.begin(), data->data.end()),
+                                                                        *conv.options.xma_encoder, static_cast<int>(conv.options.sound_rate),
+                                                                        conv.options.mono_sounds));
+        }
+        catch (const AudioError &e)
+        {
+            entry.error = e.what();
+        }
+        std::lock_guard guard(cache.lock);
+        cache.entries[key] = entry;
+    }
+    if (!entry.xma)
+    {
+        conv.warn("loaded sound '" + name + "': " + entry.error + ", emitting a reference");
+        return reference_or_copy(conv, asset_type, node, console_name);
+    }
+    conv.stats.sound_bytes += entry.xma->data.size();
+    return build_loaded_sound(conv, console_name, *entry.xma);
 }
 
 void fix_primed_sound(ZoneConverter &conv, Node *sf, uint32_t prime_off, const std::optional<std::string> &rel)
@@ -1719,9 +1806,41 @@ void prebuild_textures(const std::vector<ZoneConverter *> &convs)
 
 void encode_loaded_sounds(ZoneConverter &conv)
 {
-    if (!conv.options.xma_encoder)
+    // each one is a decode and an xma2encode run, which run on every processor; the results wait in
+    // the sound cache for the hook
+    if (!has_encoder(conv))
         return;
-    throw ConvertError("encoding loaded sounds comes with step 4 of the native port");
+    SoundCache &cache = *conv.options.sound_cache;
+    std::vector<std::pair<std::pair<std::string, size_t>, Node *>> jobs;
+    std::set<std::pair<std::string, size_t>> queued;
+    conv.zone.root->walk([&](Node *node) {
+        if (node->origin != Origin::Asset || !node->is_record("LoadedSound"))
+            return;
+        std::string name = asset_display_name(conv.src, *node);
+        Node *data = loaded_sound_data(*node);
+        if (name.empty() || starts_comma(name) || !data)
+            return;
+        auto key = std::make_pair(console_sound_name(name), data->data.size());
+        std::lock_guard guard(cache.lock);
+        if (!cache.entries.count(key) && queued.insert(key).second)
+            jobs.emplace_back(key, data);
+    });
+    std::vector<SoundCache::Entry> results(jobs.size());
+    parallel_for(jobs.size(), conv.options.jobs, [&](size_t i) {
+        try
+        {
+            const Bytes &wav = jobs[i].second->data;
+            results[i].xma = std::make_shared<LoadedXma>(encode_loaded_sound(std::vector<uint8_t>(wav.begin(), wav.end()), *conv.options.xma_encoder,
+                                                                             static_cast<int>(conv.options.sound_rate), conv.options.mono_sounds));
+        }
+        catch (const AudioError &e)
+        {
+            results[i].error = e.what();
+        }
+    });
+    std::lock_guard guard(cache.lock);
+    for (size_t i = 0; i < jobs.size(); ++i)
+        cache.entries[jobs[i].first] = std::move(results[i]);
 }
 
 // -- strings
@@ -1831,6 +1950,79 @@ std::string console_sound_name(const std::string &name)
     if (ext == ".wav" || ext == ".mp3" || ext == ".ogg" || ext == ".flac" || ext == ".xma")
         return prefix + splitext_root(base);
     return prefix + base;
+}
+
+std::vector<std::string> streamed_sound_files(const Platform &p, const std::vector<Zone *> &zones)
+{
+    uint32_t u = p.record("SoundFile").field("u")->offset;
+    uint32_t fn = u + p.record("StreamedSound").field("filename")->offset;
+    const Record &sfn = p.record("StreamFileName");
+    uint32_t dir_off = fn + sfn.field("dir")->offset, name_off = fn + sfn.field("name")->offset;
+    auto text = [](Node *node, uint32_t off) -> std::string {
+        Ptr *ptr = node->relocs.get(off);
+        Node *target = ptr && ptr->kind != Ptr::Kind::Null ? ptr->target() : nullptr;
+        return target ? text_of(*target) : "";
+    };
+    std::map<std::string, std::string> files; // lower case -> as the first alias has it
+    for (Zone *zone : zones)
+        zone->root->walk([&](Node *node) {
+            if (!origin_member(*node, "snd_alias_t", "soundFile") || node->data.empty() || node->data[0] != 2)
+                return;
+            std::string name = text(node, name_off);
+            if (name.empty())
+                return;
+            std::string directory = text(node, dir_off);
+            std::replace(directory.begin(), directory.end(), '/', '\\');
+            std::string rel = (directory.empty() ? "" : directory + "\\") + name;
+            files.emplace(lower_latin1(rel), rel);
+        });
+    std::vector<std::string> out;
+    for (const auto &[lower, rel] : files)
+        out.push_back(rel);
+    return out; // sorted by their lower case names
+}
+
+StreamStats ship_stock_streams(const Platform &p, const std::vector<Zone *> &zones, const IwdLibrary *stock, const std::filesystem::path &out_dir,
+                               XmaEncoder &encoder, int max_rate, bool mono, int jobs, const std::function<void(const std::string &)> &log)
+{
+    std::vector<std::string> wanted, missing;
+    for (const std::string &rel : streamed_sound_files(p, zones))
+    {
+        std::string source = "sound/" + rel;
+        std::replace(source.begin(), source.end(), '\\', '/');
+        std::string target = streamed_sound_target_path(source);
+        std::filesystem::path path = out_dir;
+        for (size_t start = 0;;)
+        {
+            size_t end = target.find('/', start);
+            path /= target.substr(start, end == std::string::npos ? std::string::npos : end - start);
+            if (end == std::string::npos)
+                break;
+            start = end + 1;
+        }
+        if (std::filesystem::exists(path))
+            continue;
+        (stock && stock->contains(source) ? wanted : missing).push_back(source);
+    }
+    StreamStats stats;
+    if (!wanted.empty())
+    {
+        stats = convert_streamed_sounds(*stock, out_dir, encoder, max_rate, mono, log, jobs, &wanted, true);
+        if (log)
+        {
+            char buf[256];
+            snprintf(buf, sizeof buf, "streamed sounds: %d of the game's own the map uses taken from the PC game's files (%.1f MiB, e.g. %s)",
+                     stats.converted, stats.output_bytes / 1048576.0, wanted[0].substr(6).c_str());
+            log(buf);
+        }
+    }
+    if (!missing.empty() && log)
+    {
+        std::string where = stock ? "nor in the PC game's files given" : "(give the PC game's main folder with --iwd to add them)";
+        log("streamed sounds: " + std::to_string(missing.size()) + " the map uses are not in its files " + where +
+            ": the console plays them only if its disc has them, which it has not for the downloadable maps' (e.g. " + missing[0].substr(6) + ")");
+    }
+    return stats;
 }
 
 uint32_t stream_name_hash(const std::string &path)

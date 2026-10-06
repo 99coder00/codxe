@@ -158,6 +158,21 @@ void Relocs::set(uint32_t offset, Ptr *ptr)
         build_index(); // from now on: get never changes anything, as zones are read on several threads
 }
 
+Ptr *Relocs::erase(uint32_t offset)
+{
+    for (size_t i = 0; i < items.size(); ++i)
+    {
+        if (items[i].first != offset)
+            continue;
+        Ptr *ptr = items[i].second;
+        items.erase(items.begin() + i);
+        if (index)
+            build_index();
+        return ptr;
+    }
+    return nullptr;
+}
+
 Ptr *Relocs::get(uint32_t offset) const
 {
     if (index)

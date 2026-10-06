@@ -87,14 +87,19 @@ def dump_zone(zone, out_path):
 
 
 def convert(*argv):
-    """The Python side of t4ff-cli convert: the step 3 pipeline (convert, merge, prune references)."""
+    """The Python side of t4ff-cli convert: the pipeline of steps 3 and 4 (streamed sounds, convert,
+    merge, prune references, the loaded sound limit, alias types, stream layout)."""
     import argparse
 
     from t4ff.__main__ import converters, run_converter
+    from t4ff.assets import ship_stock_streams
+    from t4ff.audio import LoadedXma, XmaEncoder, convert_streamed_sounds, upgrade_stream_files
     from t4ff.convert import ConvertOptions
     from t4ff.fastfile import write_fastfile
+    from t4ff.images import IwdLibrary
     from t4ff.merge import merge_zones, prune_references
-    from t4ff.platforms import x360
+    from t4ff.platforms import pc, x360
+    from t4ff.soundbudget import DEFAULT_LOADED_SOUND_MIB, DEFAULT_MAX_LOADED_SOUNDS, limit_loaded_sounds, sync_alias_types
 
     ap = argparse.ArgumentParser(prog="py_reference.py convert")
     ap.add_argument("--out")
@@ -107,10 +112,31 @@ def convert(*argv):
     ap.add_argument("--texture-budget", type=float, default=0)
     ap.add_argument("--max-texture-size", type=int, default=0)
     ap.add_argument("--sounds-dir")
-    for flag in ("--no-mips", "--no-compress", "--allow-unverified", "--reference-techsets", "--no-zone-cache"):
+    ap.add_argument("--xma-encoder")
+    ap.add_argument("--ffmpeg")
+    ap.add_argument("--xma-quality", type=int, default=60)
+    ap.add_argument("--sound-rate", type=int, default=0)
+    ap.add_argument("--stream-rate", type=int, default=0)
+    ap.add_argument("--jobs", type=int, default=0)
+    ap.add_argument("--max-loaded-sounds", type=int, default=DEFAULT_MAX_LOADED_SOUNDS)
+    ap.add_argument("--loaded-sound-memory", type=float, default=DEFAULT_LOADED_SOUND_MIB)
+    for flag in ("--no-mips", "--no-compress", "--allow-unverified", "--reference-techsets", "--no-zone-cache", "--mono-sounds", "--mono-streams",
+                 "--no-sounds", "--no-sound-cache"):
         ap.add_argument(flag, action="store_true")
     ap.add_argument("paths", nargs="+")
     a = ap.parse_args(argv)
+    if a.ffmpeg:
+        os.environ["PATH"] = os.path.dirname(os.path.abspath(a.ffmpeg)) + os.pathsep + os.environ.get("PATH", "")
+    encoder = None
+    if not a.no_sounds:
+        encoder = XmaEncoder(a.xma_encoder, a.xma_quality)
+        if not encoder.available:
+            print("warning: xma2encode.exe not found: sounds are not converted, the map will reference console sounds")
+            encoder = None
+    if encoder is not None and a.sounds_dir:
+        stats = convert_streamed_sounds(IwdLibrary(a.map_iwd), a.sounds_dir, encoder, a.stream_rate, a.mono_streams, jobs=a.jobs)
+        if stats["sounds"]:
+            print(f"streamed sounds: {stats['converted']}/{stats['sounds']} converted")
     options = ConvertOptions(
         allow_unverified=a.allow_unverified,
         max_texture_size=a.max_texture_size,
@@ -119,17 +145,31 @@ def convert(*argv):
         compress_textures=not a.no_compress,
         iwd_paths=a.map_iwd,
         stock_paths=a.iwd,
-        xma_encoder=None,
+        xma_encoder=encoder,
+        sound_rate=a.sound_rate,
+        mono_sounds=a.mono_sounds,
         sounds_dir=a.sounds_dir,
         console_zones=a.console_zone,
         map_name=a.map_name,
+        jobs=a.jobs,
         reference_techsets=a.reference_techsets,
     )
     convs = converters(a.paths, options)
+    if encoder is not None and a.sounds_dir:
+        ship_stock_streams(pc(), [c.zone for c in convs], IwdLibrary(a.iwd) if a.iwd else None, a.sounds_dir, encoder, a.stream_rate, a.mono_streams,
+                           a.jobs)
     zones = [run_converter(path, conv) for path, conv in zip(a.paths, convs)]
     main = zones[0] if len(zones) == 1 else merge_zones(x360(), zones)
     prune_references(x360(), main)
+    if a.max_loaded_sounds or a.loaded_sound_memory:
+        streams = {key[0].lower(): xma.stream for key, xma in options.sound_cache.items() if isinstance(xma, LoadedXma) and xma.stream is not None}
+        limit_loaded_sounds(x360(), main, a.max_loaded_sounds, streams, a.sounds_dir, max_bytes=int(a.loaded_sound_memory * 1048576))
+    fixed = sync_alias_types(x360(), main)
+    if fixed:
+        print(f"sound aliases: the type in the flags of {fixed} aliases set to their sound file's")
     out = Writer(x360()).write(main)
+    if a.sounds_dir and os.path.isdir(os.path.join(a.sounds_dir, "sounds")):
+        upgrade_stream_files(os.path.join(a.sounds_dir, "sounds"))
     if a.out:
         with open(a.out, "wb") as f:
             f.write(out)

@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <functional>
 #include <map>
+#include <mutex>
 #include <memory>
 #include <optional>
 #include <set>
@@ -13,6 +14,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "audio/audio.h"
 #include "convert/record_map.h"
 #include "core/image.h"
 #include "core/zone.h"
@@ -28,6 +30,19 @@ namespace t4ff
 class ConsoleLibrary;
 class Cloner;
 
+// encoded loaded sounds (or the error encoding them), shared by the zones converted together: by
+// (console name, PC data size)
+struct SoundCache
+{
+    struct Entry
+    {
+        std::shared_ptr<LoadedXma> xma;
+        std::string error;
+    };
+    std::mutex lock;
+    std::map<std::pair<std::string, size_t>, Entry> entries;
+};
+
 struct ConvertOptions
 {
     bool allow_unverified = false;
@@ -39,8 +54,9 @@ struct ConvertOptions
     std::vector<std::filesystem::path> iwd_paths;   // the map's own .iwd files and folders
     std::vector<std::filesystem::path> stock_paths; // the PC game's own files (stock textures)
     bool reference_missing_images = true;
-    // sounds (step 4): without an encoder loaded sounds are references to console sounds
-    bool xma_encoder = false;
+    // sounds: without an encoder loaded sounds are references to console sounds
+    std::shared_ptr<XmaEncoder> xma_encoder;
+    std::shared_ptr<SoundCache> sound_cache = std::make_shared<SoundCache>();
     uint32_t sound_rate = 0;
     bool mono_sounds = false;
     std::filesystem::path sounds_dir; // the map's output folder

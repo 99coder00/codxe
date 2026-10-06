@@ -22,6 +22,8 @@
 #include <windows.h>
 #include <psapi.h>
 
+#include "audio/audio.h"
+#include "audio/soundbudget.h"
 #include "convert/assets.h"
 #include "convert/converter.h"
 #include "convert/library.h"
@@ -372,7 +374,13 @@ struct ConvertArgs
     double texture_budget = 0;
     uint32_t max_texture_size = 0;
     bool no_mips = false, no_compress = false, allow_unverified = false, reference_techsets = false, no_zone_cache = false;
-    fs::path sounds_dir;
+    fs::path sounds_dir; // the map's output folder: its sounds folder gets the streamed sounds
+    // sounds
+    fs::path xma_encoder, ffmpeg;
+    int xma_quality = 60, sound_rate = 0, stream_rate = 0, jobs = 0;
+    bool mono_sounds = false, mono_streams = false, no_sounds = false, no_sound_cache = false;
+    int max_loaded_sounds = DEFAULT_MAX_LOADED_SOUNDS;
+    double loaded_sound_memory = DEFAULT_LOADED_SOUND_MIB;
 };
 
 int cmd_convert(const std::vector<fs::path> &paths, const ConvertArgs &a)
@@ -394,7 +402,28 @@ int cmd_convert(const std::vector<fs::path> &paths, const ConvertArgs &a)
     o.allow_unverified = a.allow_unverified;
     o.reference_techsets = a.reference_techsets;
     o.sounds_dir = a.sounds_dir;
+    o.jobs = a.jobs;
+    o.sound_rate = static_cast<uint32_t>(a.sound_rate);
+    o.mono_sounds = a.mono_sounds;
     set_library_cache_dir(a.no_zone_cache ? fs::path() : default_zone_cache_dir());
+    if (!a.ffmpeg.empty())
+        set_ffmpeg_path(a.ffmpeg);
+    auto encoder = std::make_shared<XmaEncoder>(a.xma_encoder.empty() ? find_xma2encode() : a.xma_encoder, a.xma_quality,
+                                                a.no_sound_cache ? fs::path() : default_sound_cache_dir());
+    if (!a.no_sounds && encoder->available())
+        o.xma_encoder = encoder;
+    else if (!a.no_sounds)
+        o.log("warning: xma2encode.exe not found: sounds are not converted, the map will reference console sounds");
+    if (o.xma_encoder && !a.sounds_dir.empty())
+    {
+        // the map's own streamed sounds (its .iwd files), before the conversion
+        IwdLibrary map_sounds(a.map_iwds);
+        auto ts = Clock::now();
+        StreamStats s = convert_streamed_sounds(map_sounds, a.sounds_dir, *encoder, a.stream_rate, a.mono_streams, o.log, a.jobs);
+        if (s.sounds)
+            printf("streamed sounds: %d/%d converted, %.1f MiB -> %.1f MiB (%.1f s)\n", s.converted, s.sounds, s.input_bytes / 1048576.0,
+                   s.output_bytes / 1048576.0, seconds_since(ts));
+    }
 
     auto phase = Clock::now();
     auto lap = [&](const char *what) {
@@ -413,6 +442,16 @@ int cmd_convert(const std::vector<fs::path> &paths, const ConvertArgs &a)
     for (auto &c : convs)
         raw.push_back(c.get());
     lap("reading the PC fastfiles");
+    if (o.xma_encoder && !a.sounds_dir.empty())
+    {
+        // streamed sounds of the game's own the console's disc has not, from the PC game's files
+        std::vector<Zone *> pc_zones;
+        for (auto &c : convs)
+            pc_zones.push_back(&c->zone);
+        std::unique_ptr<IwdLibrary> stock = a.stock_iwds.empty() ? nullptr : std::make_unique<IwdLibrary>(a.stock_iwds);
+        ship_stock_streams(pc(), pc_zones, stock.get(), a.sounds_dir, *encoder, a.stream_rate, a.mono_streams, a.jobs, o.log);
+        lap("stock streamed sounds");
+    }
     prefetch_image_sources(raw);
     lap("reading the images");
     plan_textures_shared(raw);
@@ -445,6 +484,18 @@ int cmd_convert(const std::vector<fs::path> &paths, const ConvertArgs &a)
     std::unique_ptr<Zone> main_zone = zones.size() == 1 ? std::move(zones[0]) : merge_zones(x360(), std::move(zones), o.log);
     prune_references(x360(), *main_zone, {"techset"}, o.log);
     lap("merging");
+    if (a.max_loaded_sounds || a.loaded_sound_memory)
+    {
+        std::map<std::string, std::shared_ptr<XmaStream>> streams;
+        for (const auto &[key, entry] : o.sound_cache->entries)
+            if (entry.xma && entry.xma->stream)
+                streams[lower_latin1(key.first)] = entry.xma->stream;
+        limit_loaded_sounds(x360(), *main_zone, a.max_loaded_sounds, streams, a.sounds_dir, o.log,
+                            static_cast<uint64_t>(a.loaded_sound_memory * 1048576));
+    }
+    int fixed = sync_alias_types(x360(), *main_zone);
+    if (fixed)
+        printf("sound aliases: the type in the flags of %d aliases set to their sound file's\n", fixed);
     std::vector<uint8_t> bytes = write_zone(x360(), *main_zone);
     lap("writing the zone");
     if (!a.out.empty())
@@ -453,6 +504,14 @@ int cmd_convert(const std::vector<fs::path> &paths, const ConvertArgs &a)
         write_text(a.dump, dump_text(main_zone.get()));
     if (!a.ff.empty())
         write_file(a.ff, fastfile_bytes(true, bytes));
+    if (!a.sounds_dir.empty() && fs::is_directory(a.sounds_dir / "sounds"))
+    {
+        UpgradeStats up = upgrade_stream_files(a.sounds_dir / "sounds", o.log);
+        if (up.upgraded)
+            printf("streamed sounds: %d kept from an earlier conversion rewritten in the game's layout (4 KiB blocks)\n", up.upgraded);
+    }
+    if (o.xma_encoder)
+        printf("sound cache: %d encodings reused\n", o.xma_encoder->cache_hits());
     printf("zone %.1f MiB in %.2f s; memory: %s\n", bytes.size() / 1048576.0, seconds_since(t0), memory_text().c_str());
     return 0;
 }
@@ -620,7 +679,8 @@ int cmd_texbench(const std::vector<fs::path> &paths, int jobs)
 }
 
 // cache: the zone cache's files and size, or (--clear) delete them
-int cmd_cache(const fs::path &dir, bool clear)
+// the files of a cache folder with these extensions: counted, or deleted
+void cache_folder(const fs::path &dir, const std::vector<std::wstring> &exts, const char *what, bool clear)
 {
     size_t files = 0;
     uintmax_t bytes = 0;
@@ -629,7 +689,7 @@ int cmd_cache(const fs::path &dir, bool clear)
         for (const auto &e : fs::directory_iterator(dir))
         {
             std::wstring ext = e.path().extension().wstring();
-            if (!e.is_regular_file() || (ext != L".zone" && ext != L".tmp"))
+            if (!e.is_regular_file() || std::find(exts.begin(), exts.end(), ext) == exts.end())
                 continue;
             uintmax_t size = e.file_size();
             if (clear)
@@ -645,7 +705,13 @@ int cmd_cache(const fs::path &dir, bool clear)
             bytes += size;
         }
     }
-    printf("%s: %zu zones, %.1f MiB%s\n", utf8(dir).c_str(), files, bytes / 1048576.0, clear ? " deleted" : "");
+    printf("%s: %zu %s, %.1f MiB%s\n", utf8(dir).c_str(), files, what, bytes / 1048576.0, clear ? " deleted" : "");
+}
+
+int cmd_cache(const fs::path &dir, bool clear)
+{
+    cache_folder(dir, {L".zone", L".tmp"}, "zones", clear);
+    cache_folder(default_sound_cache_dir(), {L".xma", L".tmp"}, "encoded sounds", clear);
     return 0;
 }
 
@@ -661,7 +727,10 @@ int usage()
           "  t4ff-cli cache [--clear] [--zone-cache-dir DIR]\n"
           "  t4ff-cli convert --out <zone> [--dump <txt>] [--ff <fastfile>] [--map-iwd P]... [--iwd P]... [--console-zone P]...\n"
           "                   [--map-name N] [--texture-budget MiB] [--max-texture-size N] [--no-mips] [--no-compress]\n"
-          "                   [--allow-unverified] [--reference-techsets] [--no-zone-cache] [--sounds-dir D] <PC fastfile>...\n",
+          "                   [--allow-unverified] [--reference-techsets] [--no-zone-cache] [--sounds-dir D]\n"
+          "                   [--xma-encoder P] [--ffmpeg P] [--xma-quality N] [--sound-rate N] [--stream-rate N] [--mono-sounds]\n"
+          "                   [--mono-streams] [--no-sounds] [--no-sound-cache] [--max-loaded-sounds N] [--loaded-sound-memory MiB]\n"
+          "                   <PC fastfile>...\n",
           stderr);
     return 2;
 }
@@ -689,7 +758,7 @@ int wmain(int argc, wchar_t **argv)
         else if (a == L"--keep")
             keep = true;
         else if (a == L"--jobs" && i + 1 < argc)
-            jobs = _wtoi(argv[++i]);
+            conv.jobs = jobs = _wtoi(argv[++i]);
         else if (a == L"--out" && i + 1 < argc)
             conv.out = argv[++i];
         else if (a == L"--dump" && i + 1 < argc)
@@ -710,6 +779,28 @@ int wmain(int argc, wchar_t **argv)
             conv.max_texture_size = static_cast<uint32_t>(_wtoi(argv[++i]));
         else if (a == L"--sounds-dir" && i + 1 < argc)
             conv.sounds_dir = argv[++i];
+        else if (a == L"--xma-encoder" && i + 1 < argc)
+            conv.xma_encoder = argv[++i];
+        else if (a == L"--ffmpeg" && i + 1 < argc)
+            conv.ffmpeg = argv[++i];
+        else if (a == L"--xma-quality" && i + 1 < argc)
+            conv.xma_quality = _wtoi(argv[++i]);
+        else if (a == L"--sound-rate" && i + 1 < argc)
+            conv.sound_rate = _wtoi(argv[++i]);
+        else if (a == L"--stream-rate" && i + 1 < argc)
+            conv.stream_rate = _wtoi(argv[++i]);
+        else if (a == L"--max-loaded-sounds" && i + 1 < argc)
+            conv.max_loaded_sounds = _wtoi(argv[++i]);
+        else if (a == L"--loaded-sound-memory" && i + 1 < argc)
+            conv.loaded_sound_memory = _wtof(argv[++i]);
+        else if (a == L"--mono-sounds")
+            conv.mono_sounds = true;
+        else if (a == L"--mono-streams")
+            conv.mono_streams = true;
+        else if (a == L"--no-sounds")
+            conv.no_sounds = true;
+        else if (a == L"--no-sound-cache")
+            conv.no_sound_cache = true;
         else if (a == L"--no-mips")
             conv.no_mips = true;
         else if (a == L"--no-compress")

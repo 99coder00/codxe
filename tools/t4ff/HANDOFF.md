@@ -67,9 +67,21 @@ and encoding, Xenos tiling and mip chains, the console texture builder and `with
   - loaded sound encoding (step 4: without an encoder they are references, as the Python makes them);
   - `named.py` and `merge.py`'s menu and video passes (step 5: they need the script helpers).
 
-**Next, step 4: sounds** (`audio.py`, `soundbudget.py`, and `assets.py`'s loaded sound encoding),
-running xma2encode in parallel, with a cache of encoded sounds. Then:
-- step 5: scripts, menus, loading screens and named assets;
+**Step 4 (sounds) is done:** `audio.py`, `soundbudget.py`, and the loaded sound parts of
+`assets.py` (native README).
+- `t4ff-cli convert` now converts the map's streamed sounds and the stock ones its aliases use. It
+  encodes the loaded sounds on every processor, keeps them within the loaded sound limit, and syncs
+  the alias types.
+- The six maps and Matrix give identical zones, dumps and `.xma` files. The C++ takes 16-40 s against
+  the Python's 124-184 s, or 23.5 s for Kino Rezurrection once the sounds are cached.
+- Encoded sounds go to `%LOCALAPPDATA%\t4ff\sound_cache`, by the SHA-256 of the encoder's input
+  (xma2encode was checked to be deterministic).
+- For identical PCM, the resampler calls `ucrtbase.dll`'s `sin` and `cos`, which numpy uses.
+- Child processes inherit their standard handles only; parallel encodes failed without that.
+
+**Next, step 5: scripts, menus, loading screens and named assets** (`scripts.py`, `menu.py`,
+`loadscreen.py`, `named.py`, and `merge.py`'s menu and video passes): the rest of `_convert_map`
+before streaming. Then:
 - step 6: streaming and the memory planner (`stream.py`, `memory.py`), which converts once and
   plans again instead of converting again;
 - step 7: command line parity;
