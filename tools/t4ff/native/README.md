@@ -38,7 +38,20 @@ t4ff-cli bench [--jobs N] [--keep] <file or folder>...        reading speed and 
 t4ff-cli textures [--jobs N] <out.txt> <iwd or folder>...     texture battery, as CRCs
 t4ff-cli texbench [--jobs N] <iwd or folder>...               texture conversion speed
 t4ff-cli cache [--clear] [--zone-cache-dir DIR]               the zone cache's size, or delete it
+t4ff-cli convert --out <zone> [--dump <txt>] [--ff <fastfile>] [options] <PC fastfile>...
+                                                              convert and merge (step 3's part)
 ```
+
+`convert` takes the options of the conversion core:
+- `--map-iwd P` for the map's own `.iwd` files and folders, `--iwd P` for the PC game's files (stock
+  textures), and `--console-zone P` for the console library; each repeats;
+- `--map-name N`, `--texture-budget MiB`, `--max-texture-size N`;
+- `--no-mips`, `--no-compress`, `--allow-unverified`, `--reference-techsets`;
+- `--no-zone-cache` (library zones in memory) and `--sounds-dir D`.
+
+It converts each PC fastfile, merges them in order, and removes the technique set references nothing
+uses. It does not yet run what comes after that in the Python's `_convert_map`: sounds (step 4),
+scripts, menus and named assets (step 5), streaming and the memory plan (step 6).
 
 `roundtrip` and `bench` take `--zone-cache` (the default folder) or `--zone-cache-dir DIR`. With
 either, zones come from the zone cache (below).
@@ -113,7 +126,7 @@ could change the Python output, but not the C++ output.
 | --- | --- | --- |
 | 1 | Foundation: fastfiles, layouts, zone code commands, zone reader and writer | done |
 | 2 | Textures: IWI, wavelet, DXT, Xenos tiling | done |
-| 3 | Conversion core: assets, technique sets, console library, merge, xanims | |
+| 3 | Conversion core: assets, technique sets, console library, merge, xanims | done |
 | 4 | Sounds: decoders, XMA encoding in parallel, cache | |
 | 5 | Scripts, menus, loading screens | |
 | 6 | Streaming and the memory planner | |
@@ -144,6 +157,29 @@ Step 2, checked on 2026-10-05:
 - **Speed:** converting Kino Rezurrection's textures with the default options (582.4 MiB of
   console textures) takes 37.9 s in Python, 3.0 s on one thread and 0.46 s on 20 threads.
 
+Step 3, checked on 2026-10-06. `py_reference.py convert` runs the same steps with the Python t4ff;
+the converted zone and the dump of its node tree must be identical. Each map is converted from all
+its fastfiles (map, patch, mod, and the mod's language zones) and its `.iwd` files, with:
+- a console library of CoD Xenon's 23 maps and its 4 game zones;
+- the PC game's stock textures;
+- a texture budget of 100 MiB, which makes the planner drop levels and rebuild library textures.
+
+| Map | Zone | Python | C++ |
+| --- | --- | --- | --- |
+| The Simpsons | 162.7 MiB | 127.7 s | 5.2 s |
+| Mini-Labor | 192.4 MiB | 130.1 s | 5.8 s |
+| NukeCraft | 199.7 MiB | 95.4 s | 4.8 s |
+| Super Mario 64 | 209.5 MiB | 85.2 s | 7.6 s |
+| Kino Der Toten (UGX) | 197.8 MiB | 88.6 s | 7.6 s |
+| Kino Rezurrection | 234.5 MiB | 147.8 s | 11.9 s |
+
+All six are identical. So is Matrix, with and without the console library (66,869 nodes).
+`tools/compare_maps.py` runs these comparisons; `--cpp-only` checks the C++ again against the Python
+outputs of an earlier run.
+Textures are built on every processor before the zones are converted (`prebuild_textures`), and the
+images read the same way (`prefetch_image_sources`): the same function of the same data, so the bytes
+are the same.
+
 ## Layout
 
 | Python | C++ |
@@ -157,6 +193,12 @@ Step 2, checked on 2026-10-05:
 | `wavelet.py` | `src/core/wavelet.*` (codeword tables in `wavelet_tables.inc`) |
 | `dxt.py` | `src/core/dxt.*` |
 | `xenos.py` | `src/core/xenos.*`, formats in `texture_format.h` |
+| `convert.py` | `src/convert/converter.*` and `record_map.*` (RecordMap, ScalarMap, _ArrayMap) |
+| `assets.py` | `src/convert/assets.*` (loaded sound encoding: step 4) |
+| `library.py` | `src/convert/library.*` (zones read on every processor, from the zone cache) |
+| `merge.py` | `src/convert/merge.*` (its menu and video passes: step 5) |
+| `techsets.py`, `xanim.py` | `src/convert/techsets.*`, `src/convert/xanim.*` |
+| `named.py` | step 5 (it needs the script helpers) |
 | `__main__.py` | `src/cli/main.cpp` |
 
 `src/core/threads.*` runs work on every processor, with threads that have stacks as large as the main

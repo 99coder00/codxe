@@ -53,6 +53,11 @@ def main():
             parts.append(flatten(X360_COMMANDS))
         with open(os.path.join(DATA, f"commands_{platform}.txt"), "w", encoding="utf-8", newline="\n") as f:
             f.write("\n".join(parts) + "\n")
+    # the console record layouts checked against real fastfiles (convert.load_verified_records)
+    with open(os.path.join(T4FF, "t4ff", "defs", "x360_verified.txt"), "r", encoding="utf-8") as f:
+        verified = f.read()
+    with open(os.path.join(DATA, "verified_x360.txt"), "w", encoding="utf-8", newline="\n") as f:
+        f.write(verified)
     print("wrote", ", ".join(sorted(os.listdir(DATA))))
 
 

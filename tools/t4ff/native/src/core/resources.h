@@ -11,6 +11,7 @@ enum class Resource
     LayoutX360 = 102,
     CommandsPc = 103,
     CommandsX360 = 104,
+    VerifiedX360 = 105, // console record layouts verified against real fastfiles
 };
 
 // The bytes of a resource of the running executable (they live as long as the process).

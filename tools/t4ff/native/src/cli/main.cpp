@@ -8,6 +8,7 @@
 //   t4ff-cli textures [--jobs N] <out.txt> <iwd or folder>...
 //   t4ff-cli texbench [--jobs N] <iwd or folder>...
 //   t4ff-cli cache [--clear] [--zone-cache-dir DIR]
+//   t4ff-cli convert --out <zone> [--dump <txt>] [--ff <fastfile>] [conversion options] <PC fastfile>...
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -21,6 +22,10 @@
 #include <windows.h>
 #include <psapi.h>
 
+#include "convert/assets.h"
+#include "convert/converter.h"
+#include "convert/library.h"
+#include "convert/merge.h"
 #include "core/fastfile.h"
 #include "core/image.h"
 #include "core/platforms.h"
@@ -273,19 +278,30 @@ std::string origin_text(const Node &n)
     }
 }
 
-int cmd_dump(const fs::path &path, const fs::path &out_path)
+void write_text(const fs::path &out_path, const std::string &text)
 {
-    FastFile ff = read_fastfile(path);
-    const Platform &p = for_endian(ff.big_endian);
-    auto zone = read_zone(p, std::move(ff.zone));
+    FILE *f = _wfopen(out_path.c_str(), L"wb");
+    if (!f)
+        throw std::runtime_error("cannot write " + utf8(out_path));
+    fwrite(text.data(), 1, text.size(), f);
+    fclose(f);
+}
 
+std::string dump_text(Zone *zone, size_t *node_count = nullptr)
+{
     std::unordered_map<const Node *, size_t> ids;
     zone->walk([&](Node *n) { ids.emplace(n, ids.size()); });
-    auto id = [&](const Node *n) { return n ? "N" + std::to_string(ids.at(n)) : std::string("None"); };
+    auto id = [&](const Node *n) {
+        if (!n)
+            return std::string("None");
+        auto it = ids.find(n);
+        return it == ids.end() ? std::string("N?") : "N" + std::to_string(it->second);
+    };
     auto addr = [](const std::optional<uint32_t> &a) { return a ? std::to_string(*a) : std::string("-"); };
 
     std::string out;
-    out.reserve(zone->source->size() / 2);
+    if (zone->source)
+        out.reserve(zone->source->size() / 2);
     out += "zone " + zone->platform + " size=" + std::to_string(zone->size) + " external=" + std::to_string(zone->external_size) +
            " blocks=";
     for (size_t b = 0; b < zone->block_sizes.size(); ++b)
@@ -330,12 +346,114 @@ int cmd_dump(const fs::path &path, const fs::path &out_path)
             out += "\n";
         }
     });
-    FILE *f = _wfopen(out_path.c_str(), L"wb");
-    if (!f)
-        throw std::runtime_error("cannot write " + utf8(out_path));
-    fwrite(out.data(), 1, out.size(), f);
-    fclose(f);
-    printf("%s: %zu nodes\n", utf8(out_path).c_str(), ids.size());
+    if (node_count)
+        *node_count = ids.size();
+    return out;
+}
+
+int cmd_dump(const fs::path &path, const fs::path &out_path)
+{
+    FastFile ff = read_fastfile(path);
+    const Platform &p = for_endian(ff.big_endian);
+    auto zone = read_zone(p, std::move(ff.zone));
+    size_t nodes = 0;
+    write_text(out_path, dump_text(zone.get(), &nodes));
+    printf("%s: %zu nodes\n", utf8(out_path).c_str(), nodes);
+    return 0;
+}
+
+// convert: PC fastfiles converted and merged into one console zone, as the Python t4ff's step 3
+// pipeline does (py_reference.py convert gives its side)
+struct ConvertArgs
+{
+    fs::path out, dump, ff;
+    std::vector<fs::path> map_iwds, stock_iwds, console_zones;
+    std::string map_name;
+    double texture_budget = 0;
+    uint32_t max_texture_size = 0;
+    bool no_mips = false, no_compress = false, allow_unverified = false, reference_techsets = false, no_zone_cache = false;
+    fs::path sounds_dir;
+};
+
+int cmd_convert(const std::vector<fs::path> &paths, const ConvertArgs &a)
+{
+    auto t0 = Clock::now();
+    ConvertOptions o;
+    o.log = [](const std::string &msg) {
+        printf("%s\n", msg.c_str());
+        fflush(stdout);
+    };
+    o.iwd_paths = a.map_iwds;
+    o.stock_paths = a.stock_iwds;
+    o.console_zones = a.console_zones;
+    o.map_name = a.map_name;
+    o.texture_budget = static_cast<uint64_t>(a.texture_budget * 1048576.0);
+    o.max_texture_size = a.max_texture_size;
+    o.keep_mips = !a.no_mips;
+    o.compress_textures = !a.no_compress;
+    o.allow_unverified = a.allow_unverified;
+    o.reference_techsets = a.reference_techsets;
+    o.sounds_dir = a.sounds_dir;
+    set_library_cache_dir(a.no_zone_cache ? fs::path() : default_zone_cache_dir());
+
+    auto phase = Clock::now();
+    auto lap = [&](const char *what) {
+        printf("time: %s %.2f s\n", what, seconds_since(phase));
+        phase = Clock::now();
+    };
+    std::vector<std::unique_ptr<ZoneConverter>> convs;
+    for (const fs::path &path : paths)
+    {
+        FastFile ff = read_fastfile(path);
+        if (ff.big_endian)
+            throw std::runtime_error(utf8(path) + ": not a PC fastfile");
+        convs.push_back(std::make_unique<ZoneConverter>(read_zone(pc(), std::move(ff.zone)), pc(), x360(), o));
+    }
+    std::vector<ZoneConverter *> raw;
+    for (auto &c : convs)
+        raw.push_back(c.get());
+    lap("reading the PC fastfiles");
+    prefetch_image_sources(raw);
+    lap("reading the images");
+    plan_textures_shared(raw);
+    lap("planning the textures (with the console library)");
+    auto tb = Clock::now();
+    prebuild_textures(raw);
+    printf("textures built in %.2f s\n", seconds_since(tb));
+    std::vector<std::unique_ptr<Zone>> zones;
+    for (size_t i = 0; i < convs.size(); ++i)
+    {
+        auto t = Clock::now();
+        ZoneConverter &c = *convs[i];
+        printf("%s: %zu assets\n", utf8(paths[i].filename()).c_str(), c.zone.assets.size());
+        zones.push_back(c.convert());
+        auto table = [](const std::map<std::string, int> &m) {
+            std::string s;
+            for (const auto &[k, v] : m)
+                s += (s.empty() ? "" : ", ") + k + ": " + std::to_string(v);
+            return "{" + s + "}";
+        };
+        printf("  converted:  %s\n", table(c.stats.converted).c_str());
+        if (!c.stats.copied.empty())
+            printf("  copied from console zones: %s\n", table(c.stats.copied).c_str());
+        if (!c.stats.referenced.empty())
+            printf("  referenced: %s\n", table(c.stats.referenced).c_str());
+        printf("  textures:   %.1f MiB, loaded sounds: %.1f MiB (%.1fs)\n", c.stats.texture_bytes / 1048576.0, c.stats.sound_bytes / 1048576.0,
+               seconds_since(t));
+    }
+    lap("converting");
+    std::unique_ptr<Zone> main_zone = zones.size() == 1 ? std::move(zones[0]) : merge_zones(x360(), std::move(zones), o.log);
+    prune_references(x360(), *main_zone, {"techset"}, o.log);
+    lap("merging");
+    std::vector<uint8_t> bytes = write_zone(x360(), *main_zone);
+    lap("writing the zone");
+    if (!a.out.empty())
+        write_file(a.out, bytes);
+    if (!a.dump.empty())
+        write_text(a.dump, dump_text(main_zone.get()));
+    if (!a.ff.empty())
+        write_file(a.ff, fastfile_bytes(true, bytes));
+    printf("zone %.1f MiB in %.2f s; memory: %s\n", bytes.size() / 1048576.0, seconds_since(t0), memory_text().c_str());
     return 0;
 }
 
@@ -540,7 +658,10 @@ int usage()
           "  t4ff-cli bench [--jobs N] [--keep] [--zone-cache | --zone-cache-dir DIR] <fastfile or folder>...\n"
           "  t4ff-cli textures [--jobs N] <out.txt> <iwd or folder>...\n"
           "  t4ff-cli texbench [--jobs N] <iwd or folder>...\n"
-          "  t4ff-cli cache [--clear] [--zone-cache-dir DIR]\n",
+          "  t4ff-cli cache [--clear] [--zone-cache-dir DIR]\n"
+          "  t4ff-cli convert --out <zone> [--dump <txt>] [--ff <fastfile>] [--map-iwd P]... [--iwd P]... [--console-zone P]...\n"
+          "                   [--map-name N] [--texture-budget MiB] [--max-texture-size N] [--no-mips] [--no-compress]\n"
+          "                   [--allow-unverified] [--reference-techsets] [--no-zone-cache] [--sounds-dir D] <PC fastfile>...\n",
           stderr);
     return 2;
 }
@@ -555,6 +676,7 @@ int wmain(int argc, wchar_t **argv)
     bool list = false, check_compress = false, keep = false, clear = false;
     int jobs = 0;
     fs::path cache_dir;
+    ConvertArgs conv;
     for (int i = 2; i < argc; ++i)
     {
         std::wstring a = argv[i];
@@ -568,6 +690,36 @@ int wmain(int argc, wchar_t **argv)
             keep = true;
         else if (a == L"--jobs" && i + 1 < argc)
             jobs = _wtoi(argv[++i]);
+        else if (a == L"--out" && i + 1 < argc)
+            conv.out = argv[++i];
+        else if (a == L"--dump" && i + 1 < argc)
+            conv.dump = argv[++i];
+        else if (a == L"--ff" && i + 1 < argc)
+            conv.ff = argv[++i];
+        else if (a == L"--map-iwd" && i + 1 < argc)
+            conv.map_iwds.emplace_back(argv[++i]);
+        else if (a == L"--iwd" && i + 1 < argc)
+            conv.stock_iwds.emplace_back(argv[++i]);
+        else if (a == L"--console-zone" && i + 1 < argc)
+            conv.console_zones.emplace_back(argv[++i]);
+        else if (a == L"--map-name" && i + 1 < argc)
+            conv.map_name = fs::path(argv[++i]).string();
+        else if (a == L"--texture-budget" && i + 1 < argc)
+            conv.texture_budget = _wtof(argv[++i]);
+        else if (a == L"--max-texture-size" && i + 1 < argc)
+            conv.max_texture_size = static_cast<uint32_t>(_wtoi(argv[++i]));
+        else if (a == L"--sounds-dir" && i + 1 < argc)
+            conv.sounds_dir = argv[++i];
+        else if (a == L"--no-mips")
+            conv.no_mips = true;
+        else if (a == L"--no-compress")
+            conv.no_compress = true;
+        else if (a == L"--allow-unverified")
+            conv.allow_unverified = true;
+        else if (a == L"--reference-techsets")
+            conv.reference_techsets = true;
+        else if (a == L"--no-zone-cache")
+            conv.no_zone_cache = true;
         else if (a == L"--zone-cache")
             cache_dir = default_zone_cache_dir();
         else if (a == L"--zone-cache-dir" && i + 1 < argc)
@@ -587,6 +739,8 @@ int wmain(int argc, wchar_t **argv)
             return cmd_dump(paths[0], paths[1]);
         if (cmd == L"rewrite" && paths.size() == 2)
             return cmd_rewrite(paths[0], paths[1]);
+        if (cmd == L"convert" && !paths.empty())
+            return cmd_convert(paths, conv);
         if (cmd == L"cache" && paths.empty())
             return cmd_cache(cache_dir.empty() ? default_zone_cache_dir() : cache_dir, clear);
         if (cmd == L"texbench" && !paths.empty())

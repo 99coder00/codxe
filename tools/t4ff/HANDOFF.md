@@ -54,10 +54,22 @@ and encoding, Xenos tiling and mip chains, the console texture builder and `with
 - `_image_from_load_def` and `_decode_console_image` (`assets.py`) read zone nodes, so they come
   with step 3.
 
-**Next, step 3: the conversion core** (`convert.py`, `assets.py`, `techsets.py`, `library.py`,
-`merge.py`, `xanim.py`), checked by converting maps with both and comparing the fastfiles. Then:
-- step 4: sounds (`audio.py`, `soundbudget.py`), running xma2encode in parallel;
-- step 5: scripts, menus and loading screens;
+**Step 3 (the conversion core) is done:** `convert.py`, `assets.py`, `library.py`, `techsets.py`,
+`xanim.py`, and `merge.py`'s merging, reference pruning and nested asset sharing (native README).
+- `t4ff-cli convert` converts and merges a map's fastfiles as `_convert_map` does up to there.
+  `py_reference.py convert` does the same with the Python, and `native/tools/compare_maps.py`
+  compares both.
+- Six maps (Simpsons, Mini-Labor, NukeCraft, Mario, Kino Der Toten, Kino Rezurrection) and Matrix
+  give identical zones and node dumps. The runs used the console library, the stock textures and a
+  100 MiB texture budget.
+- They take 5-12 s against the Python's 85-148 s.
+- Left for later steps:
+  - loaded sound encoding (step 4: without an encoder they are references, as the Python makes them);
+  - `named.py` and `merge.py`'s menu and video passes (step 5: they need the script helpers).
+
+**Next, step 4: sounds** (`audio.py`, `soundbudget.py`, and `assets.py`'s loaded sound encoding),
+running xma2encode in parallel, with a cache of encoded sounds. Then:
+- step 5: scripts, menus, loading screens and named assets;
 - step 6: streaming and the memory planner (`stream.py`, `memory.py`), which converts once and
   plans again instead of converting again;
 - step 7: command line parity;

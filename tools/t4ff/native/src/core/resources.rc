@@ -3,3 +3,4 @@
 102 RCDATA "../../data/layout_x360.json"
 103 RCDATA "../../data/commands_pc.txt"
 104 RCDATA "../../data/commands_x360.txt"
+105 RCDATA "../../data/verified_x360.txt"

@@ -6,6 +6,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -210,6 +211,11 @@ class Relocs
 
     void set(uint32_t offset, Ptr *ptr);
     Ptr *get(uint32_t offset) const;
+    void clear()
+    {
+        items.clear();
+        index.reset();
+    }
     bool empty() const
     {
         return items.empty();
@@ -272,14 +278,43 @@ struct Node
     std::optional<uint32_t> new_offset; // set by the writer
     const std::string *origin_record = nullptr;
     const std::string *origin_field = nullptr;
-    Ptr *ptr = nullptr; // the pointer that made it (follow / insert)
+    Ptr *ptr = nullptr;   // the pointer that made it (follow / insert)
+    bool library = false; // a copy of a console library asset (the Python extra "library")
 
     uint32_t elem_size() const
     {
         return string ? 1 : type->size;
     }
     std::string repr() const;
+
+    // origin == (kind, record[, field]) as the Python tuples compare
+    bool origin_is(Origin kind, std::string_view record, std::string_view field = {}) const
+    {
+        return origin == kind && origin_record && *origin_record == record &&
+               (field.empty() || (origin_field && *origin_field == field));
+    }
+    bool is_record(std::string_view name) const
+    {
+        return type && type->kind == TypeKind::Record && type->name == name;
+    }
+
+    // this node and every node it holds, depth first (the Python Node.walk)
+    template <typename F> void walk(F &&f)
+    {
+        std::vector<Node *> stack{this};
+        while (!stack.empty())
+        {
+            Node *n = stack.back();
+            stack.pop_back();
+            f(n);
+            for (auto it = n->children.rbegin(); it != n->children.rend(); ++it)
+                stack.push_back(*it);
+        }
+    }
 };
+
+// A string kept for the life of the program (origin names of nodes made by a conversion).
+const std::string *intern(std::string_view s);
 
 struct ZoneAsset
 {
@@ -304,9 +339,10 @@ struct Zone
     Node *assets_node = nullptr;
     Node *root = nullptr; // the asset list header (the Python extra_root)
 
-    // the bytes the nodes read from it view, and those of other zones its nodes view (copies)
+    // the bytes the nodes read from it view, and what else its nodes use: the bytes of zones its
+    // copies view, the zones a conversion or a merge took nodes and pointers from
     std::shared_ptr<const ZoneBytes> source;
-    std::vector<std::shared_ptr<const ZoneBytes>> keep_alive;
+    std::vector<std::shared_ptr<const void>> keep_alive;
 
     // owns every node and pointer of the zone
     std::deque<Node> node_store;
@@ -414,6 +450,7 @@ class Platform
 
 const char *const *pc_asset_types(size_t *count);
 const char *asset_record_name(const std::string &asset_type); // ASSET_RECORDS, nullptr when unsupported
+const char *asset_type_of_record(const std::string &rec_name); // the first asset type of a record, nullptr when none
 
 // Reads a zone (the decompressed fastfile) of a platform. Its nodes view the bytes, which the zone
 // keeps.

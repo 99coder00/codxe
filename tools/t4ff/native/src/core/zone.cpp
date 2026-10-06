@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstring>
 #include <functional>
+#include <mutex>
 
 namespace t4ff
 {
@@ -98,6 +99,14 @@ const char *const *pc_asset_types(size_t *count)
     return PC_ASSET_TYPES;
 }
 
+const char *asset_type_of_record(const std::string &rec_name)
+{
+    for (const auto &a : ASSET_RECORDS)
+        if (rec_name == a.record)
+            return a.type;
+    return nullptr;
+}
+
 const char *asset_record_name(const std::string &asset_type)
 {
     for (const auto &a : ASSET_RECORDS)
@@ -160,6 +169,20 @@ Ptr *Relocs::get(uint32_t offset) const
         if (item.first == offset)
             return item.second;
     return nullptr;
+}
+
+const std::string *intern(std::string_view s)
+{
+    static std::mutex lock;
+    static std::unordered_map<std::string_view, std::unique_ptr<std::string>> strings;
+    std::lock_guard guard(lock);
+    auto it = strings.find(s);
+    if (it != strings.end())
+        return it->second.get();
+    auto owned = std::make_unique<std::string>(s);
+    const std::string *p = owned.get();
+    strings.emplace(*p, std::move(owned));
+    return p;
 }
 
 std::string Node::repr() const

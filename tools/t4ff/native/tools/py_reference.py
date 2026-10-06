@@ -3,6 +3,7 @@
     python native/tools/py_reference.py dump <fastfile> <out.txt>      the node tree, as t4ff-cli dump
     python native/tools/py_reference.py rewrite <fastfile> <out.zone>  the zone written back, as t4ff-cli rewrite
     python native/tools/py_reference.py textures <out.txt> <iwd or folder>...  texture battery, as t4ff-cli textures
+    python native/tools/py_reference.py convert --out <zone> [--dump <txt>] [options] <PC fastfile>...  as t4ff-cli convert
 
 Run from tools/t4ff. The outputs of both programs must be byte identical.
 """
@@ -40,11 +41,15 @@ def origin_text(node):
 
 def dump(path, out_path):
     platform, data, zone = load(path)
+    dump_zone(zone, out_path)
+
+
+def dump_zone(zone, out_path):
     nodes = list(zone.extra_root.walk())
     ids = {id(n): i for i, n in enumerate(nodes)}
 
     def nid(n):
-        return "None" if n is None else f"N{ids[id(n)]}"
+        return "None" if n is None else f"N{ids[id(n)]}" if id(n) in ids else "N?"
 
     out = [
         f"zone {zone.platform} size={zone.size} external={zone.external_size} blocks={','.join(str(b) for b in zone.block_sizes)}\n"
@@ -79,6 +84,59 @@ def dump(path, out_path):
     with open(out_path, "wb") as f:
         f.write("".join(out).encode("latin-1"))
     print(f"{out_path}: {len(nodes)} nodes")
+
+
+def convert(*argv):
+    """The Python side of t4ff-cli convert: the step 3 pipeline (convert, merge, prune references)."""
+    import argparse
+
+    from t4ff.__main__ import converters, run_converter
+    from t4ff.convert import ConvertOptions
+    from t4ff.fastfile import write_fastfile
+    from t4ff.merge import merge_zones, prune_references
+    from t4ff.platforms import x360
+
+    ap = argparse.ArgumentParser(prog="py_reference.py convert")
+    ap.add_argument("--out")
+    ap.add_argument("--dump")
+    ap.add_argument("--ff")
+    ap.add_argument("--map-iwd", action="append", default=[])
+    ap.add_argument("--iwd", action="append", default=[])
+    ap.add_argument("--console-zone", action="append", default=[])
+    ap.add_argument("--map-name", default="")
+    ap.add_argument("--texture-budget", type=float, default=0)
+    ap.add_argument("--max-texture-size", type=int, default=0)
+    ap.add_argument("--sounds-dir")
+    for flag in ("--no-mips", "--no-compress", "--allow-unverified", "--reference-techsets", "--no-zone-cache"):
+        ap.add_argument(flag, action="store_true")
+    ap.add_argument("paths", nargs="+")
+    a = ap.parse_args(argv)
+    options = ConvertOptions(
+        allow_unverified=a.allow_unverified,
+        max_texture_size=a.max_texture_size,
+        texture_budget=int(a.texture_budget * 1048576),
+        keep_mips=not a.no_mips,
+        compress_textures=not a.no_compress,
+        iwd_paths=a.map_iwd,
+        stock_paths=a.iwd,
+        xma_encoder=None,
+        sounds_dir=a.sounds_dir,
+        console_zones=a.console_zone,
+        map_name=a.map_name,
+        reference_techsets=a.reference_techsets,
+    )
+    convs = converters(a.paths, options)
+    zones = [run_converter(path, conv) for path, conv in zip(a.paths, convs)]
+    main = zones[0] if len(zones) == 1 else merge_zones(x360(), zones)
+    prune_references(x360(), main)
+    out = Writer(x360()).write(main)
+    if a.out:
+        with open(a.out, "wb") as f:
+            f.write(out)
+    if a.dump:
+        dump_zone(main, a.dump)
+    if a.ff:
+        write_fastfile(a.ff, ">", out)
 
 
 def rewrite(path, out_path):
@@ -160,7 +218,7 @@ def textures(out_path, *paths):
 
 
 if __name__ == "__main__":
-    commands = {"dump": dump, "rewrite": rewrite, "textures": textures}
-    if len(sys.argv) < 4 or sys.argv[1] not in commands or (sys.argv[1] != "textures" and len(sys.argv) != 4):
+    commands = {"dump": dump, "rewrite": rewrite, "textures": textures, "convert": convert}
+    if len(sys.argv) < 3 or sys.argv[1] not in commands or (sys.argv[1] in ("dump", "rewrite") and len(sys.argv) != 4):
         sys.exit(__doc__)
     commands[sys.argv[1]](*sys.argv[2:])

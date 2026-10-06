@@ -41,6 +41,13 @@ add_library(t4ffcore STATIC
   src/core/zip.cpp
   src/core/image.cpp
   src/core/zone_cache.cpp
+  src/convert/record_map.cpp
+  src/convert/converter.cpp
+  src/convert/assets.cpp
+  src/convert/xanim.cpp
+  src/convert/library.cpp
+  src/convert/merge.cpp
+  src/convert/techsets.cpp
 )
 target_include_directories(t4ffcore PUBLIC src)
 target_link_libraries(t4ffcore PUBLIC zlibstatic)
