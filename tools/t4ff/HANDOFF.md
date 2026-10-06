@@ -79,12 +79,26 @@ and encoding, Xenos tiling and mip chains, the console texture builder and `with
 - For identical PCM, the resampler calls `ucrtbase.dll`'s `sin` and `cos`, which numpy uses.
 - Child processes inherit their standard handles only; parallel encodes failed without that.
 
-**Next, step 5: scripts, menus, loading screens and named assets** (`scripts.py`, `menu.py`,
-`loadscreen.py`, `named.py`, and `merge.py`'s menu and video passes): the rest of `_convert_map`
-before streaming. Then:
-- step 6: streaming and the memory planner (`stream.py`, `memory.py`), which converts once and
-  plans again instead of converting again;
-- step 7: command line parity;
+**Step 5 (scripts, menus, loading screens) is done:** `scripts.py`, `named.py`, `menu.py`'s
+conversion passes, `loadscreen.py`, and `merge.py`'s menu and video passes (native README).
+- `t4ff-cli convert` now runs all of `_convert_map` but streaming, then writes the map's folder as
+  `cmd_convert` does: the fastfile, `t4ff.txt`, `description.txt`, `<map>_load.ff`, `preview.bin`,
+  `map.json`, `preview.dds`, `options.txt` and `scripts/`.
+- `py_reference.py convert` calls the real `_convert_map`. `compare_maps.py` compares each side's
+  whole output folder.
+- Eight maps give identical zones, dumps and files (the six, Matrix and Dead Sand), in 6.6-10.4 s
+  against 79-136 s.
+- The passes use Python's `re`, so `src/core/pyre.*` is a regex engine with its semantics, checked
+  against Python on every raw file of four maps (`native/tools/regex_check.py`, `t4ff-cli regex`).
+- The script text the passes add is generated from scripts.py (`native/tools/gen_templates.py`),
+  tabs and all.
+- After conversion the PC zones' pointers lead to console nodes, in both versions. `menu_options`
+  reads the PC menus through them. The port mirrors this: don't fix it on one side only.
+- `menu.py`'s `menu` command (the Custom Maps list) comes with step 7.
+
+**Next, step 6: streaming and the memory planner** (`stream.py`, `memory.py`), which converts once
+and plans again instead of converting again. Then:
+- step 7: command line parity (the `menu` and `setup` commands among it);
 - step 8: the GUI, with a simple mode and an advanced one.
 
 **Memory (fixed before step 3).** Nodes now view their zone's bytes instead of copying them, and

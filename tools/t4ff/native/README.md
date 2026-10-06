@@ -39,16 +39,23 @@ t4ff-cli textures [--jobs N] <out.txt> <iwd or folder>...     texture battery, a
 t4ff-cli texbench [--jobs N] <iwd or folder>...               texture conversion speed
 t4ff-cli cache [--clear] [--zone-cache-dir DIR]               the zone and sound caches' sizes, or delete them
 t4ff-cli convert --out <zone> [--dump <txt>] [--ff <fastfile>] [options] <PC fastfile>...
-                                                              convert and merge (steps 3 and 4)
+                                                              convert a map (steps 3 to 5)
+t4ff-cli regex <patterns.txt> <file>...                       regex engine check, as CRCs
 ```
 
 `convert` takes the options of the conversion core:
 - `--map-iwd P` for the map's own `.iwd` files and folders, `--iwd P` for the PC game's files (stock
   textures and streamed sounds), and `--console-zone P` for the console library; each repeats;
+- `--map-files DIR`, the folders of the map's own files (its fastfiles' and `.iwd` files', as
+  `t4ff convert` reads them): its loose scripts, `.arena` file and loading screen picture; repeats;
 - `--map-name N`, `--texture-budget MiB`, `--max-texture-size N`;
 - `--no-mips`, `--no-compress`, `--allow-unverified`, `--reference-techsets`;
 - `--no-zone-cache` (library zones in memory);
-- `--sounds-dir D`, the map's output folder: its `sounds` folder gets the streamed sounds.
+- `--out-dir D`, the map's output folder (`--sounds-dir D` stands for it when it is not given): it
+  gets `<map>.ff`, the streamed sounds, `options.txt`, the `scripts` folder, `t4ff.txt`,
+  `description.txt`, `<map>_load.ff`, `preview.bin`, `map.json` and `preview.dds`, as `t4ff convert`
+  writes them;
+- `--load-ff P` (the map's PC load zone), `--name N`, `--loading-image P`, `--no-load-zone`.
 
 It takes the sound options too:
 - `--xma-encoder P` (default: where the Xbox developer kits put xma2encode.exe), `--xma-quality N`;
@@ -57,16 +64,20 @@ It takes the sound options too:
 - `--max-loaded-sounds N` (1500), `--loaded-sound-memory MiB` (32);
 - `--no-sounds`, `--no-sound-cache`, `--jobs N`.
 
-With an encoder and `--sounds-dir`, it runs these steps:
-1. converts the map's streamed sounds;
-2. converts the stock ones its aliases use from the PC game's files;
-3. encodes the loaded sounds, then converts each PC fastfile, merges them in order, and removes the
-   technique set references nothing uses;
-4. keeps the loaded sounds within their limits, syncs the alias types, and gives earlier streams the
-   game's layout.
+It runs the Python's `_convert_map` and the rest of its `convert` command, in their order:
+1. converts the map's streamed sounds (with an encoder and an output folder);
+2. gives the PC zones' scripts the map's loose ones, and notes the mod's scripts;
+3. converts the stock streamed sounds the map's aliases use, from the PC game's files;
+4. encodes the loaded sounds, converts each PC fastfile and merges them in order;
+5. adds the scripts the map's scripts use but no zone has, and the assets the game looks up by name;
+6. gives the mod's versions of the game's scripts names of their own, keeps or drops the mod's
+   menus and videos, gives PC menus controller buttons and navigation, and fixes the scripts for the
+   console;
+7. fixes the technique sets' argument sections, removes the references nothing uses, keeps the
+   loaded sounds within their limits and syncs the alias types;
+8. writes the map's options and scripts folder, its zone, and its other files (above).
 
-It does not yet run what comes between those steps in the Python's `_convert_map`: scripts, menus and
-named assets (step 5), streaming and the memory plan (step 6).
+Only streaming and the memory plan (step 6) are left out.
 
 xma2encode is a separate program, run on every processor. The same input gives the same output (four
 parallel encodes of one sound were identical), so encodings are kept in
@@ -136,6 +147,23 @@ everything:
 `py_reference.py textures` writes the same report, and `tools/compare_reports.py` compares two
 reports and names the fields that differ.
 
+The script and menu passes find their matches with Python's `re`, so the C++ has a regex engine
+with its semantics (`src/core/pyre.*`): a backtracking matcher whose state is on the heap. A bytes
+pattern has ASCII `\w`, `\s`, `\d` and `\b`, as Python's do. A str pattern runs on the latin-1 text
+the Python decodes, with Unicode's classes and case folding of those 256 characters. Checking it:
+
+```bash
+python native/tools/regex_check.py patterns pats.txt
+python native/tools/regex_check.py corpus corpus/ <PC fastfile>...
+python native/tools/regex_check.py run pats.txt corpus/*.txt > py.txt
+t4ff-cli regex pats.txt corpus/*.txt > cpp.txt
+```
+
+`patterns` writes every pattern of the passes (taken from the modules, and those their functions
+build), plus a few that exercise the engine itself. `corpus` writes the raw files and strings of
+fastfiles. `run` writes a CRC per pattern and file: `finditer` over the file, and `match`, `fullmatch`
+and positioned searches over each line. The two outputs must be identical.
+
 The DXT encoder works in double precision exactly as the numpy one does. numpy 2.x's `einsum` adds
 three products as `(p0 + p2) + p1` (its two lane SIMD loop), so the C++ does too. Another numpy
 could change the Python output, but not the C++ output.
@@ -148,7 +176,7 @@ could change the Python output, but not the C++ output.
 | 2 | Textures: IWI, wavelet, DXT, Xenos tiling | done |
 | 3 | Conversion core: assets, technique sets, console library, merge, xanims | done |
 | 4 | Sounds: decoders, XMA encoding in parallel, cache | done |
-| 5 | Scripts, menus, loading screens | |
+| 5 | Scripts, menus, loading screens | done |
 | 6 | Streaming and the memory planner | |
 | 7 | Command line parity with the Python t4ff | |
 | 8 | The GUI (Dear ImGui): simple and advanced modes, queue, results | |
@@ -230,6 +258,39 @@ Two details matter for the identical bytes:
   handles of files other threads had open made parallel encodes fail ("being used by another
   process").
 
+Step 5, checked on 2026-10-06. `py_reference.py convert` now runs t4ff's own `_convert_map` (without
+streaming), then what its `convert` command writes after the zone. Each side writes the map's
+folder (`<out dir>/<map>.<side>.dir`), and `compare_maps.py` compares every file in it, besides the
+zone and the dump. The options are those of step 3, without sounds:
+
+| Map | Files in the folder | Python | C++ |
+| --- | --- | --- | --- |
+| The Simpsons | 10 | 81.1 s | 7.1 s |
+| Mini-Labor | 30 | 98.2 s | 8.0 s |
+| NukeCraft | 14 | 100.8 s | 7.2 s |
+| Super Mario 64 | 11 | 91.1 s | 8.0 s |
+| Kino Der Toten (UGX) | 14 | 100.9 s | 8.2 s |
+| Kino Rezurrection | 17 | 136.4 s | 10.4 s |
+| Matrix | 12 | 82.7 s | 6.6 s |
+| Dead Sand | 11 | 79.2 s | 6.6 s |
+
+All eight are identical: zones, dumps, and every file. The times now include compressing the map's
+fastfile and making its loading screen. With sounds (`--sounds`, cache full), Mini-Labor's 3,073
+files and Kino Rezurrection's 1,725 are identical too: 33.6 s and 26.8 s against 183.9 s and 198.1 s. The passes these maps exercise:
+- **Scripts:** the map's loose scripts, missing scripts and the zombie mode's client scripts, named
+  assets (shellshocks, anim tree animations, footsteps, player animations), the mod's scripts renamed
+  or put in the scripts folder.
+- **Script fixes:** use key hints, modderHelp, script_struct spawns, cursor hints, precaches before
+  the first wait, menu dvar defaults, speed_up_zombies, zombie idles, splitscreen fog, MG42 turrets.
+- **Menus:** front end menus dropped, game menu lists and menus renamed, gamepad buttons, inert items,
+  D-pad navigation, and the options (Mini-Labor's difficulty: `options.txt`, the in-game menus and the
+  level script asking them).
+- **The map's files:** the loading screen, copied from CoD Xenon's or made from a title card scaled
+  through FFmpeg, then `preview.bin`, `map.json` and `preview.dds`.
+
+The regex engine gives Python's matches for all 67 patterns over the 227 raw files and string sets
+of four maps' patch and mod zones: 15,209 identical signatures.
+
 ## Layout
 
 | Python | C++ |
@@ -249,9 +310,12 @@ Two details matter for the identical bytes:
 | `soundbudget.py` | `src/audio/soundbudget.*` |
 | `deps.py` | `find_xma2encode` and `ffmpeg_exe` only (`audio.cpp`); setup comes with step 7 |
 | `library.py` | `src/convert/library.*` (zones read on every processor, from the zone cache) |
-| `merge.py` | `src/convert/merge.*` (its menu and video passes: step 5) |
+| `merge.py` | `src/convert/merge.*`; its menu and video passes in `src/convert/menus.*` |
 | `techsets.py`, `xanim.py` | `src/convert/techsets.*`, `src/convert/xanim.*` |
-| `named.py` | step 5 (it needs the script helpers) |
+| `scripts.py`, `named.py` | `src/convert/scripts.*` (the script text it adds: `script_templates.inc`, from `tools/gen_templates.py`) |
+| `menu.py` | `src/convert/menus.*` (the conversion's passes; the `menu` command's list comes with step 7), `map.json` and `preview.dds` in `loadscreen.*` |
+| `loadscreen.py` | `src/convert/loadscreen.*` (the title card's font: `loadscreen_tables.inc`) |
+| Python's `re`, `str` | `src/core/pyre.*` (a regex engine with `re`'s semantics), `src/core/pystr.*` |
 | `__main__.py` | `src/cli/main.cpp` |
 
 `src/core/threads.*` runs work on every processor, with threads that have stacks as large as the main

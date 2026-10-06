@@ -5,8 +5,8 @@
 #include <string>
 #include <vector>
 
-// Running other programs (xma2encode, FFmpeg): no console window, nothing on their input, their output
-// and errors captured.
+// Running other programs (xma2encode, FFmpeg): no console window, their input given (or nothing), their
+// output and errors captured.
 namespace t4ff
 {
 struct ProcessResult
@@ -17,8 +17,9 @@ struct ProcessResult
     bool timed_out = false;
 };
 
-// args[0] is the program; timeout in seconds (0: none). Throws std::runtime_error when it cannot start.
-ProcessResult run_process(const std::vector<std::wstring> &args, double timeout = 0);
+// args[0] is the program; timeout in seconds (0: none); input: what it reads (nullptr: nothing). Throws
+// std::runtime_error when it cannot start.
+ProcessResult run_process(const std::vector<std::wstring> &args, double timeout = 0, const std::vector<uint8_t> *input = nullptr);
 
 // A folder of its own under %TEMP%, removed with what it holds when the object goes.
 class TempDir

@@ -1,5 +1,6 @@
 #include "core/process.h"
 
+#include <algorithm>
 #include <atomic>
 #include <stdexcept>
 #include <thread>
@@ -45,7 +46,7 @@ void read_all(HANDLE h, std::vector<uint8_t> &out)
 }
 } // namespace
 
-ProcessResult run_process(const std::vector<std::wstring> &args, double timeout)
+ProcessResult run_process(const std::vector<std::wstring> &args, double timeout, const std::vector<uint8_t> *input)
 {
     std::wstring cmdline;
     for (const auto &a : args)
@@ -56,7 +57,16 @@ ProcessResult run_process(const std::vector<std::wstring> &args, double timeout)
         throw std::runtime_error("cannot create pipes");
     SetHandleInformation(out_r, HANDLE_FLAG_INHERIT, 0);
     SetHandleInformation(err_r, HANDLE_FLAG_INHERIT, 0);
-    HANDLE nul = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, nullptr);
+    // its input: a pipe the input is written to, else NUL
+    HANDLE nul, in_w = nullptr;
+    if (input)
+    {
+        if (!CreatePipe(&nul, &in_w, &sa, 0))
+            throw std::runtime_error("cannot create pipes");
+        SetHandleInformation(in_w, HANDLE_FLAG_INHERIT, 0);
+    }
+    else
+        nul = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, nullptr);
     STARTUPINFOEXW si{};
     si.StartupInfo.cb = sizeof si;
     si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
@@ -87,12 +97,28 @@ ProcessResult run_process(const std::vector<std::wstring> &args, double timeout)
     {
         CloseHandle(out_r);
         CloseHandle(err_r);
+        if (in_w)
+            CloseHandle(in_w);
         throw std::runtime_error("cannot run " + std::filesystem::path(args.at(0)).string());
     }
     ProcessResult r;
     std::vector<uint8_t> err;
     std::thread out_reader([&] { read_all(out_r, r.out); });
     std::thread err_reader([&] { read_all(err_r, err); });
+    std::thread writer;
+    if (in_w)
+        writer = std::thread([&] {
+            size_t at = 0;
+            while (at < input->size())
+            {
+                DWORD wrote = 0;
+                DWORD n = static_cast<DWORD>(std::min<size_t>(input->size() - at, 1 << 20));
+                if (!WriteFile(in_w, input->data() + at, n, &wrote, nullptr) || !wrote)
+                    break; // the program stopped reading
+                at += wrote;
+            }
+            CloseHandle(in_w);
+        });
     DWORD wait = WaitForSingleObject(pi.hProcess, timeout > 0 ? static_cast<DWORD>(timeout * 1000) : INFINITE);
     if (wait == WAIT_TIMEOUT)
     {
@@ -100,6 +126,8 @@ ProcessResult run_process(const std::vector<std::wstring> &args, double timeout)
         TerminateProcess(pi.hProcess, 1);
         WaitForSingleObject(pi.hProcess, INFINITE);
     }
+    if (writer.joinable())
+        writer.join();
     out_reader.join();
     err_reader.join();
     DWORD code = 0;

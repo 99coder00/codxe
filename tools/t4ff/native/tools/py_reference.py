@@ -87,19 +87,20 @@ def dump_zone(zone, out_path):
 
 
 def convert(*argv):
-    """The Python side of t4ff-cli convert: the pipeline of steps 3 and 4 (streamed sounds, convert,
-    merge, prune references, the loaded sound limit, alias types, stream layout)."""
+    """The Python side of t4ff-cli convert: streamed sounds, then t4ff's own _convert_map (convert,
+    merge, the scripts and menus, the loaded sound limit, options and scripts folder into --out-dir),
+    the zone and the stream layout."""
     import argparse
 
-    from t4ff.__main__ import converters, run_converter
-    from t4ff.assets import ship_stock_streams
-    from t4ff.audio import LoadedXma, XmaEncoder, convert_streamed_sounds, upgrade_stream_files
+    import tempfile
+
+    from t4ff.__main__ import _convert_map, write_zone
+    from t4ff.audio import XmaEncoder, convert_streamed_sounds, upgrade_stream_files
     from t4ff.convert import ConvertOptions
     from t4ff.fastfile import write_fastfile
     from t4ff.images import IwdLibrary
-    from t4ff.merge import merge_zones, prune_references
-    from t4ff.platforms import pc, x360
-    from t4ff.soundbudget import DEFAULT_LOADED_SOUND_MIB, DEFAULT_MAX_LOADED_SOUNDS, limit_loaded_sounds, sync_alias_types
+    from t4ff.platforms import x360
+    from t4ff.soundbudget import DEFAULT_LOADED_SOUND_MIB, DEFAULT_MAX_LOADED_SOUNDS
 
     ap = argparse.ArgumentParser(prog="py_reference.py convert")
     ap.add_argument("--out")
@@ -112,6 +113,12 @@ def convert(*argv):
     ap.add_argument("--texture-budget", type=float, default=0)
     ap.add_argument("--max-texture-size", type=int, default=0)
     ap.add_argument("--sounds-dir")
+    ap.add_argument("--out-dir")
+    ap.add_argument("--map-files", action="append", default=[])
+    ap.add_argument("--load-ff")
+    ap.add_argument("--name", default="")
+    ap.add_argument("--loading-image", default="")
+    ap.add_argument("--no-load-zone", action="store_true")
     ap.add_argument("--xma-encoder")
     ap.add_argument("--ffmpeg")
     ap.add_argument("--xma-quality", type=int, default=60)
@@ -154,22 +161,13 @@ def convert(*argv):
         jobs=a.jobs,
         reference_techsets=a.reference_techsets,
     )
-    convs = converters(a.paths, options)
-    if encoder is not None and a.sounds_dir:
-        ship_stock_streams(pc(), [c.zone for c in convs], IwdLibrary(a.iwd) if a.iwd else None, a.sounds_dir, encoder, a.stream_rate, a.mono_streams,
-                           a.jobs)
-    zones = [run_converter(path, conv) for path, conv in zip(a.paths, convs)]
-    main = zones[0] if len(zones) == 1 else merge_zones(x360(), zones)
-    prune_references(x360(), main)
-    if a.max_loaded_sounds or a.loaded_sound_memory:
-        streams = {key[0].lower(): xma.stream for key, xma in options.sound_cache.items() if isinstance(xma, LoadedXma) and xma.stream is not None}
-        limit_loaded_sounds(x360(), main, a.max_loaded_sounds, streams, a.sounds_dir, max_bytes=int(a.loaded_sound_memory * 1048576))
-    fixed = sync_alias_types(x360(), main)
-    if fixed:
-        print(f"sound aliases: the type in the flags of {fixed} aliases set to their sound file's")
+    # the conversion itself is t4ff's own _convert_map (streaming, step 6, left out)
+    out_dir = a.out_dir or a.sounds_dir or tempfile.mkdtemp(prefix="t4ff-ref-")
+    os.makedirs(out_dir, exist_ok=True)
+    args = argparse.Namespace(iwd=a.iwd, stream_rate=a.stream_rate, mono_streams=a.mono_streams, jobs=a.jobs, max_loaded_sounds=a.max_loaded_sounds,
+                              loaded_sound_memory=a.loaded_sound_memory, stream_textures=False, console_zone=a.console_zone)
+    main, _ = _convert_map(args, a.paths, options, IwdLibrary(a.map_files), out_dir)
     out = Writer(x360()).write(main)
-    if a.sounds_dir and os.path.isdir(os.path.join(a.sounds_dir, "sounds")):
-        upgrade_stream_files(os.path.join(a.sounds_dir, "sounds"))
     if a.out:
         with open(a.out, "wb") as f:
             f.write(out)
@@ -177,6 +175,52 @@ def convert(*argv):
         dump_zone(main, a.dump)
     if a.ff:
         write_fastfile(a.ff, ">", out)
+    if not (a.out_dir or a.sounds_dir):
+        return
+    # the rest as t4ff's cmd_convert writes it into the map's folder
+    write_zone(main, os.path.join(out_dir, f"{a.map_name}.ff"), a.jobs, out)
+    if os.path.isdir(os.path.join(out_dir, "sounds")):
+        upgrade_stream_files(os.path.join(out_dir, "sounds"))
+    write_map_files(a, options, main, IwdLibrary(a.map_files), out_dir)
+
+
+def write_map_files(a, options, main_zone, map_files, out_dir):
+    """The map's files besides its zone, as t4ff's cmd_convert writes them (from its code)."""
+    import dataclasses
+
+    from t4ff.__main__ import _bare_description, convert_fastfile, write_zone
+    from t4ff.library import T4FF_MARKER, library_files
+    from t4ff.loadscreen import LoadScreenError, map_title, write_load_zone, write_preview
+    from t4ff.menu import localized_strings, write_map_info
+    from t4ff.merge import prune_references
+    from t4ff.platforms import x360
+
+    name = a.map_name
+    with open(os.path.join(out_dir, T4FF_MARKER), "w", encoding="utf-8") as f:
+        f.write("Converted from the PC by t4ff (tools/t4ff): not console data, t4ff leaves these fastfiles out of its console fastfiles.\n")
+    title = a.name.strip() or map_title(map_files, name, localized_strings(x360(), main_zone))
+    description = os.path.join(out_dir, "description.txt")
+    if a.name.strip() or not os.path.exists(description) or _bare_description(description, name):
+        with open(description, "w", encoding="latin-1", errors="replace", newline="\r\n") as f:
+            f.write(title + "\n")
+        print(f'map list name: "{title}" ({description}; change it there or with --name)')
+    if not a.no_load_zone:
+        try:
+            done = write_load_zone(name, out_dir, library_files(a.console_zone, name, (out_dir,)), map_files, a.load_ff, a.loading_image, a.jobs, title=title)
+        except LoadScreenError as e:
+            print(f"warning: {e}")
+            done = False
+        if not done and a.load_ff:
+            zone = convert_fastfile(a.load_ff, dataclasses.replace(options, reference_techsets=True, texture_budget=0))
+            prune_references(x360(), zone)
+            write_zone(zone, os.path.join(out_dir, os.path.basename(a.load_ff)), a.jobs)
+        elif not done:
+            print("loading screen: none written (add CoD Xenon's _codxe\\t4 folder to the console fastfiles): the game shows a checkerboard while the map loads")
+        if write_preview(out_dir, name):
+            print("map list picture: preview.bin, from the loading screen")
+    info = write_map_info(out_dir, name)
+    if info:
+        print(f"CoD Xe's custom maps list: {' and '.join(info)} (from description.txt and the loading screen)")
 
 
 def rewrite(path, out_path):

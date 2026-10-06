@@ -45,11 +45,16 @@ add_library(t4ffcore STATIC
   src/convert/converter.cpp
   src/convert/assets.cpp
   src/convert/xanim.cpp
+  src/convert/scripts.cpp
+  src/convert/menus.cpp
+  src/convert/loadscreen.cpp
   src/convert/library.cpp
   src/convert/merge.cpp
   src/convert/techsets.cpp
   src/core/process.cpp
   src/core/sha256.cpp
+  src/core/pyre.cpp
+  src/core/pystr.cpp
   src/audio/audio.cpp
   src/audio/soundbudget.cpp
 )

@@ -27,10 +27,16 @@
 #include "convert/assets.h"
 #include "convert/converter.h"
 #include "convert/library.h"
+#include "convert/loadscreen.h"
+#include "convert/menus.h"
 #include "convert/merge.h"
+#include "convert/scripts.h"
+#include "convert/techsets.h"
 #include "core/fastfile.h"
 #include "core/image.h"
 #include "core/platforms.h"
+#include "core/pyre.h"
+#include "core/pystr.h"
 #include "core/threads.h"
 #include "core/zone.h"
 #include "core/zone_cache.h"
@@ -56,6 +62,15 @@ std::string utf8(const fs::path &p)
 
 // Memory: committed (private) bytes now and at the peak, and the peak working set (which counts
 // mapped cache pages the system can drop at any time).
+// a command line text in latin-1 (as the Python writes the map's name): other characters are "?"
+std::string latin1(const std::wstring &w)
+{
+    std::string out;
+    for (wchar_t c : w)
+        out += c < 256 ? static_cast<char>(static_cast<uint8_t>(c)) : '?';
+    return out;
+}
+
 std::string memory_text()
 {
     PROCESS_MEMORY_COUNTERS_EX pmc{};
@@ -375,6 +390,11 @@ struct ConvertArgs
     uint32_t max_texture_size = 0;
     bool no_mips = false, no_compress = false, allow_unverified = false, reference_techsets = false, no_zone_cache = false;
     fs::path sounds_dir; // the map's output folder: its sounds folder gets the streamed sounds
+    fs::path out_dir;    // the map's output folder: options.txt, scripts/...
+    std::vector<fs::path> map_files; // the folders of the map's own files (its fastfiles' and .iwd files')
+    fs::path load_ff, loading_image; // the map's PC load zone; a picture for its loading screen
+    std::string name;                // the map's name in the map lists
+    bool no_load_zone = false;
     // sounds
     fs::path xma_encoder, ffmpeg;
     int xma_quality = 60, sound_rate = 0, stream_rate = 0, jobs = 0;
@@ -382,6 +402,191 @@ struct ConvertArgs
     int max_loaded_sounds = DEFAULT_MAX_LOADED_SOUNDS;
     double loaded_sound_memory = DEFAULT_LOADED_SOUND_MIB;
 };
+
+// The passes of the Python _convert_map after the zones are merged: scripts and assets the map lacks,
+// the mod's scripts and menus, the fixes for the console, the loaded sound limit, the map's options and
+// scripts folder (into the output folder).
+void finish_map(const ConvertArgs &a, const ConvertOptions &o, const std::vector<std::unique_ptr<ZoneConverter>> &convs,
+                std::unique_ptr<Zone> &main_zone, const IwdLibrary &map_files, std::set<std::string> &mod_scripts)
+{
+    auto quiet = [](const std::string &) {};
+    ConsoleLibrary *library = convs[0]->console_library;
+    fs::path out_dir = a.out_dir.empty() ? a.sounds_dir : a.out_dir;
+    std::string level_script = "maps/" + o.map_name + ".gsc";
+    IwdLibrary stock(a.stock_iwds);
+    std::vector<const IwdLibrary *> sources{&map_files, &stock};
+    std::unique_ptr<Zone> extra = missing_scripts_zone(x360(), *main_zone, sources, library, o.log,
+                                                       {level_script, "clientscripts/" + o.map_name + ".csc"}, &mod_scripts);
+    auto merge_in = [&](std::unique_ptr<Zone> z) {
+        std::vector<std::unique_ptr<Zone>> two;
+        two.push_back(std::move(main_zone));
+        two.push_back(std::move(z));
+        main_zone = merge_zones(x360(), std::move(two), quiet);
+    };
+    if (extra)
+        merge_in(std::move(extra));
+    // assets the game looks up by name (player body animations, shellshock files) no zone has
+    extra = named_assets_zone(x360(), *main_zone, sources, library, o.log);
+    if (extra)
+        merge_in(std::move(extra));
+    Zone &zone = *main_zone;
+    // the mod's scripts that the game's own zones have too run under their own names
+    std::map<std::string, std::string> renamed = keep_mod_scripts(x360(), zone, mod_scripts, library, level_script, o.log);
+    // the options the mod's own front end menus set, before those menus go
+    MenuValues menu_values = menu_dvar_values(zone);
+    std::vector<std::string> pause_menus; // menus the map's own pause menu opens
+    if (library)
+    {
+        auto ingame = library->find_in_game_zones("MenuList", "ui/ingame.txt");
+        auto [kept, extras] = bind_pause_menu(x360(), zone, ingame ? menu_names(ingame->second) : std::vector<std::string>(), o.log);
+        pause_menus = extras;
+        drop_frontend_menus(
+            x360(), zone, [&](const std::string &n) { return library->is_stock_menu(n); }, o.log,
+            [&](const std::string &n) { return library->in_game_zones("MenuList", n); }, kept);
+    }
+    drop_unused_videos(x360(), zone, o.log);
+    // PC script menus and hints name keyboard keys: the controller's buttons instead
+    gamepad_script_menus(x360(), zone, o.log);
+    std::set<std::string> script_menus = script_strings(x360(), zone); // the menus the scripts open are named in them
+    script_menus.insert(pause_menus.begin(), pause_menus.end());
+    decorate_inert_items(x360(), zone, o.log, &script_menus);
+    controller_navigation(x360(), zone, o.log, &script_menus);
+    use_key_hints(x360(), zone, o.log);
+    fix_modder_help(x360(), zone, o.log);
+    spawn_script_origins(x360(), zone, o.log);
+    valid_cursor_hints(x360(), zone, o.log);
+    local_client_effects(x360(), zone, o.log);
+    precache_before_waits(x360(), zone, level_script, o.log);
+    menu_dvar_defaults(x360(), zone, menu_values, level_script, o.log);
+    speed_up_zombies_only(x360(), zone, o.log);
+    zombie_idles_for_zombies(x360(), zone, o.log);
+    // in splitscreen the map's own fog, not the game's yellow placeholder
+    std::set<std::string> renamed_to;
+    for (const auto &[old, now] : renamed)
+        renamed_to.insert(now);
+    splitscreen_fog(
+        x360(), zone, level_script,
+        [&](const std::string &name) { return renamed_to.count(name) || (library && library->find_in_game_zones("RawFile", name)); }, o.log);
+    mounted_guns(x360(), zone, level_script, o.log);
+    reset_sustain_ammo(x360(), zone, level_script, o.log);
+    // technique sets copied from CoD Xenon's maps read the dynamic shadow texture before it is set
+    fix_argument_sections(x360(), zone, o.log);
+    prune_references(x360(), zone, {"techset"}, o.log);
+    if (a.max_loaded_sounds || a.loaded_sound_memory)
+    {
+        std::map<std::string, std::shared_ptr<XmaStream>> streams;
+        for (const auto &[key, entry] : o.sound_cache->entries)
+            if (entry.xma && entry.xma->stream)
+                streams[lower_latin1(key.first)] = entry.xma->stream;
+        limit_loaded_sounds(x360(), zone, a.max_loaded_sounds, streams, out_dir, o.log,
+                            static_cast<uint64_t>(a.loaded_sound_memory * 1048576));
+    }
+    int fixed = sync_alias_types(x360(), zone);
+    if (fixed)
+        printf("sound aliases: the type in the flags of %d aliases set to their sound file's\n", fixed);
+    // options the mod's own front end menus choose: the Custom Maps menu shows them
+    MenuValues pc_values;
+    std::vector<Zone *> pc_zones;
+    for (const auto &c : convs)
+    {
+        pc_zones.push_back(&c->zone);
+        for (const auto &[dvar, values] : menu_dvar_values(c->zone))
+            pc_values[dvar].insert(values.begin(), values.end());
+    }
+    std::vector<MapOption> map_options = menu_options(pc(), pc_zones, script_dvars(x360(), zone), pc_values);
+    if (!out_dir.empty())
+        write_options(map_options, out_dir, o.log);
+    // and asked in game as the level starts
+    if (!map_options.empty())
+    {
+        std::vector<std::string> menus = add_options_menus(x360(), zone, library, map_options, o.log);
+        if (!menus.empty())
+            options_script(x360(), zone, level_script, map_options, menus, o.log);
+    }
+    // the mod's versions of the game's scripts that keep no name of their own: the map's scripts folder
+    std::map<std::string, std::string> folder = usermap_scripts(x360(), zone, mod_scripts, library, renamed);
+    if (!out_dir.empty())
+        write_usermap_scripts(folder, out_dir, o.log);
+}
+
+// The map's files besides its zone, as the Python cmd_convert writes them: the t4ff marker, the map's
+// name (description.txt), its loading screen zone and pictures for the map lists.
+void write_map_files(const ConvertArgs &a, const ConvertOptions &o, const std::vector<std::unique_ptr<ZoneConverter>> &convs, Zone &main_zone,
+                     const IwdLibrary &map_files, const fs::path &out_dir)
+{
+    const std::string &name = a.map_name;
+    // later conversions do not take this map's fastfiles for console data
+    write_text(out_dir / T4FF_MARKER,
+               "Converted from the PC by t4ff (tools/t4ff): not console data, t4ff leaves these fastfiles out of its console fastfiles.\r\n");
+    // the map's name in the map lists (CoD Xe reads the first line of description.txt)
+    std::string given(py::strip(a.name));
+    std::vector<std::pair<std::string, std::string>> localized = localized_strings(x360(), main_zone);
+    std::string title = !given.empty() ? given : map_title(&map_files, name, &localized);
+    fs::path description = out_dir / "description.txt";
+    auto bare = [&]() {
+        // only the map's file name, as older conversions wrote it: a better one replaces it
+        std::vector<uint8_t> raw = read_file(description);
+        std::string text(raw.begin(), raw.end());
+        std::vector<std::string> lines;
+        size_t start = 0;
+        while (start < text.size())
+        {
+            size_t end = text.find_first_of("\r\n", start);
+            std::string line = text.substr(start, end == std::string::npos ? std::string::npos : end - start);
+            if (!py::strip(line).empty())
+                lines.emplace_back(py::strip(line));
+            if (end == std::string::npos)
+                break;
+            start = end + (text.compare(end, 2, "\r\n") == 0 ? 2 : 1);
+        }
+        return lines.size() == 1 && lines[0] == name;
+    };
+    if (!given.empty() || !fs::exists(description) || bare())
+    {
+        write_text(description, py::replace(title + "\n", "\n", "\r\n"));
+        printf("map list name: \"%s\" (%s; change it there or with --name)\n", title.c_str(), utf8(description).c_str());
+    }
+    if (!a.no_load_zone)
+    {
+        // CoD Xe serves <map>_load.ff as the loading screen zone: made like CoD Xenon's, with the map's picture
+        bool done = false;
+        try
+        {
+            done = write_load_zone(name, out_dir, library_files(a.console_zones, name, {out_dir}), map_files, a.load_ff, a.loading_image, a.jobs, o.log, title);
+        }
+        catch (const LoadScreenError &e)
+        {
+            printf("warning: %s\n", e.what());
+        }
+        if (!done && !a.load_ff.empty())
+        {
+            // no load zone of CoD Xenon's among the console fastfiles: the PC one converted
+            ConvertOptions lo = o;
+            lo.reference_techsets = true;
+            lo.texture_budget = 0;
+            FastFile ff = read_fastfile(a.load_ff);
+            ZoneConverter conv(read_zone(pc(), std::move(ff.zone)), pc(), x360(), lo);
+            std::vector<ZoneConverter *> one{&conv};
+            prefetch_image_sources(one);
+            plan_textures_shared(one);
+            prebuild_textures(one);
+            std::unique_ptr<Zone> zone = conv.convert();
+            prune_references(x360(), *zone, {"techset"}, o.log);
+            write_fastfile(out_dir / a.load_ff.filename(), true, write_zone(x360(), *zone), 9, a.jobs);
+        }
+        else if (!done)
+            printf("loading screen: none written (add CoD Xenon's _codxe\\t4 folder to the console fastfiles): the game shows a checkerboard while the "
+                   "map loads\n");
+        // the same picture for the map list
+        if (write_preview(out_dir, name))
+            printf("map list picture: preview.bin, from the loading screen\n");
+    }
+    // and for CoD Xe's own custom maps list: map.json and preview.dds
+    std::vector<std::string> info = write_map_info(out_dir, name);
+    if (!info.empty())
+        printf("CoD Xe's custom maps list: %s (from description.txt and the loading screen)\n", py::join(info, " and ").c_str());
+    (void)convs;
+}
 
 int cmd_convert(const std::vector<fs::path> &paths, const ConvertArgs &a)
 {
@@ -439,15 +644,32 @@ int cmd_convert(const std::vector<fs::path> &paths, const ConvertArgs &a)
         convs.push_back(std::make_unique<ZoneConverter>(read_zone(pc(), std::move(ff.zone)), pc(), x360(), o));
     }
     std::vector<ZoneConverter *> raw;
+    std::vector<Zone *> pc_zones;
     for (auto &c : convs)
+    {
         raw.push_back(c.get());
+        pc_zones.push_back(&c->zone);
+    }
     lap("reading the PC fastfiles");
+    // the map's own loose scripts win over those of its fastfiles, as on PC
+    IwdLibrary map_files(a.map_files);
+    override_scripts(pc(), pc_zones, map_files, o.log);
+    // scripts the PC game takes from the mod (its mod.ff, its own files) over the game's own
+    std::set<std::string> mod_scripts;
+    for (size_t i = 0; i < convs.size(); ++i)
+    {
+        std::string base = lower_latin1(utf8(paths[i].filename()));
+        bool mod_zone = base == "mod.ff" || base.rfind("localized_", 0) == 0;
+        for (auto &[script, node] : rawfiles(pc(), convs[i]->zone))
+        {
+            std::string key = normalize_script(script);
+            if ((script.empty() || script[0] != ',') && (mod_zone || map_files.read(key)))
+                mod_scripts.insert(key);
+        }
+    }
     if (o.xma_encoder && !a.sounds_dir.empty())
     {
         // streamed sounds of the game's own the console's disc has not, from the PC game's files
-        std::vector<Zone *> pc_zones;
-        for (auto &c : convs)
-            pc_zones.push_back(&c->zone);
         std::unique_ptr<IwdLibrary> stock = a.stock_iwds.empty() ? nullptr : std::make_unique<IwdLibrary>(a.stock_iwds);
         ship_stock_streams(pc(), pc_zones, stock.get(), a.sounds_dir, *encoder, a.stream_rate, a.mono_streams, a.jobs, o.log);
         lap("stock streamed sounds");
@@ -482,20 +704,9 @@ int cmd_convert(const std::vector<fs::path> &paths, const ConvertArgs &a)
     }
     lap("converting");
     std::unique_ptr<Zone> main_zone = zones.size() == 1 ? std::move(zones[0]) : merge_zones(x360(), std::move(zones), o.log);
-    prune_references(x360(), *main_zone, {"techset"}, o.log);
     lap("merging");
-    if (a.max_loaded_sounds || a.loaded_sound_memory)
-    {
-        std::map<std::string, std::shared_ptr<XmaStream>> streams;
-        for (const auto &[key, entry] : o.sound_cache->entries)
-            if (entry.xma && entry.xma->stream)
-                streams[lower_latin1(key.first)] = entry.xma->stream;
-        limit_loaded_sounds(x360(), *main_zone, a.max_loaded_sounds, streams, a.sounds_dir, o.log,
-                            static_cast<uint64_t>(a.loaded_sound_memory * 1048576));
-    }
-    int fixed = sync_alias_types(x360(), *main_zone);
-    if (fixed)
-        printf("sound aliases: the type in the flags of %d aliases set to their sound file's\n", fixed);
+    finish_map(a, o, convs, main_zone, map_files, mod_scripts);
+    lap("scripts and menus");
     std::vector<uint8_t> bytes = write_zone(x360(), *main_zone);
     lap("writing the zone");
     if (!a.out.empty())
@@ -504,12 +715,22 @@ int cmd_convert(const std::vector<fs::path> &paths, const ConvertArgs &a)
         write_text(a.dump, dump_text(main_zone.get()));
     if (!a.ff.empty())
         write_file(a.ff, fastfile_bytes(true, bytes));
-    if (!a.sounds_dir.empty() && fs::is_directory(a.sounds_dir / "sounds"))
+    fs::path out_dir = a.out_dir.empty() ? a.sounds_dir : a.out_dir;
+    if (!out_dir.empty())
     {
-        UpgradeStats up = upgrade_stream_files(a.sounds_dir / "sounds", o.log);
+        fs::path target = out_dir / (a.map_name + ".ff");
+        write_fastfile(target, true, bytes, 9, a.jobs);
+        printf("wrote %s (%.1f MiB compressed)\n", utf8(target).c_str(), fs::file_size(target) / 1048576.0);
+    }
+    if (!out_dir.empty() && fs::is_directory(out_dir / "sounds"))
+    {
+        UpgradeStats up = upgrade_stream_files(out_dir / "sounds", o.log);
         if (up.upgraded)
             printf("streamed sounds: %d kept from an earlier conversion rewritten in the game's layout (4 KiB blocks)\n", up.upgraded);
     }
+    if (!out_dir.empty())
+        write_map_files(a, o, convs, *main_zone, map_files, out_dir);
+    lap("the map's files");
     if (o.xma_encoder)
         printf("sound cache: %d encodings reused\n", o.xma_encoder->cache_hits());
     printf("zone %.1f MiB in %.2f s; memory: %s\n", bytes.size() / 1048576.0, seconds_since(t0), memory_text().c_str());
@@ -715,6 +936,72 @@ int cmd_cache(const fs::path &dir, bool clear)
     return 0;
 }
 
+// regex: the matches of patterns (a line each, "<flags>\t<pattern>") in files, as CRCs (compared with
+// Python's re, native/tools/regex_check.py run)
+int cmd_regex(const fs::path &pattern_file, const std::vector<fs::path> &files)
+{
+    std::vector<uint8_t> raw = read_file(pattern_file);
+    std::string text(raw.begin(), raw.end());
+    std::vector<pyre::Regex> pats;
+    size_t start = 0;
+    while (start < text.size())
+    {
+        size_t nl = text.find('\n', start);
+        std::string line = text.substr(start, nl == std::string::npos ? std::string::npos : nl - start);
+        start = nl == std::string::npos ? text.size() : nl + 1;
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        if (line.empty())
+            continue;
+        size_t tab = line.find('\t');
+        std::string flags = line.substr(0, tab);
+        int f = 0;
+        for (char c : flags)
+            f |= c == 'b' ? pyre::BYTES : c == 'i' ? pyre::I : c == 'm' ? pyre::M : c == 's' ? pyre::S : 0;
+        pats.emplace_back(line.substr(tab + 1), f);
+    }
+    auto signature = [](const std::optional<pyre::Match> &m) {
+        if (!m)
+            return std::string("-");
+        std::string out;
+        for (size_t g = 0; g < m->spans.size() / 2; ++g)
+        {
+            if (g)
+                out += ' ';
+            out += std::to_string(m->spans[2 * g]) + "," + std::to_string(m->spans[2 * g + 1]);
+        }
+        return out;
+    };
+    for (size_t j = 0; j < files.size(); ++j)
+    {
+        std::vector<uint8_t> data = read_file(files[j]);
+        std::string_view subject(reinterpret_cast<const char *>(data.data()), data.size());
+        for (size_t i = 0; i < pats.size(); ++i)
+        {
+            std::string all;
+            size_t count = 0;
+            pats[i].for_each(subject, [&](const pyre::Match &m) {
+                all += (count++ ? "\n" : "") + signature(m);
+            });
+            size_t at = 0;
+            for (;;)
+            {
+                size_t nl = subject.find('\n', at);
+                std::string_view line = subject.substr(at, nl == std::string_view::npos ? std::string_view::npos : nl - at);
+                for (const auto &m : {pats[i].match(line), pats[i].fullmatch(line), pats[i].match(line, 1),
+                                      pats[i].search(line, 1, line.size() > 1 ? line.size() - 1 : 0)})
+                    all += (all.empty() ? "" : "\n") + signature(m);
+                if (nl == std::string_view::npos)
+                    break;
+                at = nl + 1;
+            }
+            uLong crc = crc32(0L, reinterpret_cast<const Bytef *>(all.data()), static_cast<uInt>(all.size()));
+            printf("%zu %zu %zu %08lx\n", i, j, count, crc);
+        }
+    }
+    return 0;
+}
+
 int usage()
 {
     fputs("usage:\n"
@@ -727,7 +1014,8 @@ int usage()
           "  t4ff-cli cache [--clear] [--zone-cache-dir DIR]\n"
           "  t4ff-cli convert --out <zone> [--dump <txt>] [--ff <fastfile>] [--map-iwd P]... [--iwd P]... [--console-zone P]...\n"
           "                   [--map-name N] [--texture-budget MiB] [--max-texture-size N] [--no-mips] [--no-compress]\n"
-          "                   [--allow-unverified] [--reference-techsets] [--no-zone-cache] [--sounds-dir D]\n"
+          "                   [--allow-unverified] [--reference-techsets] [--no-zone-cache] [--sounds-dir D] [--out-dir D]\n"
+          "                   [--map-files DIR]... [--load-ff P] [--name N] [--loading-image P] [--no-load-zone]\n"
           "                   [--xma-encoder P] [--ffmpeg P] [--xma-quality N] [--sound-rate N] [--stream-rate N] [--mono-sounds]\n"
           "                   [--mono-streams] [--no-sounds] [--no-sound-cache] [--max-loaded-sounds N] [--loaded-sound-memory MiB]\n"
           "                   <PC fastfile>...\n",
@@ -779,6 +1067,18 @@ int wmain(int argc, wchar_t **argv)
             conv.max_texture_size = static_cast<uint32_t>(_wtoi(argv[++i]));
         else if (a == L"--sounds-dir" && i + 1 < argc)
             conv.sounds_dir = argv[++i];
+        else if (a == L"--out-dir" && i + 1 < argc)
+            conv.out_dir = argv[++i];
+        else if (a == L"--map-files" && i + 1 < argc)
+            conv.map_files.emplace_back(argv[++i]);
+        else if (a == L"--load-ff" && i + 1 < argc)
+            conv.load_ff = argv[++i];
+        else if (a == L"--loading-image" && i + 1 < argc)
+            conv.loading_image = argv[++i];
+        else if (a == L"--name" && i + 1 < argc)
+            conv.name = latin1(argv[++i]);
+        else if (a == L"--no-load-zone")
+            conv.no_load_zone = true;
         else if (a == L"--xma-encoder" && i + 1 < argc)
             conv.xma_encoder = argv[++i];
         else if (a == L"--ffmpeg" && i + 1 < argc)
@@ -834,6 +1134,8 @@ int wmain(int argc, wchar_t **argv)
             return cmd_convert(paths, conv);
         if (cmd == L"cache" && paths.empty())
             return cmd_cache(cache_dir.empty() ? default_zone_cache_dir() : cache_dir, clear);
+        if (cmd == L"regex" && paths.size() >= 2)
+            return cmd_regex(paths[0], std::vector<fs::path>(paths.begin() + 1, paths.end()));
         if (cmd == L"texbench" && !paths.empty())
             return cmd_texbench(paths, jobs);
         if (cmd == L"textures" && paths.size() >= 2)
