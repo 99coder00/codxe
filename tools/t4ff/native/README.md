@@ -35,9 +35,12 @@ t4ff-cli roundtrip [--compress] [--jobs N] <file or folder>...  read and write b
 t4ff-cli dump <fastfile> <out.txt>                            the node tree as text
 t4ff-cli rewrite <fastfile> <out.zone>                        the zone as written back
 t4ff-cli bench [--jobs N] [--keep] <file or folder>...        reading speed and memory
+t4ff-cli textures [--jobs N] <out.txt> <iwd or folder>...     texture battery, as CRCs
+t4ff-cli texbench [--jobs N] <iwd or folder>...               texture conversion speed
 ```
 
-Folders are searched for `.ff` files. Fastfiles are read on every processor (or `--jobs N`).
+Folders are searched for `.ff` files (`textures` and `texbench`: for `.iwd` files and loose
+`images/*.iwi`). The work runs on every processor (or `--jobs N`).
 
 ## Checking it against the Python t4ff
 
@@ -58,12 +61,27 @@ differently. The Python writer differs the same way, and the report says when th
 `--compress` also compresses the zone again as t4ff does (1 MiB chunks, as pigz does) and compares
 the whole fastfile, which is identical for fastfiles t4ff wrote.
 
+`textures` converts every IWI of the archives given in a fixed battery and writes CRCs of
+everything:
+- the parsed levels;
+- console textures with four option sets: the defaults; normal map with two levels dropped and no
+  mip tail; at most 64 texels and uncompressed, then `with_mips`; twenty levels dropped, which
+  decodes, downscales and encodes DXT again;
+- the headers, the untiled levels and the size estimates.
+
+`py_reference.py textures` writes the same report, and `tools/compare_reports.py` compares two
+reports and names the fields that differ.
+
+The DXT encoder works in double precision exactly as the numpy one does. numpy 2.x's `einsum` adds
+three products as `(p0 + p2) + p1` (its two lane SIMD loop), so the C++ does too. Another numpy
+could change the Python output, but not the C++ output.
+
 ## State
 
 | Step | What | State |
 | --- | --- | --- |
 | 1 | Foundation: fastfiles, layouts, zone code commands, zone reader and writer | done |
-| 2 | Textures: IWI, wavelet, DXT, Xenos tiling | |
+| 2 | Textures: IWI, wavelet, DXT, Xenos tiling | done |
 | 3 | Conversion core: assets, technique sets, console library, merge, xanims | |
 | 4 | Sounds: decoders, XMA encoding in parallel, cache | |
 | 5 | Scripts, menus, loading screens | |
@@ -87,6 +105,14 @@ Step 1, checked on 2026-10-05:
   1.55 s) and write 3-4 times faster. zlib's inflate is now the largest cost of one file. The 49
   console zones of a conversion's library (4.3 GiB) load in 3.1 s on 20 threads.
 
+Step 2, checked on 2026-10-05:
+
+- **Kino Rezurrection:** the battery's 7,355 lines over its 1,471 IWIs are identical to the
+  Python's. The IWIs are DXT1/3/5, uncompressed, and 26 wavelet ones from Black Ops.
+- **Stock:** the PC game's 8,822 IWIs give 44,110 identical lines, including its 20 R8G8B8 cube maps.
+- **Speed:** converting Kino Rezurrection's textures with the default options (582.4 MiB of
+  console textures) takes 37.9 s in Python, 3.0 s on one thread and 0.46 s on 20 threads.
+
 ## Layout
 
 | Python | C++ |
@@ -96,6 +122,10 @@ Step 1, checked on 2026-10-05:
 | `zone.py` | `src/core/zone.*` |
 | `fastfile.py` | `src/core/fastfile.*` |
 | `platforms.py` | `src/core/platforms.*` |
+| `images.py`, `stream.py`'s `with_mips` | `src/core/image.*` (and `zip.*`: `.iwd` archives) |
+| `wavelet.py` | `src/core/wavelet.*` (codeword tables in `wavelet_tables.inc`) |
+| `dxt.py` | `src/core/dxt.*` |
+| `xenos.py` | `src/core/xenos.*`, formats in `texture_format.h` |
 | `__main__.py` | `src/cli/main.cpp` |
 
 `src/core/threads.*` runs work on every processor, with threads that have stacks as large as the main

@@ -41,11 +41,21 @@ up (step 7). A change to the Python must be carried over to the native code by t
 - On one thread, zones read 7-9 times faster than the Python. Every processor reads its own zone:
   the 49 console zones of a conversion's library (4.3 GiB) load in 3.1 s.
 
-**Next, step 2: textures.** IWI reading, wavelet decoding, DXT, Xenos tiling and mip chains
-(`images.py`, `wavelet.py`, `dxt.py`, `xenos.py`), multi-threaded, checked against the Python
-output on Kino Rezurrection's textures. Then:
-- step 3: the conversion core (`convert.py`, `assets.py`, `techsets.py`, `library.py`, `merge.py`,
-  `xanim.py`);
+**Step 2 (textures) is done:** IWI reading (`.iwd` archives too), wavelet decoding, DXT decoding
+and encoding, Xenos tiling and mip chains, the console texture builder and `with_mips`
+(`images.py`, `wavelet.py`, `dxt.py`, `xenos.py`).
+- `t4ff-cli textures` runs a battery of conversions over every IWI given. Its report is identical to
+  `py_reference.py textures`' on Kino Rezurrection (1,471 IWIs, wavelet ones among them) and on
+  the PC game's 8,822 (cube maps among them).
+- The DXT encoder matches numpy's float arithmetic operation for operation; see the native README
+  for the one numpy detail it depends on.
+- Kino Rezurrection's textures convert in 0.46 s on 20 threads (3.0 s on one), against 37.9 s in
+  Python.
+- `_image_from_load_def` and `_decode_console_image` (`assets.py`) read zone nodes, so they come
+  with step 3.
+
+**Next, step 3: the conversion core** (`convert.py`, `assets.py`, `techsets.py`, `library.py`,
+`merge.py`, `xanim.py`), checked by converting maps with both and comparing the fastfiles. Then:
 - step 4: sounds (`audio.py`, `soundbudget.py`), running xma2encode in parallel;
 - step 5: scripts, menus and loading screens;
 - step 6: streaming and the memory planner (`stream.py`, `memory.py`), which converts once and

@@ -5,6 +5,7 @@
 //   t4ff-cli dump <fastfile> <out.txt>
 //   t4ff-cli rewrite <fastfile> <out.zone>
 //   t4ff-cli bench [--jobs N] [--keep] <fastfile or folder>...
+//   t4ff-cli textures [--jobs N] <out.txt> <iwd or folder>...
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -19,9 +20,11 @@
 #include <psapi.h>
 
 #include "core/fastfile.h"
+#include "core/image.h"
 #include "core/platforms.h"
 #include "core/threads.h"
 #include "core/zone.h"
+#include "zlib.h"
 
 namespace fs = std::filesystem;
 using namespace t4ff;
@@ -321,13 +324,166 @@ int cmd_rewrite(const fs::path &path, const fs::path &out_path)
     return 0;
 }
 
+// textures: a battery of conversions of every IWI of the libraries given, as CRCs (compared with the
+// Python t4ff's, native/tools/py_reference.py textures)
+
+std::string crc_text(const std::vector<std::vector<uint8_t>> &parts)
+{
+    uLong crc = crc32(0L, Z_NULL, 0);
+    size_t size = 0;
+    for (const auto &p : parts)
+    {
+        crc = crc32(crc, p.data(), static_cast<uInt>(p.size()));
+        size += p.size();
+    }
+    char buf[32];
+    snprintf(buf, sizeof buf, "%08lx/%zu", crc, size);
+    return buf;
+}
+
+std::string texture_report(const ImageData &image, const char *label, const TextureOptions &o, bool with_mips_check)
+{
+    std::string line = image.name + " " + label + " ";
+    try
+    {
+        ConsoleTexture tex = build_console_texture(image, o);
+        line += std::string(fmt_name(tex.format->name)) + " " + std::to_string(tex.width) + "x" + std::to_string(tex.height) +
+                " levels=" + std::to_string(tex.levels) + " drop=" + std::to_string(tex.dropped_levels) + " faces=" + std::to_string(tex.faces) +
+                " base=" + std::to_string(tex.base_size) + " header=" + crc_text({tex.header}) + " pixels=" + crc_text({tex.pixels});
+        std::vector<std::vector<uint8_t>> linear;
+        if (tex.levels > 1 || tex.faces > 1)
+            linear = xenos::untile_mip_chain(tex.pixels.data(), tex.pixels.size(), tex.width, tex.height, *tex.format, tex.levels, tex.faces);
+        else
+            linear = {xenos::untile_level(tex.pixels.data(), tex.pixels.size(), tex.width, tex.height, 0, *tex.format)};
+        line += " untile=" + crc_text(linear);
+        if (with_mips_check)
+        {
+            line += " withmips=";
+            if (tex.levels == 1 && tex.faces == 1)
+            {
+                auto m = with_mips(tex.pixels.data(), tex.pixels.size(), tex.width, tex.height, *tex.format, o.mip_tail);
+                line += m ? crc_text({m->pixels}) + ":" + std::to_string(m->levels) : "none";
+            }
+            else
+                line += "-";
+        }
+    }
+    catch (const std::exception &)
+    {
+        line += "error";
+    }
+    try
+    {
+        line += " size=" + std::to_string(console_texture_size(image, o)) + "/" + std::to_string(console_texture_size(image, o, true));
+    }
+    catch (const std::exception &)
+    {
+        line += " size=error";
+    }
+    return line;
+}
+
+int cmd_textures(const fs::path &out_path, const std::vector<fs::path> &paths, int jobs)
+{
+    auto t0 = Clock::now();
+    IwdLibrary library(paths);
+    std::vector<std::string> names;
+    for (const std::string &n : library.names("images/"))
+        if (n.size() > 11 && n.compare(n.size() - 4, 4, ".iwi") == 0)
+            names.push_back(n.substr(7, n.size() - 11));
+    std::sort(names.begin(), names.end());
+    printf("%zu images\n", names.size());
+
+    std::vector<std::string> lines(names.size());
+    std::atomic<size_t> done{0};
+    parallel_for(names.size(), jobs, [&](size_t i) {
+        const std::string &name = names[i];
+        std::string out;
+        std::optional<ImageData> image;
+        try
+        {
+            image = library.image(name);
+        }
+        catch (const std::exception &)
+        {
+        }
+        if (!image)
+            out = name + " parse error\n";
+        else
+        {
+            out = name + " parse " + fmt_name(image->format) + " " + std::to_string(image->width) + "x" + std::to_string(image->height) +
+                  " faces=" + std::to_string(image->faces) + " flags=" + std::to_string(image->flags) + " levels=" +
+                  std::to_string(image->levels.size()) + " crc=" + crc_text(image->levels) + "\n";
+            TextureOptions a;
+            out += texture_report(*image, "A", a, false) + "\n";
+            TextureOptions b;
+            b.drop_levels = 2;
+            b.normal_map = true;
+            b.mip_tail = false;
+            out += texture_report(*image, "B", b, false) + "\n";
+            TextureOptions c;
+            c.max_size = 64;
+            c.keep_mips = false;
+            c.compress = false;
+            out += texture_report(*image, "C", c, true) + "\n";
+            TextureOptions d;
+            d.drop_levels = 20;
+            out += texture_report(*image, "D", d, false) + "\n";
+        }
+        lines[i] = std::move(out);
+        size_t n = ++done;
+        if (n % 1000 == 0)
+        {
+            printf("  %zu/%zu\n", n, names.size());
+            fflush(stdout);
+        }
+    });
+    std::string all;
+    for (const auto &l : lines)
+        all += l;
+    FILE *f = _wfopen(out_path.c_str(), L"wb");
+    if (!f)
+        throw std::runtime_error("cannot write " + utf8(out_path));
+    fwrite(all.data(), 1, all.size(), f);
+    fclose(f);
+    printf("%s: %zu images in %.2f s\n", utf8(out_path).c_str(), names.size(), seconds_since(t0));
+    return 0;
+}
+
+// texbench: parse and convert (default options) every IWI of the libraries given, timed
+int cmd_texbench(const std::vector<fs::path> &paths, int jobs)
+{
+    IwdLibrary library(paths);
+    std::vector<std::string> names;
+    for (const std::string &n : library.names("images/"))
+        if (n.size() > 11 && n.compare(n.size() - 4, 4, ".iwi") == 0)
+            names.push_back(n.substr(7, n.size() - 11));
+    std::sort(names.begin(), names.end());
+    std::atomic<size_t> bytes{0};
+    auto t0 = Clock::now();
+    parallel_for(names.size(), jobs, [&](size_t i) {
+        try
+        {
+            if (auto image = library.image(names[i]))
+                bytes += build_console_texture(*image).pixels.size();
+        }
+        catch (const std::exception &)
+        {
+        }
+    });
+    printf("%zu images, %.1f MiB of console textures in %.2f s on %d threads\n", names.size(), bytes / 1048576.0, seconds_since(t0),
+           job_count(jobs));
+    return 0;
+}
+
 int usage()
 {
     fputs("usage:\n"
           "  t4ff-cli info <fastfile>... [--list]\n"
           "  t4ff-cli roundtrip [--compress] [--jobs N] <fastfile or folder>...\n"
           "  t4ff-cli dump <fastfile> <out.txt>\n"
-          "  t4ff-cli bench [--jobs N] [--keep] <fastfile or folder>...\n",
+          "  t4ff-cli bench [--jobs N] [--keep] <fastfile or folder>...\n"
+          "  t4ff-cli textures [--jobs N] <out.txt> <iwd or folder>...\n",
           stderr);
     return 2;
 }
@@ -367,6 +523,10 @@ int wmain(int argc, wchar_t **argv)
             return cmd_dump(paths[0], paths[1]);
         if (cmd == L"rewrite" && paths.size() == 2)
             return cmd_rewrite(paths[0], paths[1]);
+        if (cmd == L"texbench" && !paths.empty())
+            return cmd_texbench(paths, jobs);
+        if (cmd == L"textures" && paths.size() >= 2)
+            return cmd_textures(paths[0], std::vector<fs::path>(paths.begin() + 1, paths.end()), jobs);
     }
     catch (const std::exception &e)
     {

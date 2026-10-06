@@ -35,6 +35,11 @@ add_library(t4ffcore STATIC
   src/core/platforms.cpp
   src/core/resources.cpp
   src/core/threads.cpp
+  src/core/xenos.cpp
+  src/core/dxt.cpp
+  src/core/wavelet.cpp
+  src/core/zip.cpp
+  src/core/image.cpp
 )
 target_include_directories(t4ffcore PUBLIC src)
 target_link_libraries(t4ffcore PUBLIC zlibstatic)
