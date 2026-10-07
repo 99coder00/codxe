@@ -259,6 +259,8 @@ Settings load_settings(const fs::path &path, const fs::path &python)
     if (v.kind != json::Value::Kind::Object)
         return s;
     read_fields(v, s);
+    if (own && v.integer_or("version", 1) < 2)
+        s.stream_textures = true; // saved before streaming became the default (version 2)
     if (!own)
     {
         // the Python window's migrations (gui.Settings.load)
@@ -289,6 +291,7 @@ Settings load_settings(const fs::path &path, const fs::path &python)
 void save_settings(const Settings &s, const fs::path &path)
 {
     Writer w;
+    w.put("version", 2); // 2: texture streaming the default
     w.put("output", s.output);
     w.put("xma_encoder", s.xma_encoder);
     w.put("console_zones", s.console_zones);
@@ -404,10 +407,11 @@ std::vector<std::string> convert_args(const Settings &s, const MapEntry &m)
         args.emplace_back("--no-t4-layout");
     if (!s.load_zone)
         args.emplace_back("--no-load-zone");
-    // the native window's own: streaming, the loaded sound memory, threads, unverified assets
-    if (s.stream_textures)
+    // the native window's own: streaming (the default), the loaded sound memory, threads, unverified assets
+    if (!s.stream_textures)
+        args.emplace_back("--no-stream-textures");
+    else
     {
-        args.emplace_back("--stream-textures");
         if (s.upgrade_budget != 96)
             args.insert(args.end(), {"--upgrade-budget", format_g(s.upgrade_budget)});
         if (!s.deep_stream.empty())

@@ -92,8 +92,9 @@ t4ff-cli gui
 ```
 
 `convert` takes the Python's options (`t4ff-cli convert -h` lists them): `--iwd`, `--console-zone`,
-`--texture-budget`, `--memory-target`, `--stream-textures`, `--deep-stream`, the sound options,
-`--no-mod`, `--no-patch`, `--no-t4-layout`, `--no-load-zone`, `--name`, `--loading-image` and the rest.
+`--texture-budget`, `--memory-target`, `--stream-textures` (the default since 2026-10-06,
+`--no-stream-textures` to turn it off), `--deep-stream`, the sound options, `--no-mod`, `--no-patch`,
+`--no-t4-layout`, `--no-load-zone`, `--name`, `--loading-image` and the rest.
 It finds the map's files as the Python does (`find_usermap`: the map, its patch, `mod.ff` here or in
 `mods\<map>`, the mod's language zones, the `.iwd` files), and writes
 `<output>\_codxe\t4\usermaps\<map>`. Options of its own, for checks against the Python (no Python

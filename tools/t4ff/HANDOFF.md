@@ -51,6 +51,14 @@ python native/tools/compare_maps.py "<out dir>" --budget auto \
 - `native/tools/regex_check.py` (its three commands are in the native README): the regex engine
   against Python's `re`.
 
+**Texture streaming is the default (2026-10-06, the user's choice)** in both t4ffs and the window:
+`--stream-textures` is on unless `--no-stream-textures` is given (the window's setting file went to
+version 2, which turns it on once in settings saved before). The maps then need t4ff's CoD Xe build
+(`merge-upstream-r351`, which serves `images.pak`); with another CoD Xe the game keeps the fastfile's
+smaller copies of the streamed textures. Streaming is checked in Xenia only; the RGH console has not
+run a streamed map yet. `compare_maps.py` gives both sides the same defaults; add
+`--extra=--no-stream-textures` to compare conversions without streaming (step 7's runs).
+
 **Open after step 8:**
 1. **The window has not been used with a mouse yet.** It was checked by drawing itself into pictures
    (`t4ff.exe --dev-screenshot`, see step 8 below), and its conversions by `--dev-run`. Not tried:

@@ -1635,7 +1635,9 @@ void App::options_panel()
     ImGui::SeparatorText("Texture streaming");
     ImGui::PopFont();
     check("Stream textures (images.pak)", &s_.stream_textures,
-          "The textures of models and world surfaces keep their top mip level in the map's images.pak and load it near the player.");
+          "The textures of models and world surfaces keep their top mip level in the map's images.pak and load it near the player: PC "
+          "size textures, and the PC game's versions of stock textures. Needs t4ff's CoD Xe build (it serves the pack); with another the "
+          "game keeps the fastfile's smaller copies.");
     ImGui::BeginDisabled(!s_.stream_textures);
     field("PC stock textures", "MiB the PC versions of stock textures may add to the fastfile (--upgrade-budget, default 96).");
     if (ImGui::InputDouble("##upgrade", &s_.upgrade_budget, 8, 32, "%g MiB"))

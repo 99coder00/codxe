@@ -469,7 +469,8 @@ Command convert_command()
         value("--iwd", "extra .iwd files or folders to take images/sounds from (e.g. the PC game's main folder)", Option::Append),
         value("--max-texture-size", "largest texture dimension, bigger textures are downscaled (default: no limit)"),
         value("--texture-budget", "texture memory budget in MiB, 0 for no limit, or auto (default): what the memory target leaves"),
-        flag("--stream-textures", "the textures of models and world surfaces keep their top mip level in the map's images.pak"),
+        boolean("--stream-textures", "the textures of models and world surfaces keep their top mip level in the map's images.pak (default; "
+                                     "needs a CoD Xe build serving it). --no-stream-textures: every texture whole in the fastfile"),
         value("--upgrade-budget", "with --stream-textures: MiB the PC versions of stock textures may add to the fastfile (default 96)"),
         value("--deep-stream", "with --stream-textures: images (comma separated names, or all) that stream two mip levels at once"),
         value("--memory-target", "main memory the map's zone may use in MiB (default 212)"),
@@ -601,7 +602,7 @@ int cmd_convert(const Parsed &a, bool no_install)
     s.allow_unverified = a.flag("allow_unverified");
     s.sounds_dir = out_dir;
     s.out_dir = out_dir;
-    s.stream_textures = a.flag("stream_textures");
+    s.stream_textures = a.flag("stream_textures", true);
     s.keep_quarter = a.flag("keep_quarter");
     s.keep_mip_tail = a.flag("keep_mip_tail");
     if (auto v = a.value("deep_stream"))

@@ -23,7 +23,7 @@ struct Settings
     double memory_target = MEMORY_TARGET_MIB;
     int max_texture_size = 0;
     bool no_mips = false, no_compress = false;
-    bool stream_textures = false, keep_quarter = false, keep_mip_tail = false;
+    bool stream_textures = true, keep_quarter = false, keep_mip_tail = false;
     double upgrade_budget = 96, stream_growth = 0;
     std::string deep_stream;
     // sounds
