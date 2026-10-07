@@ -1,6 +1,6 @@
 # t4ff and CoD Xe T4: handoff notes
 
-State of the work as of 2026-10-05 (the sections below date from 2026-09-28 on unless marked), for
+State of the work as of 2026-10-06 (the sections below date from 2026-09-28 on unless marked), for
 whoever (person or Claude session) picks it up next. The [README](README.md) explains what t4ff does and
 how to use it; this file is about where the work stands, the rules it follows, what is open, what
 was already tried, and how things were checked.
@@ -11,7 +11,7 @@ To continue in a new Claude Code session (for example one running on the tester'
 can run t4ff on the real files and read the Xenia and Watson logs directly), give it this:
 
 > Read `tools/t4ff/HANDOFF.md` on branch `claude/charming-ptolemy-rahr6b` of this repository, starting
-> with its "State on 2026-10-05" and "State on 2026-10-04" sections, and continue from there. Follow
+> with its "State on 2026-10-06" and "State on 2026-10-04" sections, and continue from there. Follow
 > its working rules.
 
 Everything below is in the repository. Nothing from the earlier cloud sessions (their scratch
@@ -19,7 +19,53 @@ files, sample downloads, analysis scripts) carried over: the samples come from t
 under [Environment](#environment), and the checks are described under
 [Investigation toolbox](#investigation-toolbox).
 
-## State on 2026-10-05: the native port (read this first)
+## State on 2026-10-06: the native port is done (read this first)
+
+**Where it stands.** All eight steps of the C++ port are done, committed and pushed on
+`claude/charming-ptolemy-rahr6b` (the last is e5e1526, "step 8: the window"). The working tree holds
+nothing else uncommitted but the turret diagnostics, which are not meant to ship (the table under
+"State on 2026-10-03"). The programs are `tools/t4ff/native/build/Release/t4ff.exe` (the window) and
+`t4ff-cli.exe` (the Python t4ff's command line), built from `tools/t4ff/native`:
+
+```sh
+"C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -S . -B build -G "Visual Studio 17 2022" -A x64
+"C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" --build build --config Release
+```
+
+How the native output is checked against the Python (from `tools/t4ff`; native README, "Checking it
+against the Python t4ff"):
+- `compare_maps.py`: both programs convert each map with the same command line; zones, node dumps and
+  every file of the map's folder must be identical (`--sounds` for the `.xma` files, `--extra=...`
+  for more options). Step 7's run of the eight test maps, about 35 minutes (nearly all of it the
+  Python), with `D` the Downloads folder:
+
+```sh
+python native/tools/compare_maps.py "<out dir>" --budget auto \
+    --console-zone "$D/Compressed/Call of Duty - World at War (axekin.com).iso/WaW/_codxe/t4/usermaps" \
+    --console-zone "$D/zone" --iwd "$D/Compressed/Call of Duty World at War B252004~AG/Call of Duty World at War/main" \
+    "$D/nazi_zombie_simp" "$D/Mini-Labor v1.2" "$D/NukeCraft" "$D/Compressed/SuperMario64" \
+    "$D/kinodertoten_updated/kinodertoten.ff" "$D/Kino Rezurrection 1.06" "$D/Matrix" "$D/nazi_zombie_dead_sand"
+```
+
+- `python native/tools/gui_args_check.py`: the window's command lines against the Python window's.
+- `native/tools/regex_check.py` (its three commands are in the native README): the regex engine
+  against Python's `re`.
+
+**Open after step 8:**
+1. **The window has not been used with a mouse yet.** It was checked by drawing itself into pictures
+   (`t4ff.exe --dev-screenshot`, see step 8 below), and its conversions by `--dev-run`. Not tried:
+   Windows' file dialogs, dragging from Explorer, moving it to a monitor of another DPI, and
+   `t4ff-cli gui` actually starting it (only its error, when `t4ff.exe` is missing). The user's first
+   session with it is the test.
+2. **Map names outside ASCII:** a few places build paths from narrow strings, so a map whose name has
+   other characters may get wrong paths. Every test map is ASCII; fix before such a map comes.
+3. **Python and native both live.** Until the user says the native program replaces the Python t4ff,
+   a change to the conversion goes into both, checked with `compare_maps.py`. Nothing is packaged for
+   release (the two `.exe` files run as they are; `setup` puts the encoder in `bin` next to them).
+4. Speed and memory ideas are under "Things noted for later steps" below; the console items
+   (real hardware, the Simpsons, Dead Sand, Mini-Labor) are in the older sections and Next steps.
+
+The step by step record follows.
 
 **The user's request:** t4ff "cant stay in python due to efficiency issues". It is being rewritten in
 C++ as a Windows program, `tools/t4ff/native` ([README](native/README.md)), in eight steps. The user
@@ -29,8 +75,8 @@ in `native/third_party`).
 
 **The Python t4ff stays the reference.** Each native step is checked by comparing its output with the
 Python output byte for byte on real fastfiles (`native/tools/py_reference.py` gives the Python side).
-Keep fixing and improving the Python t4ff where the work needs it until the native one has caught
-up (step 7). A change to the Python must be carried over to the native code by the step that ports it.
+The native one has caught up (step 7 gave it the Python's command line), so a change to the
+conversion now goes into both (Open after step 8, item 3).
 
 **Step 1 (foundation) is done:** fastfiles, structure layouts (generated into `native/data` by
 `native/tools/gen_schema.py`), zone code commands, and the zone reader and writer.
@@ -386,6 +432,8 @@ What the maintainer has (paths on their Windows PC; adapt):
 | Xenia Canary | first test; its `xenia.log` holds the game's console when `log_console` is on |
 | RGH Xbox 360 with xbWatson and XeXMenu's FTP server | real hardware test; xbWatson shows the game's debug output |
 | Visual Studio 2010 + Xbox 360 SDK | building CoD Xe (`tools\build-codxe.bat`) |
+| Visual Studio 2022 (C++ desktop workload, its bundled CMake) | building t4ff native (`tools/t4ff/native`) |
+| FFmpeg (`C:\ffmpeg\bin`, on PATH) | pictures (loading screens) and compressed sounds, for both t4ffs |
 
 The maintainer's usual conversion (placeholders for their paths):
 
@@ -396,6 +444,9 @@ python -m t4ff convert "<PC usermap folder>" -o "<output folder>" ^
     --iwd "<PC World at War folder>" [--name "The Simpsons"] [--loading-image picture.png]
 python -m t4ff menu "<game>\_codxe\t4"
 ```
+
+The native `t4ff-cli.exe` takes the same command lines (`t4ff-cli convert ...`, `t4ff-cli menu ...`),
+and the window `t4ff.exe` runs them for a list of maps.
 
 `codxe.json` for testing: `"log_console": true` (the game's console and script errors go to the
 debug output), and `"thread_watch": true` when a map hangs or crashes without an error (see
@@ -536,7 +587,7 @@ build script.
   copy (`stream_textures(stock_texture=...)`): memory neutral, the top level streams.
 - Kino (2026-10-02, evening): 364 textures stream (127 PC stock), the world's tree has 858 surfaces and
   314 static models, 156.4 MiB of main physical memory; a scripted tour (teleports to 10 places) had 142
-  `.hi` files served, none failed (scratchpad `t4ff_test_tour.gsc`).
+  `.hi` files served, none failed (`dev/xenia/t4ff_test_tour.gsc`).
 - **`images.pak`** (2026-10-02, night): a map's streamed levels are one file in its folder, not a
   `highmip` folder (`stream.PakWriter`, version 2, big endian): a 32 byte header (`T4FFPAK1`, version,
   count, index offset, index size), the entries 4 KiB aligned (TU7's loader opens with
@@ -608,11 +659,11 @@ build script.
   `usermaps\<map>\highmip\<file>` when that exists (`ResolveHighmipPath`, fastfiles.cpp; logs
   `highmip: <path>`). The dev's choice: the game's files stay untouched.
 - **Title Update 7 vs the disc executable.** Xenia runs TU7 (`content\0000000000000000\4156081C\000B0000`);
-  `scratchpad/ida/default.xex.i64` is the disc's original executable, whose addresses differ (CoD Xe's
+  `Downloads\ida_dbs\waw_disc_default_xex.i64` is the disc's original executable, whose addresses differ (CoD Xe's
   TU7 symbols land mid-function there). Game logic found there holds; addresses for hooks must come
   from TU7: CoD Xe dumps the running image when a file `_codxe	4\dump_executable` exists
   (`dump_executable.bin`, 50.6 MB, then the copy stalls on the unmapped tail: kill Xenia, delete the
-  marker), loaded in IDA as `idat -A -c -TBinary -pppc -b8200000 dump.bin` (`scratchpad/ida/tu7.bin.i64`).
+  marker), loaded in IDA as `idat -A -c -TBinary -pppc -b8200000 dump.bin` (`Downloads\ida_dbs\waw_tu7_dump.i64`).
   TU7's highmip path is `%s\highmip%s\%s.hi` (an optional subfolder), its loader 0x824457D0.
 - **Black Ops (T5, 360 disc in Downloads)**: its fastfiles are Salsa20 encrypted (`PHEEBs71`); textures
   stream in mip parts from `images.pak` (2.3 GB) and `images_low.pak` (lowest mips), sounds from
@@ -992,7 +1043,7 @@ Format facts learned in this work that are not in the README:
 | `codxe-build: src/game/t4/sp/components/fastfiles.cpp` | CoD Xe: usermap fastfiles, loose sounds, `images.pak` and `highmip` serving, `dump_executable` |
 | `Downloads\ida_dbs`, `Downloads\bo1_tools` | IDA databases (WaW disc, WaW TU7, Black Ops 1); the Black Ops 1 fastfile decrypter |
 | `tools/t4ff/t4ff/zone.py` | zone reader and writer, `Node`, `Ptr` |
-| `tools/t4ff/native/` | the C++ port (GPL-3.0): `src/core` (zone reader and writer...), `src/cli`, `data`, README |
+| `tools/t4ff/native/` | the C++ port (GPL-3.0): `src/core` (zones, textures, regex...), `src/convert` (the passes), `src/audio`, `src/app` (the conversion, usermaps, deps), `src/cli` (t4ff-cli), `src/gui` (t4ff.exe), `data`, `tools` (the checks against the Python), README |
 | `tools/t4ff/t4ff/convert.py` | the converter, pointer fixing, shared data adoption |
 | `tools/t4ff/t4ff/assets.py` | per asset rules (images, materials, sounds, weapons...) |
 | `tools/t4ff/t4ff/images.py`, `xenos.py`, `dxt.py` | textures: formats, tiling, cube maps, DXN |
