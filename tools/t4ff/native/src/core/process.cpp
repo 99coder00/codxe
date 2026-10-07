@@ -11,7 +11,6 @@ namespace t4ff
 {
 namespace
 {
-// one argument as CommandLineToArgvW reads it back
 std::wstring quote(const std::wstring &arg)
 {
     if (!arg.empty() && arg.find_first_of(L" \t\n\v\"") == std::wstring::npos)
@@ -167,5 +166,36 @@ std::filesystem::path find_on_path(const std::wstring &name)
     if (n && n < MAX_PATH)
         return buf;
     return {};
+}
+
+bool launch(const std::vector<std::wstring> &args)
+{
+    std::wstring cmdline;
+    for (const auto &a : args)
+        cmdline += (cmdline.empty() ? L"" : L" ") + quote(a);
+    std::vector<wchar_t> line(cmdline.begin(), cmdline.end());
+    line.push_back(0);
+    STARTUPINFOW si{};
+    si.cb = sizeof si;
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(nullptr, line.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi))
+        return false;
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    return true;
+}
+
+std::wstring quote_argument(const std::wstring &arg)
+{
+    return quote(arg);
+}
+
+void opt_out_of_power_throttling()
+{
+    PROCESS_POWER_THROTTLING_STATE throttling{};
+    throttling.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+    throttling.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+    throttling.StateMask = 0;
+    SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &throttling, sizeof throttling);
 }
 } // namespace t4ff

@@ -41,6 +41,7 @@
 #include "core/fastfile.h"
 #include "core/image.h"
 #include "core/platforms.h"
+#include "core/process.h"
 #include "core/pyre.h"
 #include "core/pystr.h"
 #include "core/threads.h"
@@ -599,13 +600,8 @@ int usage()
 
 int wmain(int argc, wchar_t **argv)
 {
-    // full speed, also when the console is not in front: Windows 11 runs background processes as
-    // "efficiency mode" (EcoQoS: slower cores, lower clocks) unless they opt out
-    PROCESS_POWER_THROTTLING_STATE throttling{};
-    throttling.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
-    throttling.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
-    throttling.StateMask = 0;
-    SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &throttling, sizeof throttling);
+    // full speed, also when the console is not in front
+    opt_out_of_power_throttling();
     // the Python t4ff's command line first (t4ff_cli.h); the developer commands otherwise
     try
     {

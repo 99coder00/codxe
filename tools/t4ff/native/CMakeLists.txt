@@ -80,3 +80,36 @@ if(MSVC)
   # the zone tree is walked recursively, as the game's loader does
   target_link_options(t4ff-cli PRIVATE /STACK:67108864)
 endif()
+
+# Dear ImGui (third_party/imgui, MIT) with its Win32 and Direct3D 11 backends
+set(IMGUI_DIR third_party/imgui)
+add_library(imgui STATIC
+  ${IMGUI_DIR}/imgui.cpp
+  ${IMGUI_DIR}/imgui_draw.cpp
+  ${IMGUI_DIR}/imgui_tables.cpp
+  ${IMGUI_DIR}/imgui_widgets.cpp
+  ${IMGUI_DIR}/backends/imgui_impl_win32.cpp
+  ${IMGUI_DIR}/backends/imgui_impl_dx11.cpp
+  ${IMGUI_DIR}/misc/cpp/imgui_stdlib.cpp
+)
+target_include_directories(imgui PUBLIC ${IMGUI_DIR})
+if(MSVC)
+  target_compile_options(imgui PRIVATE /W0)
+endif()
+
+# the window (t4ff.exe); started with --worker it runs a command of t4ff-cli's for the window
+add_executable(t4ff WIN32
+  src/gui/main.cpp
+  src/gui/app.cpp
+  src/gui/settings.cpp
+  src/gui/worker.cpp
+  src/gui/theme.cpp
+  src/gui/shell.cpp
+  src/cli/t4ff_cli.cpp
+  src/core/resources.rc
+)
+target_link_libraries(t4ff PRIVATE t4ffcore imgui d3d11 dxgi d3dcompiler dwmapi shell32 ole32)
+if(MSVC)
+  target_compile_options(t4ff PRIVATE /W4 /permissive-)
+  target_link_options(t4ff PRIVATE /STACK:67108864)
+endif()

@@ -116,9 +116,10 @@ memory loop (native README).
 - Covered: `info`, `roundtrip`, `convert <map> -o <output>` (with `find_usermap`), `menu`, `streams`,
   `setup`, `--no-install` and `--progress-lines`. Parsing is argparse's: unique prefixes,
   `--opt=value`, `--no-` pairs, and its error messages and exit codes.
-- `gui` waits for step 8. The developer commands stay; `convert --out` is the developer form.
+- `gui` opens the window (step 8). The developer commands stay; `convert --out` is the developer
+  form.
 - The conversion moved out of `main.cpp` into `src/app/convert.*`, its messages through a log
-  callback and its progress through `src/core/progress.*` (the window's sink comes with step 8).
+  callback and its progress through `src/core/progress.*`.
 - `menu.py`'s Custom Maps list (`make_dynamic`) is `src/convert/usermaps_menu.*`. The `menu` command
   on CoD Xenon's 0.2.0 `patch_ui.ff`, a rerun from its `.orig`, and CoD Xenon's 0.3.0 list
   (`--menu-zone`) give the Python's files and output.
@@ -129,8 +130,26 @@ memory loop (native README).
 - `t4ff-cli` opts out of Windows 11's power throttling (EcoQoS). A background console was getting
   slower cores: the fastfile's compression took 4.6 s instead of 1.2 s.
 
-**Next, step 8: the GUI** (Dear ImGui), with a simple mode and an advanced one, running conversions
-in the program itself (`convert_usermap`, its log and progress sinks).
+**Step 8 (the window) is done:** `t4ff.exe`, Dear ImGui on Direct3D 11 (`src/gui/*`, native README
+"The window"). All eight steps are done.
+- A queue of usermaps (dropped on the window or added), the Xbox 360 fastfiles, the output folder.
+  Convert converts the waiting maps one after another; each row shows the state, the memory the map
+  needs, the time, and opens the map's folder. A banner says to copy `_codxe` to the console.
+- Simple mode: those three only. Advanced mode adds every option of `convert` and, for the selected
+  map, its name in the map lists, its loading picture and its command line.
+- Tools: `info`, `menu`, `streams`, `setup`. Dark and light themes (Windows' setting by default), the
+  monitor's DPI. Settings in `%APPDATA%\t4ff\window.json`, taken from the Python window's `gui.json`
+  the first time.
+- **Each command runs in a process of its own,** `t4ff.exe --worker <t4ff-cli's command line>`, as the
+  Python window runs `python -m t4ff` (not in the window's process, as planned before). The window
+  stays responsive, a conversion's memory goes with its process, a crash fails one map, not the
+  window, and Stop ends the process and the encoders it started at once (a job object).
+- The window builds the command line as the Python window's `convert_args` does, plus the options it
+  lacks. `native/tools/gui_args_check.py` compares the two for nine saved settings (old versions too):
+  identical. Maps converted through the window (Matrix, Dead Sand; Mini-Labor with its 3,043 sounds)
+  give step 7's and `t4ff-cli`'s files.
+- `t4ff.exe`'s `--dev-*` options draw the hidden window into a PNG (`--dev-screenshot`), after a run of
+  the queue (`--dev-run`) if asked: how the window was checked without a mouse.
 
 **Memory (fixed before step 3).** Nodes now view their zone's bytes instead of copying them, and
 zones can come from a zone cache: inflated once into `%LOCALAPPDATA%\t4ff\zone_cache`, then

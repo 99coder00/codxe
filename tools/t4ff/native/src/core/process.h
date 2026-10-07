@@ -40,4 +40,14 @@ class TempDir
 
 // the program on PATH (with .exe added), empty when none
 std::filesystem::path find_on_path(const std::wstring &name);
+
+// starts a program (args[0]) and leaves it running on its own; false when it cannot start
+bool launch(const std::vector<std::wstring> &args);
+
+// one argument of a command line, as CommandLineToArgvW reads it back
+std::wstring quote_argument(const std::wstring &arg);
+
+// Full speed, also when the program is not in front: Windows 11 runs background processes in
+// "efficiency mode" (EcoQoS: slower cores, lower clocks) unless they opt out.
+void opt_out_of_power_throttling();
 } // namespace t4ff

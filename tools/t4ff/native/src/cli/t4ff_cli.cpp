@@ -10,6 +10,8 @@
 #include <set>
 #include <stdexcept>
 
+#include <windows.h>
+
 #include "app/convert.h"
 #include "app/deps.h"
 #include "app/usermap.h"
@@ -20,6 +22,7 @@
 #include "convert/usermaps_menu.h"
 #include "core/fastfile.h"
 #include "core/platforms.h"
+#include "core/process.h"
 #include "core/progress.h"
 #include "core/pystr.h"
 #include "core/zone.h"
@@ -892,6 +895,30 @@ int cmd_setup(const Parsed &a)
     return 0;
 }
 
+Command gui_command()
+{
+    Command c;
+    c.prog = "t4ff-cli gui";
+    c.usage = "t4ff-cli gui [-h]";
+    c.description = "open the converter window";
+    return c;
+}
+
+int cmd_gui()
+{
+    // the window is t4ff.exe, next to this program
+    std::wstring exe(MAX_PATH, L'\0');
+    exe.resize(GetModuleFileNameW(nullptr, exe.data(), static_cast<DWORD>(exe.size())));
+    fs::path window = fs::path(exe).parent_path() / L"t4ff.exe";
+    std::error_code ec;
+    if (!fs::is_regular_file(window, ec) || !launch({window.wstring()}))
+    {
+        fprintf(stderr, "t4ff-cli gui: cannot start %s (the window, next to t4ff-cli.exe)\n", text(window).c_str());
+        return 1;
+    }
+    return 0;
+}
+
 int top_usage()
 {
     fputs("usage: t4ff-cli [-h] [--no-install] [--progress-lines] {info,roundtrip,convert,menu,streams,gui,setup} ...\n\n"
@@ -975,10 +1002,7 @@ int run(const std::vector<std::wstring> &all)
     else if (command == L"setup")
         c = setup_command();
     else
-    {
-        fputs("t4ff-cli gui: the window comes with step 8 of the native port (python -m t4ff gui has it)\n", stderr);
-        return 1;
-    }
+        c = gui_command();
     Parsed parsed;
     try
     {
@@ -1000,6 +1024,8 @@ int run(const std::vector<std::wstring> &all)
             return cmd_menu(parsed);
         if (command == L"streams")
             return cmd_streams(parsed);
+        if (command == L"gui")
+            return cmd_gui();
         return cmd_setup(parsed);
     }
     catch (const ArgError &e)

@@ -12,7 +12,7 @@
 
 // Converting a PC usermap for the Xbox 360: the Python t4ff's convert command from the map's fastfiles
 // on (_convert_map, the memory plan, the files of the map's folder). The command lines (t4ff-cli
-// convert, in both its forms) and the window fill the settings.
+// convert, in both its forms) fill the settings; the window runs t4ff-cli's command line.
 namespace t4ff
 {
 namespace fs = std::filesystem;

@@ -173,6 +173,22 @@ class Parser
                 unsigned code = 0;
                 std::from_chars(text.data() + pos, text.data() + pos + 4, code, 16);
                 pos += 4;
+                // a character past U+FFFF: a surrogate pair
+                if (code >= 0xD800 && code < 0xDC00 && pos + 6 <= text.size() && text[pos] == '\\' && text[pos + 1] == 'u')
+                {
+                    unsigned low = 0;
+                    std::from_chars(text.data() + pos + 2, text.data() + pos + 6, low, 16);
+                    if (low >= 0xDC00 && low < 0xE000)
+                    {
+                        pos += 6;
+                        code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
+                        out += static_cast<char>(0xF0 | (code >> 18));
+                        out += static_cast<char>(0x80 | ((code >> 12) & 0x3F));
+                        out += static_cast<char>(0x80 | ((code >> 6) & 0x3F));
+                        out += static_cast<char>(0x80 | (code & 0x3F));
+                        break;
+                    }
+                }
                 // the layouts are ASCII; anything else is kept as UTF-8
                 if (code < 0x80)
                     out += static_cast<char>(code);

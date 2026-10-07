@@ -18,14 +18,55 @@ cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release
 ```
 
-The program is `build/Release/t4ff-cli.exe`, and it needs nothing else to run. The structure layouts
-and commands are in `data/`, compiled into the program as resources. After changing
+The programs are `build/Release/t4ff.exe` (the window) and `build/Release/t4ff-cli.exe` (the command
+line), and they need nothing else to run. The structure layouts and commands are in `data/`,
+compiled into both as resources. After changing
 OpenAssetTools' definitions or t4ff's `defs/`, regenerate them from `tools/t4ff` (with the Python
 t4ff's requirements installed):
 
 ```bash
 python native/tools/gen_schema.py
 ```
+
+## The window
+
+`t4ff.exe` is the converter window (the Python's `python -m t4ff gui`; `t4ff-cli gui` opens it too).
+Usermap folders or map fastfiles given on its command line, or dropped on it, join its list.
+- **Simple mode:** the usermaps to convert, the Xbox 360 fastfiles (best: CoD Xenon's `_codxe\t4`
+  folder) and the output folder. Convert converts the waiting maps of the list one after another.
+  Each map's row shows its state, the memory it needs, the time it took, and opens its folder. When
+  the list is done, a banner says to copy `<output>\_codxe` to the console.
+- **Advanced mode** adds every option of `convert` (memory target, texture budget, streaming, sounds,
+  the map's fastfiles, extra `.iwd` files) and, for the selected map, its name in the map lists, its
+  loading picture and its command line.
+- **Tools:** inspect a fastfile (`info`), update the Custom Maps menu (`menu`), rewrite streamed sounds
+  (`streams`), set up the encoder and FFmpeg (`setup`).
+- What is dropped goes where it belongs: usermaps to the list, Xbox 360 fastfiles and CoD Xenon's
+  folder to the fastfiles, `.iwd` files to the extra ones, a picture to the selected map.
+- Dark and light themes (Windows' setting by default), scaled with the monitor's DPI. The settings are
+  kept in `%APPDATA%\t4ff\window.json`; the first time, they come from the Python window's `gui.json`.
+
+Each command runs in a process of its own, as the Python window runs `python -m t4ff`:
+`t4ff.exe --worker <t4ff-cli's command line>` runs exactly what `t4ff-cli` runs. Its output fills the
+log and its `@progress` lines (`--progress-lines`) the bar. The window stays responsive, a
+conversion's memory goes with its process, a crash fails one map rather than the window, and Stop
+ends the process and the encoders it started at once (they are in one job object). The worker opts
+out of power throttling too: it has no window of its own.
+
+The window builds the command line as the Python window's `convert_args` does, then adds the options
+the Python window lacks. `tools/gui_args_check.py` compares the two for saved settings of the Python
+window (from `tools/t4ff`):
+
+```bash
+python native/tools/gui_args_check.py
+```
+
+`t4ff.exe` has developer options for checking it without a mouse: `--dev-settings <json>` (instead of
+`window.json`), `--dev-import <gui.json>`, `--dev-simple` / `--dev-advanced`, `--dev-theme dark|light`,
+`--dev-size <w> <h>`, `--dev-scale <s>`, `--dev-select <n>`, `--dev-run` (convert the list) and
+`--dev-screenshot <png>`: the window, hidden, is drawn into a PNG once nothing runs any more (or after
+`--dev-screenshot-after <seconds>`), then it quits. `--dev-print-args` prints the command line of each
+map given.
 
 ## Using it
 
@@ -39,6 +80,7 @@ t4ff-cli convert <pc fastfile or usermap folder> -o <output folder> [options]
 t4ff-cli menu <_codxe\t4 folder> [--rows N] [--no-streams] [--menu-zone P]...
 t4ff-cli streams <folder>...
 t4ff-cli setup [--xma2encode P] [--no-test]
+t4ff-cli gui
 ```
 
 `convert` takes the Python's options (`t4ff-cli convert -h` lists them): `--iwd`, `--console-zone`,
@@ -56,7 +98,8 @@ option starts with `--dev`):
 Xe's own list (`--menu-zone`), and gives the maps their names, descriptions, `map.json` and pictures.
 `setup` finds FFmpeg and xma2encode.exe, installs an encoder found in a `.zip` (the Downloads folder,
 or `--xma2encode`) into the `bin` folder next to `t4ff-cli.exe`, and test-encodes a tone. `convert`
-does that install itself unless `--no-install` is given. `gui` comes with step 8.
+does that install itself unless `--no-install` is given. `gui` opens the window, `t4ff.exe` next to
+`t4ff-cli.exe`.
 
 The developer commands (`t4ff-cli dev` lists them):
 
@@ -198,7 +241,7 @@ could change the Python output, but not the C++ output.
 | 5 | Scripts, menus, loading screens | done |
 | 6 | Streaming and the memory planner | done |
 | 7 | Command line parity with the Python t4ff | done |
-| 8 | The GUI (Dear ImGui): simple and advanced modes, queue, results | |
+| 8 | The GUI (Dear ImGui): simple and advanced modes, queue, results | done |
 
 Step 1, checked on 2026-10-05:
 
@@ -351,6 +394,17 @@ The other commands give the Python's files and output:
 - `info --list` and `roundtrip` on a PC and a console zone, and `menu`'s error for a folder without a
   menu zone.
 
+Step 8, checked on 2026-10-06:
+- **Command lines:** `gui_args_check.py` gives the Python window's command lines for nine saved
+  settings (including older versions of its settings file, which it migrates) and two inputs each:
+  18 identical.
+- **Conversions:** Matrix and Dead Sand, converted through the window (hidden, `--dev-run`), give
+  step 7's folders. Mini-Labor with its sounds gives `t4ff-cli`'s files (3,043 `.xma`), the encoders
+  running in the worker's job object.
+- **Stop:** ending the window in the middle of a conversion leaves no process behind.
+- **Screens:** both modes and both themes, at 100% and 125%, drawn by `--dev-screenshot`: empty,
+  converting (the step, its count and the bar), done (memory, time, the banner), and the dialogs.
+
 ## Layout
 
 | Python | C++ |
@@ -378,7 +432,8 @@ The other commands give the Python's files and output:
 | `stream.py`, `memory.py` | `src/convert/stream.*` (`with_mips` in `src/core/image.*`); the memory loop in `src/app/convert.*` |
 | Python's `re`, `str` | `src/core/pyre.*` (a regex engine with `re`'s semantics), `src/core/pystr.*` |
 | `__main__.py` | `src/cli/t4ff_cli.*` (its command line), `src/app/convert.*` (`cmd_convert` from the map's fastfiles on, `_convert_map`), `src/app/usermap.*` (`find_usermap`); `src/cli/main.cpp` (the developer commands) |
-| `progress.py` | `src/core/progress.*` (a sink for the window too) |
+| `progress.py` | `src/core/progress.*` (`--progress-lines` for the window, or a sink) |
+| `gui.py` | `src/gui/*`: `app.*` (the window), `settings.*` (`Settings`, `convert_args`, `advice`), `worker.*` (the worker process), `theme.*`, `shell.*` (Windows' dialogs), `main.cpp` (Direct3D 11, the loop) |
 
 `src/core/threads.*` runs work on every processor, with threads that have stacks as large as the main
 thread's (64 MiB): zones are walked recursively.

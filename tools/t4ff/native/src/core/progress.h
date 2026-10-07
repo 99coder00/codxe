@@ -7,8 +7,8 @@
 //
 // With --progress-lines the converter prints "@progress <done> <total> <step>" lines (total 0: a step
 // without a count), at most five a second within a step, for a window running it as a separate
-// process. In a terminal a counted step prints how far it got every 25%. A window running the
-// conversion itself gets the steps through its sink instead.
+// process (t4ff.exe runs t4ff.exe --worker). In a terminal a counted step prints how far it got every
+// 25%. A program running the conversion itself can take the steps through a sink instead.
 namespace t4ff::progress
 {
 using Sink = std::function<void(int done, int total, const std::string &step)>;
