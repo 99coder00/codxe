@@ -1,6 +1,6 @@
 # t4ff and CoD Xe T4: handoff notes
 
-State of the work as of 2026-10-06 (the sections below date from 2026-09-28 on unless marked), for
+State of the work as of 2026-10-07 (the sections below date from 2026-09-28 on unless marked), for
 whoever (person or Claude session) picks it up next. The [README](README.md) explains what t4ff does and
 how to use it; this file is about where the work stands, the rules it follows, what is open, what
 was already tried, and how things were checked.
@@ -11,13 +11,24 @@ To continue in a new Claude Code session (for example one running on the tester'
 can run t4ff on the real files and read the Xenia and Watson logs directly), give it this:
 
 > Read `tools/t4ff/HANDOFF.md` on branch `claude/charming-ptolemy-rahr6b` of this repository, starting
-> with its "State on 2026-10-06" and "State on 2026-10-04" sections, and continue from there. Follow
+> with its "State on 2026-10-07", "State on 2026-10-06" and "State on 2026-10-04" sections, and continue from there. Follow
 > its working rules.
 
 Everything below is in the repository. Nothing from the earlier cloud sessions (their scratch
 files, sample downloads, analysis scripts) carried over: the samples come from the files listed
 under [Environment](#environment), and the checks are described under
 [Investigation toolbox](#investigation-toolbox).
+
+## State on 2026-10-07: the second task, our own Xenia build (read this first)
+
+After the native port, the user asked for our own Xenia Canary build tailored to the 360 Call of
+Duty titles (testing and debugging; fix obvious bugs found). It lives in another repository:
+`C:\Users\Hunter\Downloads\xenia-canary`, branch `cod` (local only, no remote of the user's yet).
+**Its handoff is `tools/cod/HANDOFF.md` there: read it to continue.** Step 1 (a build that runs
+World at War with CoD Xe) is done; step 2 (a test harness inside Xenia: scripted runs, screenshots,
+a guest log, a scripted controller, patch switches, files served in place of the game's) is written
+and committed as work in progress (5dda2a057), not yet compiled. Tests run in the run folder
+`Downloads\xenia-cod`, never in the user's own Xenia or game folder settings.
 
 ## State on 2026-10-06: the native port is done (read this first)
 
