@@ -110,6 +110,14 @@ void read_fields(const json::Value &v, Settings &s)
     read_bool(v, "load_zone", s.load_zone);
     read_bool(v, "t4_layout", s.t4_layout);
     read_bool(v, "allow_unverified", s.allow_unverified);
+    read_bool(v, "codxe_settings", s.codxe_settings);
+    read_bool(v, "codxe_start_map", s.codxe_start_map);
+    read_bool(v, "codxe_log_console", s.codxe_log_console);
+    read_bool(v, "codxe_thread_watch", s.codxe_thread_watch);
+    read_bool(v, "codxe_dump_rawfile", s.codxe_dump_rawfile);
+    read_bool(v, "codxe_dump_map_ents", s.codxe_dump_map_ents);
+    read_string(v, "codxe_start_command", s.codxe_start_command);
+    read_string(v, "codxe_active_mod", s.codxe_active_mod);
     read_bool(v, "advanced", s.advanced);
     read_string(v, "theme", s.theme);
     read_int(v, "window_w", s.window_w);
@@ -273,6 +281,8 @@ Settings load_settings(const fs::path &path, const fs::path &python)
     s.jobs = std::max(0, s.jobs);
     if (s.theme != "dark" && s.theme != "light")
         s.theme = "system";
+    if (s.codxe_start_command != "map")
+        s.codxe_start_command = "devmap";
     return s;
 }
 
@@ -308,6 +318,14 @@ void save_settings(const Settings &s, const fs::path &path)
     w.put("load_zone", s.load_zone);
     w.put("t4_layout", s.t4_layout);
     w.put("allow_unverified", s.allow_unverified);
+    w.put("codxe_settings", s.codxe_settings);
+    w.put("codxe_start_map", s.codxe_start_map);
+    w.put("codxe_log_console", s.codxe_log_console);
+    w.put("codxe_thread_watch", s.codxe_thread_watch);
+    w.put("codxe_dump_rawfile", s.codxe_dump_rawfile);
+    w.put("codxe_dump_map_ents", s.codxe_dump_map_ents);
+    w.put("codxe_start_command", s.codxe_start_command);
+    w.put("codxe_active_mod", s.codxe_active_mod);
     w.put("advanced", s.advanced);
     w.put("theme", s.theme);
     w.put("window_w", s.window_w);

@@ -5,7 +5,8 @@
 //
 // Its developer options, for checking the window without a hand on the mouse: --dev-settings <json>
 // (instead of %APPDATA%\t4ff\window.json), --dev-simple / --dev-advanced, --dev-theme dark|light,
-// --dev-size <w> <h>, --dev-scale <s>, --dev-select <n> (the n-th map of the list), --dev-run (convert
+// --dev-size <w> <h>, --dev-scale <s>, --dev-select <n> (the n-th map of the list), --dev-options-scroll
+// <share> (the advanced options scrolled down that far, 0 to 1), --dev-run (convert
 // the list) and --dev-screenshot <png> (the window, hidden, drawn into a picture once everything is
 // settled, or --dev-screenshot-after <seconds>; then it quits); --dev-import <gui.json> (the Python
 // window's settings, when the --dev-settings file does not exist), --dev-print-args (the command line
@@ -248,7 +249,7 @@ struct Options
     fs::path settings, screenshot, import;
     std::string mode, theme;
     int width = 0, height = 0, select = -1;
-    float scale = 0, shot_after = 0;
+    float scale = 0, shot_after = 0, options_scroll = -1;
     bool run = false, print_args = false;
 };
 
@@ -280,6 +281,8 @@ Options parse_options(const std::vector<std::wstring> &args)
             o.select = _wtoi(args[++i].c_str());
         else if (a == L"--dev-screenshot-after" && more)
             o.shot_after = static_cast<float>(_wtof(args[++i].c_str()));
+        else if (a == L"--dev-options-scroll" && more)
+            o.options_scroll = static_cast<float>(_wtof(args[++i].c_str()));
         else if (a == L"--dev-import" && more)
             o.import = args[++i];
         else if (a == L"--dev-print-args")
@@ -383,6 +386,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show)
         app.add_paths(opt.paths);
         if (opt.select >= 0)
             app.select_job(opt.select);
+        if (opt.options_scroll >= 0)
+            app.scroll_options(opt.options_scroll);
         if (opt.run)
             app.start_queue();
 

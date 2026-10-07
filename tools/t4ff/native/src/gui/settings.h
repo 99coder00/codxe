@@ -32,6 +32,10 @@ struct Settings
     bool mono_sounds = false, mono_streams = false, no_sounds = false;
     // the map's fastfiles and folder
     bool no_mod = false, no_patch = false, load_zone = true, t4_layout = true, allow_unverified = false;
+    // CoD Xe's settings (codxe.json, codxe_config.h), written after each map converted
+    bool codxe_settings = false, codxe_start_map = false;
+    bool codxe_log_console = false, codxe_thread_watch = false, codxe_dump_rawfile = false, codxe_dump_map_ents = false;
+    std::string codxe_start_command = "devmap", codxe_active_mod;
     // the window
     bool advanced = false;
     std::string theme = "system"; // system, dark or light

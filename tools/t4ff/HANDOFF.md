@@ -183,6 +183,15 @@ memory loop (native README).
   needs, the time, and opens the map's folder. A banner says to copy `_codxe` to the console.
 - Simple mode: those three only. Advanced mode adds every option of `convert` and, for the selected
   map, its name in the map lists, its loading picture and its command line.
+- CoD Xe's settings (advanced mode, off by default; asked for on 2026-10-06): after each map converted,
+  the window writes `<output>\_codxe\t4\codxe.json` with CoD Xe's debug switches (`log_console`,
+  `thread_watch`, `dump_rawfile`, `dump_map_ents`), the active mod, and a `startup_command` (`devmap
+  <map>`) that starts the map converted last when the game is up, as the headless tests did. It
+  merges: the file's other keys, order and CRLF stay; an invalid file is left alone. These are run
+  time settings, so no CoD Xe build is involved (the only compile-time switches are
+  `STREAM_LOG_FULL` and `STREAM_LOG_SWAPS` in `streaming.cpp`, left out on purpose). A
+  `startup_command` starts the map every time the game starts until it is turned off and written
+  again ("Write now").
 - Tools: `info`, `menu`, `streams`, `setup`. Dark and light themes (Windows' setting by default), the
   monitor's DPI. Settings in `%APPDATA%\t4ff\window.json`, taken from the Python window's `gui.json`
   the first time.

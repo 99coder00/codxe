@@ -105,6 +105,7 @@ add_executable(t4ff WIN32
   src/gui/worker.cpp
   src/gui/theme.cpp
   src/gui/shell.cpp
+  src/gui/codxe_config.cpp
   src/cli/t4ff_cli.cpp
   src/core/resources.rc
 )

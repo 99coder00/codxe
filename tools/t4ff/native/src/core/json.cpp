@@ -2,6 +2,7 @@
 
 #include <cctype>
 #include <charconv>
+#include <cstdio>
 #include <stdexcept>
 
 namespace t4ff::json
@@ -247,5 +248,131 @@ std::string Value::string_or(std::string_view key, std::string_view fallback) co
 Value parse(std::string_view text)
 {
     return Parser(text).document();
+}
+
+namespace
+{
+void quote(std::string &out, const std::string &s)
+{
+    out += '"';
+    for (char c : s)
+    {
+        switch (c)
+        {
+        case '"': out += "\\\""; break;
+        case '\\': out += "\\\\"; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        default:
+            if (static_cast<unsigned char>(c) < 0x20)
+            {
+                char buf[8];
+                snprintf(buf, sizeof buf, "\\u%04x", static_cast<unsigned char>(c));
+                out += buf;
+            }
+            else
+                out += c;
+        }
+    }
+    out += '"';
+}
+
+void write(std::string &out, const Value &v, int depth, const std::string &newline)
+{
+    std::string pad(static_cast<size_t>(depth + 1) * 2, ' '), end_pad(static_cast<size_t>(depth) * 2, ' ');
+    switch (v.kind)
+    {
+    case Value::Kind::Null: out += "null"; break;
+    case Value::Kind::Bool: out += v.boolean ? "true" : "false"; break;
+    case Value::Kind::Number: {
+        char buf[32];
+        if (v.number == static_cast<double>(static_cast<int64_t>(v.number)) && v.number > -1e15 && v.number < 1e15)
+            snprintf(buf, sizeof buf, "%lld", static_cast<long long>(v.number));
+        else
+            snprintf(buf, sizeof buf, "%.17g", v.number);
+        out += buf;
+        break;
+    }
+    case Value::Kind::String: quote(out, v.string); break;
+    case Value::Kind::Array:
+        if (v.array.empty())
+        {
+            out += "[]";
+            break;
+        }
+        out += "[" + newline;
+        for (size_t i = 0; i < v.array.size(); ++i)
+        {
+            out += pad;
+            write(out, v.array[i], depth + 1, newline);
+            out += (i + 1 < v.array.size() ? "," : "") + newline;
+        }
+        out += end_pad + "]";
+        break;
+    case Value::Kind::Object:
+        if (v.object.empty())
+        {
+            out += "{}";
+            break;
+        }
+        out += "{" + newline;
+        for (size_t i = 0; i < v.object.size(); ++i)
+        {
+            out += pad;
+            quote(out, v.object[i].first);
+            out += ": ";
+            write(out, v.object[i].second, depth + 1, newline);
+            out += (i + 1 < v.object.size() ? "," : "") + newline;
+        }
+        out += end_pad + "}";
+        break;
+    }
+}
+} // namespace
+
+std::string dump(const Value &v, const std::string &newline)
+{
+    std::string out;
+    write(out, v, 0, newline);
+    return out + newline;
+}
+
+void Value::set(std::string_view key, Value value)
+{
+    for (auto &[k, v] : object)
+        if (k == key)
+        {
+            v = std::move(value);
+            return;
+        }
+    object.emplace_back(std::string(key), std::move(value));
+}
+
+bool Value::erase(std::string_view key)
+{
+    for (auto it = object.begin(); it != object.end(); ++it)
+        if (it->first == key)
+        {
+            object.erase(it);
+            return true;
+        }
+    return false;
+}
+
+Value Value::of(bool b)
+{
+    Value v;
+    v.kind = Kind::Bool;
+    v.boolean = b;
+    return v;
+}
+
+Value Value::of(const std::string &s)
+{
+    Value v;
+    v.kind = Kind::String;
+    v.string = s;
+    return v;
 }
 } // namespace t4ff::json

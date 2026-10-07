@@ -39,6 +39,13 @@ Usermap folders or map fastfiles given on its command line, or dropped on it, jo
 - **Advanced mode** adds every option of `convert` (memory target, texture budget, streaming, sounds,
   the map's fastfiles, extra `.iwd` files) and, for the selected map, its name in the map lists, its
   loading picture and its command line.
+- **CoD Xe's settings** (advanced mode, off by default): after each map converted, the window writes
+  CoD Xe's `codxe.json` in the output's `_codxe\t4` folder (`_codxe` without the t4 layout), which CoD
+  Xe reads when the game starts: its debug switches (`log_console`, `thread_watch`, `dump_rawfile`,
+  `dump_map_ents`), the active mod, and a `startup_command` that starts the map converted last as soon
+  as the game is up (`devmap <map>` or `map <map>`, as the headless tests did). The file's other
+  settings, their order and its line ends stay; an invalid file is left as it is, with a warning.
+  Write now writes them without converting (to turn the startup command off again, for one).
 - **Tools:** inspect a fastfile (`info`), update the Custom Maps menu (`menu`), rewrite streamed sounds
   (`streams`), set up the encoder and FFmpeg (`setup`).
 - What is dropped goes where it belongs: usermaps to the list, Xbox 360 fastfiles and CoD Xenon's
@@ -63,7 +70,8 @@ python native/tools/gui_args_check.py
 
 `t4ff.exe` has developer options for checking it without a mouse: `--dev-settings <json>` (instead of
 `window.json`), `--dev-import <gui.json>`, `--dev-simple` / `--dev-advanced`, `--dev-theme dark|light`,
-`--dev-size <w> <h>`, `--dev-scale <s>`, `--dev-select <n>`, `--dev-run` (convert the list) and
+`--dev-size <w> <h>`, `--dev-scale <s>`, `--dev-select <n>`, `--dev-options-scroll <0 to 1>` (the
+advanced options scrolled down), `--dev-run` (convert the list) and
 `--dev-screenshot <png>`: the window, hidden, is drawn into a PNG once nothing runs any more (or after
 `--dev-screenshot-after <seconds>`), then it quits. `--dev-print-args` prints the command line of each
 map given.
@@ -404,6 +412,10 @@ Step 8, checked on 2026-10-06:
 - **Stop:** ending the window in the middle of a conversion leaves no process behind.
 - **Screens:** both modes and both themes, at 100% and 125%, drawn by `--dev-screenshot`: empty,
   converting (the step, its count and the bar), done (memory, time, the banner), and the dialogs.
+- **CoD Xe's settings:** written into a copy of the game's `codxe.json` (its keys, order and CRLF
+  kept, `log_console` on, `startup_command "devmap matrix"`), turned off again (the startup command
+  removed, the active mod set), into an output without one (a new file), and onto an invalid file
+  (left untouched, a warning in the log).
 
 ## Layout
 
@@ -433,7 +445,7 @@ Step 8, checked on 2026-10-06:
 | Python's `re`, `str` | `src/core/pyre.*` (a regex engine with `re`'s semantics), `src/core/pystr.*` |
 | `__main__.py` | `src/cli/t4ff_cli.*` (its command line), `src/app/convert.*` (`cmd_convert` from the map's fastfiles on, `_convert_map`), `src/app/usermap.*` (`find_usermap`); `src/cli/main.cpp` (the developer commands) |
 | `progress.py` | `src/core/progress.*` (`--progress-lines` for the window, or a sink) |
-| `gui.py` | `src/gui/*`: `app.*` (the window), `settings.*` (`Settings`, `convert_args`, `advice`), `worker.*` (the worker process), `theme.*`, `shell.*` (Windows' dialogs), `main.cpp` (Direct3D 11, the loop) |
+| `gui.py` | `src/gui/*`: `app.*` (the window), `settings.*` (`Settings`, `convert_args`, `advice`), `worker.*` (the worker process), `codxe_config.*` (CoD Xe's `codxe.json`, the window's own), `theme.*`, `shell.*` (Windows' dialogs), `main.cpp` (Direct3D 11, the loop) |
 
 `src/core/threads.*` runs work on every processor, with threads that have stacks as large as the main
 thread's (64 MiB): zones are walked recursively.

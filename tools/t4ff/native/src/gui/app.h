@@ -64,6 +64,11 @@ class App
     void request_close();
     void start_queue();
     void select_job(int index);
+    // the options panel scrolled to this share of its height (screenshots of its lower sections)
+    void scroll_options(float share)
+    {
+        options_scroll_ = share;
+    }
     void save();
 
     bool busy() const
@@ -107,6 +112,7 @@ class App
     void on_exit(int task, int code);
     bool start_next_job();
     void stop();
+    void write_codxe(const std::string &map);
     void check_dependencies();
     Job *find_job(int id);
 
@@ -128,6 +134,7 @@ class App
     void log_panel();
     void options_panel();
     void selected_map_options();
+    void codxe_options();
     void status_bar();
     void popups();
     void show_message(const std::string &title, const std::string &text);
@@ -167,6 +174,7 @@ class App
     std::string advice_key_;
     int console_selected_ = -1, iwd_selected_ = -1;
     double budget_fixed_ = 96;
+    float options_scroll_ = -1;
 
     std::string banner_;
     fs::path banner_folder_;

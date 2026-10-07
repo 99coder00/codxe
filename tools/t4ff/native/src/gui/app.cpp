@@ -14,6 +14,7 @@
 #include "app/usermap.h"
 #include "audio/audio.h"
 #include "core/fastfile.h"
+#include "gui/codxe_config.h"
 #include "gui/shell.h"
 #include "gui/theme.h"
 
@@ -652,6 +653,8 @@ void App::on_exit(int task, int code)
         {
             j->state = JobState::Done;
             ++queue_ok_;
+            if (s_.codxe_settings)
+                write_codxe(j->map_name);
             add_log("Finished: " + j->map_name + (j->memory.empty() ? "" : " needs " + j->memory) + " (" + seconds_text(took) + ").", KIND_GOOD);
             status_ = j->memory.empty() ? "Done" : "Done: the map needs " + j->memory;
         }
@@ -721,6 +724,29 @@ bool App::start_next_job()
         j.state = JobState::Failed;
     }
     return false;
+}
+
+void App::write_codxe(const std::string &map)
+{
+    // CoD Xe's codxe.json next to the converted maps, with the window's CoD Xe settings
+    CodxeConfig c;
+    c.log_console = s_.codxe_log_console;
+    c.thread_watch = s_.codxe_thread_watch;
+    c.dump_rawfile = s_.codxe_dump_rawfile;
+    c.dump_map_ents = s_.codxe_dump_map_ents;
+    c.active_mod = s_.codxe_active_mod;
+    c.active_mod.erase(0, c.active_mod.find_first_not_of(" \t"));
+    c.active_mod.erase(c.active_mod.find_last_not_of(" \t") + 1);
+    c.start_map = s_.codxe_start_map ? map : std::string();
+    c.start_command = s_.codxe_start_command;
+    try
+    {
+        add_log("CoD Xe: " + write_codxe_config(codxe_config_path(path_of(s_.output), s_.t4_layout), c), KIND_NOTE);
+    }
+    catch (const std::exception &e)
+    {
+        add_log(std::string("warning: CoD Xe's settings: ") + e.what(), KIND_WARNING);
+    }
 }
 
 void App::stop()
@@ -1000,6 +1026,8 @@ void App::frame()
         ImGui::BeginChild("options", ImVec2(width, body_h), ImGuiChildFlags_Borders);
         ImGui::PopStyleColor();
         options_panel();
+        if (options_scroll_ >= 0)
+            ImGui::SetScrollY(options_scroll_ * ImGui::GetScrollMaxY());
         ImGui::EndChild();
         ImGui::SameLine(0, em() * 0.9f);
     }
@@ -1311,6 +1339,11 @@ void App::output_section()
     if (ImGui::Button(open))
         open_folder(fs::is_directory(out / L"_codxe", ec) ? out / L"_codxe" : out);
     ImGui::EndDisabled();
+    // set in the advanced mode, they still apply in this one: said here
+    if (s_.codxe_settings && !s_.advanced)
+        wrapped(std::string("CoD Xe's settings (codxe.json) are written with each map") +
+                    (s_.codxe_start_map ? ", and the game starts the map converted last" : "") + ": see the advanced mode.",
+                &palette.note);
 }
 
 void App::action_row()
@@ -1680,6 +1713,59 @@ void App::options_panel()
         "iwds", s_.iwds, iwd_selected_, 3, "e.g. the PC game's main folder",
         [this] { return pick_folders(window_, L"Folders of PC .iwd files (e.g. the PC game's main folder)", true); },
         [this] { return pick_files(window_, L"PC .iwd files", {{L"IWD archives", L"*.iwd"}, {L"All files", L"*.*"}}, true); });
+
+    codxe_options();
+}
+
+void App::codxe_options()
+{
+    ImGui::Dummy(ImVec2(0, em() * 0.2f));
+    ImGui::PushFont(fonts.bold);
+    ImGui::SeparatorText("CoD Xe (codxe.json)");
+    ImGui::PopFont();
+    check("Write CoD Xe's settings with each map", &s_.codxe_settings,
+          "After each map converted, these settings go into codxe.json in the output's _codxe folder, which CoD Xe reads when the game "
+          "starts. The file's other settings stay as they are.");
+    ImGui::BeginDisabled(!s_.codxe_settings);
+    check("Start the map when the game starts", &s_.codxe_start_map,
+          "startup_command: the game goes straight into the map converted last, every time it starts, until this is turned off and the "
+          "settings written again (Write now, or the next map converted).");
+    ImGui::SameLine();
+    const char *commands[] = {"devmap", "map"};
+    int command = s_.codxe_start_command == "map" ? 1 : 0;
+    ImGui::SetNextItemWidth(std::max(em() * 5.5f, ImGui::GetContentRegionAvail().x));
+    ImGui::BeginDisabled(!s_.codxe_start_map);
+    if (ImGui::Combo("##startcommand", &command, commands, 2))
+        s_.codxe_start_command = commands[command];
+    tooltip("devmap: with cheats and developer commands, as the tests used; map: as the menus start it.");
+    ImGui::EndDisabled();
+    check("Console log (log_console)", &s_.codxe_log_console,
+          "The game's console and script errors go to the debug output: Xenia's xenia.log, or xbWatson on a console.");
+    check("Thread watch (thread_watch)", &s_.codxe_thread_watch,
+          "With the console log: logs the game's longjmps, and what each thread runs when the level or its loading stops making progress "
+          "(a map that hangs or crashes without an error).");
+    check("Dump the scripts (dump_rawfile)", &s_.codxe_dump_rawfile, "The scripts the game loads are written to _codxe\\dump.");
+    check("Dump the map's entities (dump_map_ents)", &s_.codxe_dump_map_ents, "The map's entity string is written to _codxe\\dump.");
+    field("Active mod", "The mod CoD Xe loads: a folder of _codxe\\t4\\mods, e.g. mod_menu. Empty: left as the file has it.");
+    ImGui::InputTextWithHint("##activemod", "unchanged", &s_.codxe_active_mod);
+    // where it goes, and whether settings there stay
+    std::error_code ec;
+    fs::path config = codxe_config_path(path_of(s_.output), s_.t4_layout);
+    if (s_.output.empty())
+        wrapped("Choose an output folder: codxe.json goes into its _codxe folder.", &palette.dim);
+    else if (fs::exists(config, ec))
+        wrapped(utf8_of(config) + " (its other settings are kept)", &palette.dim);
+    else
+        wrapped(utf8_of(config) + " is new: copied to the console, it replaces the codxe.json there (give the active mod you use).", &palette.warn);
+    const Job *j = find_job(selected_);
+    bool can = !s_.output.empty() && (!s_.codxe_start_map || j);
+    ImGui::BeginDisabled(!can);
+    if (ImGui::Button("Write now"))
+        write_codxe(j ? j->map_name : std::string());
+    ImGui::EndDisabled();
+    tooltip(s_.codxe_start_map ? "Writes these settings now, starting the selected map (" + (j ? j->map_name : std::string("select one")) + ")."
+                               : std::string("Writes these settings now; a startup command the file has is removed."));
+    ImGui::EndDisabled();
 }
 
 void App::popups()

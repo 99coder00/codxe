@@ -35,7 +35,15 @@ struct Value
     }
     int64_t integer_or(std::string_view key, int64_t fallback) const;
     std::string string_or(std::string_view key, std::string_view fallback) const;
+
+    // an object's key: replaced in its place, or added at the end
+    void set(std::string_view key, Value value);
+    bool erase(std::string_view key);
+    static Value of(bool b);
+    static Value of(const std::string &s);
 };
 
 Value parse(std::string_view text);
+// the value as text: two spaces an indent, each line ending in newline
+std::string dump(const Value &v, const std::string &newline = "\n");
 } // namespace t4ff::json
